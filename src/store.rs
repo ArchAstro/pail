@@ -75,7 +75,8 @@ impl Store {
     /// Open `file:///abs/dir`, `s3://bucket/prefix` or `gs://bucket/prefix`.
     ///
     /// S3 honours the standard `AWS_*` env vars (`AWS_ENDPOINT`, `AWS_ALLOW_HTTP`, ...).
-    /// GCS honours `GOOGLE_*` env vars; `PAIL_GCS_BASE_URL` points it at an emulator.
+    /// GCS honours `GOOGLE_*` env vars; `PAIL_GCS_TOKEN` supplies an OAuth token (e.g. from
+    /// `gcloud auth print-access-token`); `PAIL_GCS_BASE_URL` points it at an emulator.
     pub fn open(url: &str) -> Result<Store> {
         let parsed = url::Url::parse(url).with_context(|| format!("invalid store url {url}"))?;
         let prefix = parsed.path().trim_matches('/').to_string();
@@ -106,6 +107,9 @@ impl Store {
                 let mut b = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
                 if let Ok(base) = std::env::var("PAIL_GCS_BASE_URL") {
                     b = b.with_base_url(&base).with_bearer_token("emulator");
+                } else if let Ok(token) = std::env::var("PAIL_GCS_TOKEN") {
+                    // e.g. `PAIL_GCS_TOKEN=$(gcloud auth print-access-token)`
+                    b = b.with_bearer_token(token);
                 }
                 Ok(Store {
                     inner: Arc::new(b.build()?),

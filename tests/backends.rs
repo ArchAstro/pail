@@ -34,3 +34,50 @@ async fn cas_contract_on_configured_stores() {
         eprintln!("{url}: CAS contract ok");
     }
 }
+
+/// Concurrent writers on one branch of a real store: all disjoint commits must land.
+#[tokio::test]
+async fn concurrent_commits_on_configured_stores() {
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+    use pail::manifest::Kind;
+    use pail::repo::{CommitRequest, FileInput, Repo};
+    let Ok(urls) = std::env::var("PAIL_TEST_STORES") else { return };
+    for url in urls.split_whitespace() {
+        let run = format!("{url}/c{}", std::process::id());
+        let repo = Arc::new(Repo::with_store(Store::open(&run).unwrap(), None));
+        let req = |base, delta, msg: String| CommitRequest {
+            branch: "main".into(),
+            base,
+            delta,
+            author: "T <t@x>".into(),
+            author_date: "0 +0000".into(),
+            committer: "T <t@x>".into(),
+            committer_date: "0 +0000".into(),
+            message: msg,
+            meta: BTreeMap::new(),
+        };
+        let c0 = repo.commit(req(None, BTreeMap::new(), "init".into())).await.unwrap().commit;
+        let mut tasks = vec![];
+        for i in 0..16 {
+            let repo = repo.clone();
+            tasks.push(tokio::spawn(async move {
+                let input = FileInput { path: format!("w/{i}.txt"), kind: Kind::File, data: Bytes::from(format!("writer {i} ").repeat(20)) };
+                let e = repo.write_files(&[input], &HashMap::new()).await.unwrap().remove(0);
+                repo.commit(req(Some(c0), BTreeMap::from([(e.path.clone(), Some(e))]), format!("w{i}"))).await.unwrap()
+            }));
+        }
+        let mut attempts = vec![];
+        for t in tasks {
+            attempts.push(t.await.unwrap().attempts);
+        }
+        let (head, _) = repo.read_ref("main").await.unwrap().unwrap();
+        let c = repo.commit_obj(&head).await.unwrap();
+        assert_eq!((c.files, c.generation), (16, 16), "{url}");
+        let root = c.root;
+        let entries = repo.entries(root).await.unwrap();
+        let data = repo.read_files(&entries).await.unwrap();
+        assert!(data.iter().enumerate().all(|(_, d)| d.starts_with(b"writer ")));
+        eprintln!("{url}: 16 concurrent writers landed; max attempts {}", attempts.iter().max().unwrap());
+    }
+}

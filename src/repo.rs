@@ -22,8 +22,9 @@ use crate::store::{Cas, Store, Version};
 
 /// Requests in flight per operation.
 pub const PARALLELISM: usize = 64;
-/// Attempts before a contended commit gives up.
-pub const MAX_ATTEMPTS: u32 = 12;
+/// How long a contended commit keeps retrying before giving up. Time-based rather than
+/// attempt-based because stores differ: GCS allows ~1 write/s to one object, S3 far more.
+pub const COMMIT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// A path-level edit: `Some(entry)` upserts, `None` deletes.
 pub type Delta = BTreeMap<String, Option<Entry>>;
@@ -566,6 +567,7 @@ impl Repo {
         validate_branch(&req.branch)?;
         let base_root = self.root_of(req.base).await?;
         let mut attempts = 0;
+        let started = std::time::Instant::now();
         let mut pages_written = 0;
         loop {
             attempts += 1;
@@ -636,16 +638,17 @@ impl Repo {
                             });
                         }
                     }
-                    if attempts >= MAX_ATTEMPTS {
+                    if started.elapsed() >= COMMIT_DEADLINE {
                         return Err(e);
                     }
                 }
             }
-            if attempts >= MAX_ATTEMPTS {
-                bail!("gave up after {attempts} attempts: {} is too contended", req.branch);
+            if started.elapsed() >= COMMIT_DEADLINE {
+                bail!("gave up after {attempts} attempts in {:?}: {} is too contended", started.elapsed(), req.branch);
             }
-            let backoff = 20u64 * (1 << attempts.min(6)) + rand::random::<u64>() % 50;
-            tokio::time::sleep(Duration::from_millis(backoff)).await;
+            // Full jitter, capped: spreads contending writers out instead of synchronising them.
+            let cap = (50u64 << attempts.min(6)).min(2000);
+            tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % cap + 10)).await;
         }
     }
 }
