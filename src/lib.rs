@@ -1,6 +1,7 @@
 //! pail: a simple version control system that lives in an object store.
 
 pub mod enc;
+pub mod gitsrc;
 pub mod hash;
 pub mod manifest;
 pub mod objects;

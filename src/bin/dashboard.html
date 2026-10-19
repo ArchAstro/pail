@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pail mirror</title>
+<style>
+:root {
+  --bg: #f4f5f2; --surface: #fff; --fg: #1a1f1c; --muted: #5b6560; --line: #d9ddd5;
+  --accent: #1d5c86; --ok: #2f7a4b; --ok-soft: #e2f1e7; --bad: #b3361f; --bad-soft: #f8e1dc;
+  --warn: #9a6512; --warn-soft: #f7ecd8;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #121614; --surface: #1a1f1d; --fg: #e6e9e5; --muted: #9aa49e; --line: #2d3430;
+    --accent: #78b3dc; --ok: #7cc79a; --ok-soft: #18291f; --bad: #f08c78; --bad-soft: #341a15;
+    --warn: #e0b065; --warn-soft: #2e2416; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, -apple-system, sans-serif; padding: 24px max(16px, 3vw) 48px; }
+.wrap { max-width: 1280px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px; }
+h1 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
+h1 span { color: var(--muted); font-weight: 400; }
+.flow { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.flow b { color: var(--fg); font-weight: 600; }
+.banner { border-radius: 12px; padding: 16px 18px; display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; border: 1px solid var(--line); background: var(--surface); }
+.banner .big { font-size: 20px; font-weight: 650; }
+.banner.ok { background: var(--ok-soft); border-color: transparent; }
+.banner.ok .big { color: var(--ok); }
+.banner.bad { background: var(--bad-soft); border-color: transparent; }
+.banner.bad .big { color: var(--bad); }
+.banner.busy { background: var(--warn-soft); border-color: transparent; }
+.banner.busy .big { color: var(--warn); }
+.phase { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.tile .n { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+td.sha { font-family: var(--mono); }
+td.subj { white-space: normal; min-width: 260px; }
+.pill { display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
+.pill.ok { color: var(--ok); background: var(--ok-soft); }
+.pill.bad { color: var(--bad); background: var(--bad-soft); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 860px) { .two { grid-template-columns: 1fr; } }
+.err { font-family: var(--mono); font-size: 12px; color: var(--bad); padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.empty { color: var(--muted); padding: 12px 14px; }
+a { color: var(--accent); }
+.how { color: var(--muted); font-size: 13px; padding: 12px 14px; max-width: 80ch; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>pail mirror <span id="repo"></span></h1>
+    <div class="flow" id="flow"></div>
+  </header>
+  <div class="banner" id="banner"><span class="big" id="state">Connecting…</span><span class="phase" id="phase"></span></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="panel">
+    <h2>Forwarded commits (newest first)</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>#</th><th>Git</th><th>pail</th><th>Subject</th><th>Changed</th><th>Files</th><th>Uploaded</th><th>PUTs</th><th>Import</th><th>Prove</th><th>Lag</th><th>Byte-for-byte</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </div>
+  <div class="two">
+    <div class="panel">
+      <h2>Deep checks · cold <code>pail clone</code> vs Git objects</h2>
+      <div class="scroll"><table><thead><tr><th>Git</th><th>Files</th><th>Bytes</th><th>Time</th><th>Result</th></tr></thead><tbody id="deep"></tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>How each commit is proven</h2>
+      <div class="how">Using only data read back from the store, the harness hashes every file into a Git blob id, rebuilds the Git tree from the manifest, and rebuilds the Git commit from the pail commit's author, committer, dates, message and parents. The rebuilt commit id must equal the GitHub commit id. SHA-1 covers every byte, path, mode and header, so a match means the commit is modelled byte for byte.</div>
+      <div id="errors"></div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const bytes = (n) => n >= 1e9 ? (n/1e9).toFixed(2)+" GB" : n >= 1e6 ? (n/1e6).toFixed(1)+" MB" : n >= 1e3 ? (n/1e3).toFixed(0)+" KB" : n+" B";
+const ms = (n) => n >= 1000 ? (n/1000).toFixed(1)+"s" : n+"ms";
+const ago = (s) => { if (!s) return "–"; const d = Math.max(0, Math.round(Date.now()/1000 - s)); return d < 90 ? d+"s" : d < 5400 ? Math.round(d/60)+"m" : Math.round(d/3600)+"h"; };
+async function tick() {
+  let d;
+  try { d = await (await fetch("/api/status")).json(); } catch { $("state").textContent = "Harness not reachable"; $("banner").className = "banner bad"; return; }
+  $("repo").textContent = "· " + d.github + "@" + d.branch;
+  $("flow").innerHTML = `github.com/<b>${esc(d.github)}</b> → <b>${esc(d.store)}</b> refs/${esc(d.pail_branch)}`;
+  const t = d.totals;
+  let cls = "ok", state = `In sync · ${t.proven}/${t.commits} commits proven byte for byte`;
+  if (t.failed > 0 || d.deep_checks.some(x => !x.ok)) { cls = "bad"; state = `${t.failed} commit(s) did not reproduce`; }
+  else if (d.behind > 0) { cls = "busy"; state = `Forwarding · ${d.behind} commit(s) behind GitHub`; }
+  $("banner").className = "banner " + cls; $("state").textContent = state;
+  const next = d.next_fetch_at ? Math.max(0, d.next_fetch_at - Math.round(Date.now()/1000)) : 0;
+  $("phase").textContent = `${d.phase} · GitHub tip ${(d.github_tip||"").slice(0,10)} fetched ${ago(d.last_fetch_at)} ago` + (d.phase === "watching GitHub" ? ` · next fetch in ${next}s` : "");
+  const tiles = [
+    ["Commits forwarded", t.commits], ["Proven byte-for-byte", t.proven], ["Failures", t.failed],
+    ["Files in repo", (d.repo_files||0).toLocaleString()], ["Files changed", t.changed_files.toLocaleString()],
+    ["Uploaded", bytes(t.bytes_up)], ["PUT requests", t.puts.toLocaleString()], ["Contents read back", t.contents_checked.toLocaleString()],
+  ];
+  $("tiles").innerHTML = tiles.map(([l, n]) => `<div class="tile"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");
+  $("rows").innerHTML = d.recent.map(r => `<tr>
+    <td class="num">${r.seq}</td><td class="sha"><a href="https://github.com/${esc(d.github)}/commit/${r.git}" target="_blank" rel="noopener">${r.git.slice(0,10)}</a></td>
+    <td class="sha">${r.pail.slice(0,10)}</td><td class="subj">${esc(r.subject)}</td>
+    <td class="num">${r.changed}</td><td class="num">${r.files.toLocaleString()}</td><td class="num">${bytes(r.bytes_up)}</td><td class="num">${r.puts}</td>
+    <td class="num">${ms(r.import_ms)}</td><td class="num">${ms(r.verify_ms)}</td><td class="num">${r.committed_at ? ago(r.committed_at) : "–"}</td>
+    <td>${r.commit_match && r.tree_match ? '<span class="pill ok">✓ commit id matches</span>' : `<span class="pill bad">✗ ${esc(r.note)}</span>`}</td></tr>`).join("")
+    || `<tr><td colspan="12" class="empty">No commits forwarded yet.</td></tr>`;
+  $("deep").innerHTML = d.deep_checks.map(x => `<tr><td class="sha">${x.git.slice(0,10)}</td><td class="num">${x.files.toLocaleString()}</td><td class="num">${bytes(x.bytes)}</td><td class="num">${ms(x.ms)}</td>
+    <td>${x.ok ? '<span class="pill ok">✓ identical</span>' : `<span class="pill bad">✗ ${esc(x.detail)}</span>`}</td></tr>`).join("")
+    || `<tr><td colspan="5" class="empty">Runs after the first batch.</td></tr>`;
+  $("errors").innerHTML = d.errors.map(e => `<div class="err">${esc(e)}</div>`).join("");
+}
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>
