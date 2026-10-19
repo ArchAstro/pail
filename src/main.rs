@@ -45,6 +45,8 @@ enum Cmd {
     Diff { from: Option<String>, to: Option<String>, #[arg(long)] staged: bool },
     /// List files in a commit.
     Ls { rev: Option<String> },
+    /// Delete unreachable objects older than the grace period.
+    Gc { store: Option<String>, #[arg(long, default_value_t = 168.0)] grace_hours: f64, #[arg(long)] dry_run: bool },
     /// Print a file from a commit.
     Cat { path: String, #[arg(long)] rev: Option<String> },
 }
@@ -316,6 +318,24 @@ async fn run(cli: Cli) -> Result<()> {
             for e in wt.repo.entries(root).await? {
                 println!("{:?}\t{}\t{}", e.kind, e.size, e.path);
             }
+        }
+        Cmd::Gc { store, grace_hours, dry_run } => {
+            let repo = match store {
+                Some(s) => Repo::open(&s)?,
+                None => Worktree::open(&cwd()?)?.repo,
+            };
+            let r = pail::gc::gc(&repo, (grace_hours * 3600.0) as i64, dry_run).await?;
+            println!(
+                "live: {} commits, {} pages, {} packs, {} chunks; {} {} object(s), {}; kept {} young unreferenced",
+                r.live_commits,
+                r.live_pages,
+                r.live_packs,
+                r.live_chunks,
+                if dry_run { "would delete" } else { "deleted" },
+                r.deleted.len(),
+                fmt_bytes(r.bytes_freed),
+                r.kept_young
+            );
         }
         Cmd::Cat { path, rev } => {
             let wt = Worktree::open(&cwd()?)?;

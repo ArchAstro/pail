@@ -30,6 +30,12 @@ pub struct Version {
     pub version: Option<String>,
 }
 
+pub struct ObjInfo {
+    pub key: String,
+    pub size: u64,
+    pub modified: i64,
+}
+
 pub enum Cas {
     Ok(Version),
     Conflict,
@@ -218,6 +224,11 @@ impl Store {
 
     /// List keys under a prefix, relative to the store root, with sizes.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
+        Ok(self.list_meta(prefix).await?.into_iter().map(|o| (o.key, o.size)).collect())
+    }
+
+    /// List keys under a prefix with size and last-modified time (unix seconds).
+    pub async fn list_meta(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
         let p = self.path(prefix.trim_end_matches('/'));
         let strip = if self.prefix.is_empty() { 0 } else { self.prefix.len() + 1 };
         let items: Vec<_> = match self.inner.list(Some(&p)).try_collect().await {
@@ -225,12 +236,16 @@ impl Store {
             Err(object_store::Error::NotFound { .. }) => vec![],
             Err(e) => return Err(e.into()),
         };
-        let mut out: Vec<(String, u64)> = items
+        let mut out: Vec<ObjInfo> = items
             .into_iter()
-            .map(|m| (m.location.as_ref()[strip..].to_string(), m.size))
-            .filter(|(k, _)| !k.starts_with(".lock"))
+            .map(|m| ObjInfo {
+                key: m.location.as_ref()[strip..].to_string(),
+                size: m.size,
+                modified: m.last_modified.timestamp(),
+            })
+            .filter(|o| !o.key.starts_with(".lock") && !o.key.contains(".tmp"))
             .collect();
-        out.sort();
+        out.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(out)
     }
 }

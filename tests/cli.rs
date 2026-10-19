@@ -94,3 +94,30 @@ fn end_to_end_workflow() {
     assert_eq!(std::fs::metadata(c.join("run.sh")).unwrap().permissions().mode() & 0o777, 0o755);
     assert!(pail(&c, &["status"]).contains("clean"));
 }
+
+#[test]
+fn gc_removes_only_unreachable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "w"]);
+    let w = t.join("w");
+    write(&w.join("keep.txt"), &"k".repeat(500));
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "keep"]);
+    pail(&w, &["switch", "-c", "doomed"]);
+    write(&w.join("doomed.txt"), &"d".repeat(500));
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "doomed"]);
+    pail(&w, &["switch", "main"]);
+    // Young garbage survives the grace period; nothing reachable is ever deleted.
+    pail(&w, &["branch", "--delete", "doomed"]);
+    let out = pail(&w, &["gc"]);
+    assert!(out.contains("deleted 0 object(s)"), "{out}");
+    let out = pail(&w, &["gc", "--grace-hours", "0"]);
+    assert!(!out.contains("deleted 0 object(s)"), "{out}");
+    pail(&t, &["clone", &store, "after"]);
+    assert_eq!(std::fs::read_to_string(t.join("after/keep.txt")).unwrap(), "k".repeat(500));
+    assert!(!t.join("after/doomed.txt").exists());
+}
