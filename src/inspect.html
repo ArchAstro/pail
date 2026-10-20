@@ -41,7 +41,25 @@ body { background: var(--paper); color: var(--ink); font: 14px/1.5 var(--sans); 
 .mono { font-family: var(--mono); font-size: 0.88em; letter-spacing: -0.01em; }
 .muted { color: var(--muted); }
 
-.app { display: grid; grid-template-columns: minmax(0, 1fr) 380px; grid-template-rows: auto minmax(0, 1fr); height: 100vh; }
+.app { display: grid; grid-template-columns: 300px minmax(0, 1fr) 360px; grid-template-rows: auto minmax(0, 1fr); height: 100vh; }
+
+/* The logical side: the files and folders of one commit. */
+.logical { border-right: 1px solid var(--rule); background: var(--sheet); display: flex; flex-direction: column; min-height: 0; }
+.logical .lhead { padding: 14px 16px 10px; border-bottom: 1px solid var(--rule); }
+.logical .lhead .t { font-weight: 600; font-size: 13px; }
+.logical .lhead .s { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logical .note { color: var(--muted); font-size: 12.5px; padding: 8px 16px; border-bottom: 1px solid var(--rule); background: var(--paper); }
+.tree { overflow: auto; padding: 6px 6px 20px; flex: 1; }
+.row { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 3px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.row:hover { background: var(--paper); }
+.row .car { color: var(--faint); font-size: 10px; text-align: center; }
+.row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.file .nm { font-family: var(--mono); font-size: 12px; }
+.row .ct { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.row.in { background: var(--page-soft); }
+.row.in .ct { color: var(--page); }
+.row.part { box-shadow: inset 3px 0 0 var(--page); }
+.row.cur { outline: 1.5px solid var(--ink); outline-offset: -1.5px; }
 header { grid-column: 1 / -1; display: flex; align-items: center; gap: 18px; padding: 12px 18px; border-bottom: 1px solid var(--rule); background: var(--paper); z-index: 2; }
 .brand { font-weight: 700; font-size: 17px; letter-spacing: -0.02em; white-space: nowrap; }
 .brand span { font-weight: 400; color: var(--muted); }
@@ -56,7 +74,8 @@ button.primary { background: var(--ink); color: var(--paper); border-color: var(
 .plane { position: relative; overflow: hidden; cursor: grab; background-image: radial-gradient(var(--grid) 1px, transparent 1px); background-size: 22px 22px; }
 .plane.dragging { cursor: grabbing; }
 svg { width: 100%; height: 100%; display: block; user-select: none; }
-.col-label { font: 600 12px var(--sans); fill: var(--muted); }
+.col-label { font: 600 13px var(--sans); fill: var(--ink); }
+.col-what { font: 12px var(--sans); fill: var(--muted); }
 .col-rule { stroke: var(--rule); stroke-dasharray: 2 5; }
 .edge { fill: none; stroke-width: 1.4; opacity: 0.5; transition: opacity 120ms; }
 .edge.changed { stroke-dasharray: 4 4; }
@@ -77,6 +96,20 @@ svg { width: 100%; height: 100%; display: block; user-select: none; }
 .node.more text { fill: var(--muted); }
 @media (prefers-reduced-motion: reduce) { .node, #world { transition: none !important; } }
 
+.tour { position: absolute; left: 16px; top: 16px; width: min(430px, calc(100% - 32px)); background: var(--sheet); border: 1px solid var(--rule); border-radius: 14px; box-shadow: 0 10px 30px -12px rgba(20, 30, 45, 0.25); padding: 18px 20px 16px; z-index: 3; }
+.tour[hidden] { display: none; }
+.tour .step { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+.tour h2 { font-size: 19px; line-height: 1.25; letter-spacing: -0.015em; margin: 4px 0 8px; }
+.tour .body { font-size: 14px; line-height: 1.6; }
+.tour .body p { margin: 0 0 9px; }
+.tour .body code, .tour .body .mono { font-family: var(--mono); font-size: 12.5px; background: var(--wash); padding: 1px 5px; border-radius: 5px; }
+.tour .body pre { margin: 6px 0 10px; font: 12px/1.5 var(--mono); background: var(--paper); border: 1px solid var(--rule); border-radius: 9px; padding: 10px 12px; max-height: 190px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tour .nav { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.tour .nav .dots { display: flex; gap: 5px; margin-right: auto; }
+.tour .nav .dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--rule); }
+.tour .nav .dots i.on { background: var(--ink); }
+.tour .busy { color: var(--faint); font-size: 13px; }
+pre.raw { margin: 0; max-height: 260px; overflow: auto; font: 11.5px/1.5 var(--mono); background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hud { position: absolute; left: 14px; bottom: 14px; display: flex; gap: 6px; }
 .hint { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); background: var(--ink); color: var(--paper); padding: 7px 12px; border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 200ms; }
 .hint.on { opacity: 0.92; }
@@ -107,8 +140,10 @@ pre.preview { margin: 0; max-height: 360px; overflow: auto; font: 12px/1.55 var(
 .empty { color: var(--muted); font-size: 13.5px; }
 .error { color: var(--bad); }
 
+@media (max-width: 1180px) { .app { grid-template-columns: 260px minmax(0, 1fr) 300px; } }
 @media (max-width: 900px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) 42vh; }
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 30vh minmax(0, 1fr) 36vh; }
+  .logical { border-right: 0; border-bottom: 1px solid var(--rule); }
   aside { border-left: 0; border-top: 1px solid var(--rule); }
   .store, .legend { display: none; }
   .trace { flex-basis: 100%; }
@@ -121,14 +156,22 @@ pre.preview { margin: 0; max-height: 360px; overflow: auto; font: 12px/1.55 var(
   <header>
     <div class="brand">pail <span>inspect</span></div>
     <div class="store mono" id="store"></div>
+    <button id="learn">How it works</button>
     <form class="trace" id="trace">
       <input id="path" placeholder="Trace a file, e.g. services/rust/archdev/Cargo.toml" aria-label="File path to trace" autocomplete="off" spellcheck="false">
       <button class="primary" type="submit">Trace</button>
     </form>
   </header>
+  <nav class="logical" aria-label="Files of the commit">
+    <div class="lhead"><div class="t">What you see: files</div><div class="s" id="lsub"></div></div>
+    <div class="note" id="lnote">Click a folder to see the objects that store it. Click a page in the graph to see which files it holds.</div>
+    <div class="tree" id="tree"></div>
+  </nav>
   <div class="plane" id="plane">
     <svg id="svg" aria-label="Object graph"><g id="world"><g id="cols"></g><g id="edges"></g><g id="nodes"></g></g></svg>
     <div class="hint" id="hint"></div>
+    <section class="tour" id="tour" hidden aria-live="polite"><div class="step" id="tour-step"></div><h2 id="tour-title"></h2><div class="body" id="tour-body"></div>
+      <div class="nav"><div class="dots" id="tour-dots"></div><button id="tour-close">Close</button><button id="tour-back">Back</button><button class="primary" id="tour-next">Next</button></div></section>
     <div class="hud"><button id="fit">Fit</button><button id="reset">Start over</button></div>
     <div class="legend"><span><i style="background:var(--ref)"></i>branch</span><span><i style="background:var(--commit)"></i>commit</span><span><i style="background:var(--page)"></i>page</span><span><i style="background:var(--file)"></i>file</span><span><i style="background:var(--pack)"></i>pack</span><span><i style="background:var(--chunk)"></i>chunk</span><span><i class="dash"></i>changed by</span></div>
   </div>
@@ -157,7 +200,10 @@ async function api(path) {
 // ------------------------------------------------------------------ the graph model
 
 const G = { nodes: new Map(), edges: new Map(), sel: null, hover: null, maxLevel: 1, rev: null, overview: null, seq: 0 };
-const W = 216, H = 50, COLW = 268, GAP = 14;
+const W = 204, H = 50, COLW = 238, GAP = 14;
+// Only the layers in use get a column, packed left to right.
+let SLOTS = new Map();
+const xOf = (c) => 30 + (SLOTS.get(c) ?? c) * COLW;
 
 // Columns, left to right, follow how objects reference each other.
 function column(n) {
@@ -168,13 +214,26 @@ function column(n) {
   if (n.kind === "more" && n.parentKind === "pack") return 3 + G.maxLevel;
   return 4 + G.maxLevel;
 }
+// What each column holds, in two lines: a name and what it is for.
 function columnLabel(i) {
-  if (i === 0) return "Branches";
-  if (i === 1) return "Commits";
-  if (i < 2 + G.maxLevel) return `Manifest pages, level ${G.maxLevel - (i - 2)}`;
-  if (i === 2 + G.maxLevel) return "Leaf pages";
-  if (i === 3 + G.maxLevel) return "Files";
-  return "Packs and chunks";
+  if (i === 0) return ["Branches", "the only objects that change"];
+  if (i === 1) return ["Commits", "history, newest first"];
+  if (i === 2) return ["Snapshot roots", "one per commit: the whole tree"];
+  if (i < 2 + G.maxLevel) return ["Index pages", "split the paths into ranges"];
+  if (i === 2 + G.maxLevel) return ["File lists", "path, size and bytes of each file"];
+  if (i === 3 + G.maxLevel) return ["Files", "one entry per file"];
+  return ["Packs and chunks", "where the bytes are stored"];
+}
+
+// A page's slice of the filesystem, from the paths around it: "services/platform/…" when it
+// sits inside one directory, "docs → infra" when it spans several.
+function rangeLabel(lo, hi) {
+  const a = lo ? lo.split("/") : [], b = (hi || "").split("/");
+  if (!lo) return `start → ${b.slice(0, 1).join("/")}`;
+  let i = 0;
+  while (i < a.length - 1 && i < b.length - 1 && a[i] === b[i]) i++;
+  if (i >= 1) return a.slice(0, i).join("/") + "/…";
+  return `${a[0]} → ${b[0]}`;
 }
 
 function addNode(id, n) {
@@ -205,7 +264,7 @@ async function expand(n, opts = {}) {
     n.data = c;
     n.title = clip(c.message.split("\n")[0], 30);
     n.sub = when(c.committer_date);
-    const root = addNode("page:" + c.root, { kind: "page", hash: c.root, level: c.root_level, title: "Root page", sub: `level ${c.root_level}` });
+    const root = addNode("page:" + c.root, { kind: "page", hash: c.root, level: c.root_level, title: "Whole snapshot", sub: `all ${num(c.files)} files`, root: true });
     addEdge(n.id, root.id, "root", "root page");
     if (c.parent) addEdge(n.id, addCommit(c.parent).id, "parent", "parent");
     // The change list comes from the commit object itself, not from comparing manifests.
@@ -214,18 +273,16 @@ async function expand(n, opts = {}) {
     const p = await api("/api/page/" + n.hash);
     n.data = p;
     if (p.kind === "node") {
-      if (n.title !== "Root page") n.title = `Page, level ${p.level}`;
-      n.sub = `${plural(p.children.length, "child")}, ${bytes(p.stored)}`;
       let prev = null;
       for (const ch of p.children) {
-        const last = ch.key.split("/").slice(-1)[0];
-        const c = addNode("page:" + ch.hash, { kind: "page", hash: ch.hash, level: p.level - 1, title: p.level - 1 === 0 ? "Leaf page" : `Page, level ${p.level - 1}`, sub: `${plural(ch.files, "file")}, to ${clip(last, 16)}`, range: [prev, ch.key] });
-        addEdge(n.id, c.id, "child", "child");
+        const leaf = p.level - 1 === 0;
+        const c = addNode("page:" + ch.hash, { kind: "page", hash: ch.hash, level: p.level - 1, title: rangeLabel(prev, ch.key), sub: `${plural(ch.files, "file")}${leaf ? "" : `, in ${bytes(ch.bytes)}`}`, range: [prev, ch.key] });
+        addEdge(n.id, c.id, "child", "covers");
         prev = ch.key;
       }
     } else {
-      n.title = "Leaf page";
-      n.sub = `${plural(p.entries.length, "entry")}, ${bytes(p.stored)}`;
+      if (p.entries.length) n.title = rangeLabel(p.entries[0].path, p.entries[p.entries.length - 1].path);
+      n.sub = `${plural(p.entries.length, "file")}, page of ${bytes(p.stored)}`;
       const shown = n.shown || 0;
       const next = p.entries.slice(shown, shown + BATCH);
       for (const e of next) addEdge(n.id, addEntry(e).id, "entry", "entry");
@@ -274,16 +331,17 @@ function setMore(owner, remaining, what) {
 // as straight as they can; nodes then stack without overlapping.
 function layout() {
   const cols = new Map();
+  SLOTS = new Map([...new Set([...G.nodes.values()].map(column))].sort((a, b) => a - b).map((c, i) => [c, i]));
   for (const n of G.nodes.values()) {
     const c = column(n);
-    n.x = 40 + c * COLW;
+    n.x = xOf(c);
     if (!cols.has(c)) cols.set(c, []);
     cols.get(c).push(n);
   }
   const linked = new Map();
   const link = (a, b) => { if (!linked.has(a)) linked.set(a, []); linked.get(a).push(b); };
   for (const e of G.edges.values()) { link(e.to, e.from); link(e.from, e.to); }
-  const top = 70;
+  const top = 76;
   for (const c of [...cols.keys()].sort((a, b) => a - b)) {
     const list = cols.get(c);
     const want = (n) => {
@@ -312,15 +370,17 @@ function draw() {
   const cols = $("#cols"), edges = $("#edges"), nodes = $("#nodes");
   const used = new Set([...G.nodes.values()].map(column));
   const maxY = Math.max(400, ...[...G.nodes.values()].map((n) => n.y + H)) + 40;
-  cols.innerHTML = [...used].sort((a, b) => a - b).map((c) => `<text class="col-label" x="${40 + c * COLW}" y="46">${esc(columnLabel(c))}</text><line class="col-rule" x1="${40 + c * COLW - 18}" y1="30" x2="${40 + c * COLW - 18}" y2="${maxY}"/>`).join("");
+  cols.innerHTML = [...used].sort((a, b) => a - b).map((c) => { const [name, what] = columnLabel(c); return `<text class="col-label" x="${xOf(c)}" y="38">${esc(name)}</text><text class="col-what" x="${xOf(c)}" y="54">${esc(what)}</text><line class="col-rule" x1="${xOf(c) - 16}" y1="24" x2="${xOf(c) - 16}" y2="${maxY}"/>`; }).join("");
   // Hover fades what isn't linked; a selection only lights up its own edges.
   const focus = G.hover || G.sel;
-  const fade = G.hover;
+  const fade = G.hover || (G.spot ? "spot" : null);
   const near = new Set();
-  if (focus) { near.add(focus); for (const e of G.edges.values()) { if (e.from === focus) near.add(e.to); if (e.to === focus) near.add(e.from); } }
+  if (G.hover) { near.add(G.hover); for (const e of G.edges.values()) { if (e.from === G.hover) near.add(e.to); if (e.to === G.hover) near.add(e.from); } }
+  else if (G.spot) for (const id of G.spot) near.add(id);
   edges.innerHTML = [...G.edges.values()].map((e) => {
     const a = G.nodes.get(e.from), b = G.nodes.get(e.to);
     if (!a || !b) return "";
+    if (e.kind === "changed" && e.from !== G.sel && e.from !== G.hover && !(G.spot && G.spot.has(e.from) && G.spot.has(e.to))) return "";
     const same = column(a) === column(b);
     let d;
     if (same) { // parent links run down the commit column
@@ -331,7 +391,8 @@ function draw() {
       d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
     }
     const tone = e.kind === "changed" || e.kind === "parent" || e.kind === "ref" ? "commit" : b.kind;
-    const cls = ["edge", e.kind === "changed" ? "changed" : "", focus && (e.from === focus || e.to === focus) ? "hot" : fade ? "dim" : ""].join(" ");
+    const lit = G.hover ? e.from === G.hover || e.to === G.hover : G.spot ? G.spot.has(e.from) && G.spot.has(e.to) : focus && (e.from === focus || e.to === focus);
+    const cls = ["edge", e.kind === "changed" ? "changed" : "", lit ? "hot" : fade ? "dim" : ""].join(" ");
     return `<path class="${cls}" d="${d}" stroke="${color(tone)}"><title>${esc(e.label || e.kind)}</title></path>`;
   }).join("");
   // Objects referenced from more than one place: the structural sharing the hashes give.
@@ -355,9 +416,9 @@ function draw() {
     g.setAttribute("class", ["node", n.kind === "more" ? "more" : "", G.sel === n.id ? "sel" : "", fade && !near.has(n.id) ? "dim" : ""].join(" "));
     g.setAttribute("aria-label", `${n.kind} ${n.title}`);
     const expandable = n.kind !== "more" && n.kind !== "chunk" && !n.expanded;
-    const line2 = n.hash ? `<text class="id" x="14" y="38">${esc(short(n.hash))}</text>${n.sub ? `<text class="sub" x="96" y="38">${esc(clip(n.sub, 19))}</text>` : ""}` : `<text class="sub" x="14" y="38">${esc(clip(n.sub, 32))}</text>`;
+    const line2 = n.hash ? `<text class="id" x="14" y="38">${esc(short(n.hash))}</text>${n.sub ? `<text class="sub" x="94" y="38">${esc(clip(n.sub, 17))}</text>` : ""}` : `<text class="sub" x="14" y="38">${esc(clip(n.sub, 30))}</text>`;
     g.innerHTML = `<rect class="body" width="${W}" height="${H}" rx="9"/><rect width="4" height="${H - 16}" x="0" y="8" rx="2" fill="${color(n.kind)}"/>
-      <text x="14" y="20">${esc(clip(n.title, 27))}</text>${line2}${expandable ? `<text class="badge" x="${W - 18}" y="21">+</text>` : ""}
+      <text x="14" y="20">${esc(clip(n.title, 25))}</text>${line2}${expandable ? `<text class="badge" x="${W - 18}" y="21">+</text>` : ""}
       ${(indeg.get(n.id) || 0) > 1 ? `<rect class="share" x="${W - 84}" y="-9" width="72" height="18" rx="9"/><text class="share" x="${W - 48}" y="4" text-anchor="middle">shared by ${indeg.get(n.id)}</text>` : ""}`;
     g.style.transform = `translate(${n.x}px, ${n.y}px)`;
   }
@@ -375,6 +436,22 @@ function fit() {
   view.x = Math.max(0, (r.width - (x1 - x0) * view.k) / 2) - x0 * view.k;
   view.y = 0;
   applyView();
+}
+
+// Frame a set of objects: the whole of it when it fits at 60% or more, else its start.
+function fitTo(ids) {
+  const ns = [...ids].map((id) => G.nodes.get(id)).filter((n) => n && n.y != null);
+  if (!ns.length) return;
+  const x0 = Math.min(...ns.map((n) => n.x)) - 24, x1 = Math.max(...ns.map((n) => n.x + W)) + 24;
+  const y0 = Math.min(...ns.map((n) => n.y)) - 70, y1 = Math.max(...ns.map((n) => n.y + H)) + 24;
+  const r = $("#plane").getBoundingClientRect();
+  view.k = Math.max(0.72, Math.min(1, r.width / (x1 - x0), r.height / (y1 - y0)));
+  view.x = Math.max(0, (r.width - (x1 - x0) * view.k) / 2) - x0 * view.k;
+  view.y = -Math.max(0, y0) * view.k;
+  const w = $("#world");
+  w.style.transition = "transform 380ms cubic-bezier(.2,.8,.2,1)";
+  applyView();
+  setTimeout(() => (w.style.transition = ""), 420);
 }
 
 function centerOn(n) {
@@ -399,6 +476,20 @@ function hint(text) {
 async function select(n) {
   G.sel = n.id;
   draw();
+  // Physical → logical: a commit shows its files; a page shows which of them it holds.
+  if (n.kind === "commit") { setLogicalCommit(n.hash, n.data ? n.data.message.split("\n")[0] : ""); L.range = null; }
+  if (n.kind === "page") {
+    L.range = n.root ? [null, "\u{10FFFF}"] : n.range || (n.data?.entries?.length ? [null, n.data.entries[n.data.entries.length - 1].path] : null);
+    if (L.range) {
+      // Open the folders the range starts in, so the lit rows are visible.
+      const first = n.data?.entries?.[0]?.path || (L.range[0] ? L.range[0] : null);
+      if (first) { const parts = first.split("/"); for (let i = 1; i < parts.length; i++) { const d = parts.slice(0, i).join("/"); L.open.add(d); await loadDir(d).catch(() => {}); } }
+      $("#lnote").innerHTML = n.root ? "The snapshot root holds every file of the commit." : `This page holds the files from <span class="mono">${esc(L.range[0] ? L.range[0] : "the start")}</span> (exclusive) to <span class="mono">${esc(L.range[1])}</span>: highlighted below.`;
+    }
+    renderTree();
+    const lit = $("#tree .row.file.in") || $("#tree .row.in") || $("#tree .row.part");
+    if (lit) lit.scrollIntoView({ block: "center" });
+  } else renderTree();
   const side = $("#side");
   const head = (k, label, title) => `<span class="kind k-${k}">${label}</span><h2>${title}</h2>`;
   try {
@@ -416,7 +507,8 @@ async function select(n) {
     } else if (n.kind === "page") {
       const p = n.data || await api("/api/page/" + n.hash);
       n.data = p;
-      side.innerHTML = head("page", "manifest page", p.kind === "node" ? `Page, level ${p.level}` : "Leaf page") + `<p class="what">${p.kind === "node" ? "Part of the manifest tree. Each child covers a range of paths; pages split where the paths say so, so an unchanged range keeps its page and every commit that has it points at the same object." : "The bottom of the manifest: one entry per file, in path order, each naming the file's content hash and where its bytes are."}</p>
+      const role = n.root ? "Snapshot root" : p.kind === "node" ? "Index page" : "File list";
+      side.innerHTML = head("page", "manifest page", `${role}: <span class="mono">${esc(n.title)}</span>`) + `<p class="what">${n.root ? "The top of one commit's file tree. Its children split all the paths, sorted as text, into ranges; follow them down to reach any file." : p.kind === "node" ? "A table of contents for one stretch of paths: each child covers the paths up to the last one it lists. An index page is an object like any other, so when nothing in its range changes, the next commit points at this same page." : "A list of files in path order. For each it records the size, the content hash, and where the bytes are: inline, a range of a pack, or chunks."}</p>
         <dl class="facts"><dt>Object</dt><dd class="mono">pages/${short(p.hash)}…</dd><dt>Stored</dt><dd>${bytes(p.stored)}</dd><dt>${p.kind === "node" ? "Children" : "Entries"}</dt><dd>${num((p.children || p.entries).length)}</dd>
         ${n.range ? `<dt>Paths</dt><dd class="mono">${esc(n.range[0] ?? "the start")} to ${esc(n.range[1])}</dd>` : ""}</dl>`;
     } else if (n.kind === "file") {
@@ -439,6 +531,13 @@ async function select(n) {
     } else if (n.kind === "chunk") {
       side.innerHTML = head("chunk", "chunk", "Chunk " + short(n.hash)) + `<p class="what">A piece of a large file. Boundaries follow the content, so an edit changes only the chunks it touches.</p><dl class="facts"><dt>Object</dt><dd class="mono">chunks/${short(n.hash)}…</dd><dt>Size</dt><dd>${esc(n.sub)}</dd></dl>`;
     }
+    if (n.kind === "ref" || n.kind === "commit") {
+      const key = n.kind === "ref" ? "refs/" + n.title : "commits/" + n.hash;
+      try {
+        const r = await api("/api/raw?key=" + encodeURIComponent(key));
+        if (G.sel === n.id) side.insertAdjacentHTML("beforeend", `<h3>Stored object, ${bytes(r.bytes)}</h3><pre class="raw">${esc(pretty(r.text))}${r.truncated ? "\n…" : ""}</pre>`);
+      } catch {}
+    }
     const out = [...G.edges.values()].filter((e) => e.from === n.id || e.to === n.id);
     if (out.length && n.kind !== "more") {
       side.insertAdjacentHTML("beforeend", `<h3>Linked objects</h3><div class="refs">${out.slice(0, 60).map((e) => { const t = G.nodes.get(e.from === n.id ? e.to : e.from); return t ? `<button data-go="${esc(t.id)}"><span>${esc(clip(t.title, 32))}</span><span>${esc(e.from === n.id ? e.label || e.kind : "from " + t.kind)}</span></button>` : ""; }).join("")}</div>`);
@@ -452,6 +551,7 @@ async function select(n) {
 // ------------------------------------------------------------------ actions
 
 async function activate(n) {
+  if (n.kind === "more" && !n.owner) return;
   if (n.kind === "more" || !n.expanded) {
     try { await expand(n); } catch (err) { hint(err.message); }
     draw();
@@ -470,7 +570,8 @@ async function trace(path, rev) {
   if (!c.expanded) await expand(c, { changes: false });
   let prev = c;
   for (const s of f.spine) {
-    const p = addNode("page:" + s.hash, { kind: "page", hash: s.hash, level: s.level, title: s.level === 0 ? "Leaf page" : `Page, level ${s.level}`, sub: plural(s.children, s.level === 0 ? "entry" : "child") });
+    const isRoot = prev.kind === "commit";
+    const p = addNode("page:" + s.hash, isRoot ? { kind: "page", hash: s.hash, level: s.level, root: true } : { kind: "page", hash: s.hash, level: s.level, title: rangeLabel(s.range[0], s.range[1]), sub: s.level === 0 ? plural(s.children, "file") : `${plural(s.files || 0, "file")}` });
     addEdge(prev.id, p.id, prev.kind === "commit" ? "root" : s.level === 0 && prev.kind === "page" ? "child" : "child", "child");
     prev = p;
   }
@@ -479,12 +580,14 @@ async function trace(path, rev) {
   if (!fn.expanded) await expand(fn);
   draw();
   select(fn);
-  centerOn(fn);
+  const chain = ["commit:" + f.commit, ...f.spine.map((s) => "page:" + s.hash), fn.id, ...[...G.edges.values()].filter((e) => e.from === fn.id).map((e) => e.to)];
+  spot(chain); draw();
+  fitTo(chain);
   hint(`${plural(f.spine.length, "page")} lead from the commit to ${path.split("/").pop()}`);
 }
 
-async function start() {
-  G.nodes.clear(); G.edges.clear(); G.sel = null; G.maxLevel = 1;
+async function start(selectTip = true) {
+  G.nodes.clear(); G.edges.clear(); G.sel = null; G.maxLevel = 1; G.spot = null;
   $("#nodes").innerHTML = "";
   const o = G.overview;
   for (const r of o.refs) {
@@ -497,8 +600,311 @@ async function start() {
   if (tip) { await expand(tip); const root = G.nodes.get("page:" + tip.data.root); if (root) await expand(root); }
   draw();
   fit();
-  if (tip) select(tip);
+  if (tip) await setLogicalCommit(tip.hash, tip.data.message.split("\n")[0]);
+  if (tip && selectTip) select(tip);
 }
+
+// ------------------------------------------------------------------ the logical side
+
+const L = { rev: null, subject: "", open: new Set([""]), items: new Map(), range: null, cur: null };
+
+async function setLogicalCommit(hash, subject) {
+  if (L.rev === hash) return;
+  L.rev = hash; L.subject = subject || ""; L.items.clear(); L.range = null;
+  $("#lsub").textContent = `at ${short(hash)}${subject ? ", " + subject : ""}`;
+  await loadDir("");
+  for (const d of [...L.open]) if (d) await loadDir(d).catch(() => L.open.delete(d));
+  renderTree();
+}
+
+async function loadDir(dir) {
+  if (L.items.has(dir)) return L.items.get(dir);
+  const t = await api(`/api/tree?path=${encodeURIComponent(dir)}&rev=${L.rev}`);
+  L.items.set(dir, t.items || []);
+  return t.items || [];
+}
+
+// Is a path, or any path under a folder, inside the selected page's range (lo, hi]?
+function inRange(item) {
+  if (!L.range) return 0;
+  const [lo, hi] = L.range;
+  if (item.kind !== "dir") return (lo == null || item.path > lo) && item.path <= hi ? 2 : 0;
+  const a = item.path + "/", b = item.path + "0";
+  const after = lo == null || lo < a, before = hi >= b;
+  if (after && before) return 2; // the whole folder
+  return (lo == null || lo < b) && hi >= a ? 1 : 0; // part of it
+}
+
+function renderTree() {
+  const rows = [];
+  const walk = (dir, depth) => {
+    for (const it of L.items.get(dir) || []) {
+      const r = inRange(it);
+      const isDir = it.kind === "dir";
+      const open = isDir && L.open.has(it.path);
+      const dot = isDir ? "" : it.loc?.type === "pack" ? "pack" : it.loc?.type === "chunks" ? "chunk" : "faint";
+      rows.push(`<div class="row ${isDir ? "dir" : "file"} ${r === 2 ? "in" : r === 1 ? "part" : ""} ${L.cur === it.path ? "cur" : ""}" data-path="${esc(it.path)}" data-kind="${it.kind}" style="padding-left:${8 + depth * 14}px" role="treeitem" tabindex="0" ${isDir ? `aria-expanded="${open}"` : ""}>
+        <span class="car">${isDir ? `<svg width="10" height="10" viewBox="0 0 10 10" style="transform:rotate(${open ? 90 : 0}deg);transition:transform 120ms"><path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="var(--muted)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>` : `<svg width="8" height="8"><circle cx="4" cy="4" r="3.5" fill="var(--${dot})"/></svg>`}</span><span class="nm">${esc(it.name)}${isDir ? "/" : ""}</span><span class="ct">${isDir ? num(it.files) : bytes(it.size)}</span></div>`);
+      if (open) walk(it.path, depth + 1);
+    }
+  };
+  walk("", 0);
+  $("#tree").innerHTML = rows.join("") || `<p class="empty" style="padding:10px">This commit has no files.</p>`;
+  const cur = $("#tree .row.cur");
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+async function onTreeClick(row) {
+  const path = row.dataset.path;
+  L.cur = path;
+  if (row.dataset.kind === "dir") {
+    if (L.open.has(path)) L.open.delete(path); else { L.open.add(path); await loadDir(path); }
+    renderTree();
+    await showFolder(path);
+  } else {
+    renderTree();
+    $("#lnote").textContent = `Following ${path.split("/").pop()} from the commit down to its bytes.`;
+    await trace(path, L.rev);
+  }
+}
+
+// Logical → physical: the pages and storage objects behind a folder.
+async function showFolder(dir) {
+  const cv = await api(`/api/cover?path=${encodeURIComponent(dir)}&rev=${L.rev}`);
+  // A focused view: only this folder's chain, so its objects aren't lost among others.
+  G.nodes.clear(); G.edges.clear(); G.sel = null; G.maxLevel = 1; $("#nodes").innerHTML = "";
+  const ids = [];
+  for (const p of cv.pages) {
+    const isRoot = !p.parent;
+    const n = addNode("page:" + p.hash, isRoot ? { kind: "page", hash: p.hash, level: p.level, root: true, title: "Whole snapshot", sub: "all files" } : { kind: "page", hash: p.hash, level: p.level, title: rangeLabel(p.range[0], p.range[1]), sub: plural(p.files, "file"), range: p.range });
+    if (p.parent) addEdge("page:" + p.parent, n.id, "child", "covers");
+    ids.push(n.id);
+  }
+  const stored = cv.storage.filter((s) => s.kind !== "inline");
+  const shown = stored.slice(0, 8);
+  for (const s of shown) {
+    const id = s.kind + ":" + s.hash;
+    addNode(id, { kind: s.kind, hash: s.hash, title: s.kind === "pack" ? "Pack" : "Chunk", sub: `${plural(s.files, "file")} from here` });
+    for (const leaf of s.leaves) if (G.nodes.has("page:" + leaf)) addEdge("page:" + leaf, id, "stores", `${plural(s.files, "file")}`);
+    ids.push(id);
+  }
+  if (stored.length > shown.length) {
+    const rest = stored.slice(shown.length);
+    const m = addNode("more:storage", { kind: "more", parentKind: "storage", title: `${num(rest.length)} more ${rest.every((x) => x.kind === "pack") ? "packs" : "objects"}`, sub: `${plural(rest.reduce((a, x) => a + x.files, 0), "file")}, listed on the right` });
+    for (const leaf of new Set(rest.flatMap((x) => x.leaves))) if (G.nodes.has("page:" + leaf)) addEdge("page:" + leaf, m.id, "stores", "more");
+    ids.push(m.id);
+  }
+  G.spot = null;
+  draw();
+  const leafCount = cv.pages.filter((p) => p.level === 0).length;
+  const index = cv.pages.length - leafCount - 1;
+  const packs = cv.storage.filter((s) => s.kind === "pack").length, chunks = cv.storage.filter((s) => s.kind === "chunk").length;
+  const inline = cv.storage.find((s) => s.kind === "inline");
+  const name = dir || "the whole repository";
+  $("#lnote").innerHTML = `<b>${esc(name)}</b>: ${plural(cv.files, "file")} in ${plural(leafCount, "file list")}${index > 0 ? `, reached through ${plural(index, "index page")}` : ""}; bytes in ${plural(packs, "pack")}${chunks ? ` and ${plural(chunks, "chunk")}` : ""}${inline ? `, ${num(inline.files)} small enough to sit inline` : ""}.`;
+  const side = $("#side");
+  side.innerHTML = `<span class="kind k-page">folder</span><h2 class="mono">${esc(name)}${dir ? "/" : ""}</h2>
+    <p class="what">A folder isn't an object in pail. The manifest sorts every path as text, so a folder is simply a run of neighbouring paths; whichever pages cover that run hold it.</p>
+    <dl class="facts"><dt>Files</dt><dd>${num(cv.files)}</dd><dt>File lists</dt><dd>${num(leafCount)} leaf page${leafCount === 1 ? "" : "s"}</dd><dt>Index pages</dt><dd>${num(Math.max(index, 0))}, plus the snapshot root</dd><dt>Packs</dt><dd>${num(packs)}</dd><dt>Chunks</dt><dd>${num(chunks)}</dd><dt>Inline</dt><dd>${num(inline?.files || 0)} files</dd></dl>
+    ${stored.length ? `<h3>Where its bytes are</h3><div class="refs">${stored.slice(0, 60).map((s) => `<button data-go="${esc(s.kind + ":" + s.hash)}"><span>${s.kind} ${short(s.hash)}</span><span>${plural(s.files, "file")}, ${bytes(s.bytes)}</span></button>`).join("")}</div>` : ""}`;
+  side.querySelectorAll("[data-go]").forEach((b) => b.onclick = async () => {
+    let t = G.nodes.get(b.dataset.go);
+    if (!t) { const [kind, hash] = b.dataset.go.split(":"); t = addNode(b.dataset.go, { kind, hash, title: kind === "pack" ? "Pack" : "Chunk" }); draw(); }
+    select(t); centerOn(t);
+  });
+  fitTo(ids);
+}
+
+$("#tree").addEventListener("click", (e) => { const r = e.target.closest(".row"); if (r) onTreeClick(r); });
+$("#tree").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { const r = e.target.closest(".row"); if (r) { e.preventDefault(); onTreeClick(r); } } });
+
+// ------------------------------------------------------------------ the tour
+
+// Pretty-print stored JSON for reading, keeping long values short.
+function pretty(text) {
+  try {
+    const v = JSON.parse(text);
+    if (v.changes && typeof v.changes === "object") {
+      const keys = Object.keys(v.changes);
+      if (keys.length > 3) { const kept = {}; keys.slice(0, 3).forEach((k) => (kept[k] = v.changes[k])); kept[`… ${keys.length - 3} more`] = "…"; v.changes = kept; }
+    }
+    if (typeof v.message === "string" && v.message.length > 200) v.message = v.message.slice(0, 200) + "…";
+    return JSON.stringify(v, null, 2);
+  } catch { return text; }
+}
+
+const T = { i: 0, ctx: null };
+const spot = (...ids) => { G.spot = new Set(ids.flat().filter(Boolean)); };
+const byKind = (k) => [...G.nodes.values()].filter((n) => n.kind === k);
+
+// Facts the tour quotes, gathered from this repository once.
+async function tourContext() {
+  if (T.ctx) return T.ctx;
+  const o = G.overview;
+  const ref = o.refs.find((r) => r.name === o.default_branch) || o.refs[0];
+  const tip = await api("/api/commit/" + ref.commit);
+  const root = await api("/api/page/" + tip.root);
+  const refRaw = await api("/api/raw?key=" + encodeURIComponent("refs/" + ref.name));
+  const commitRaw = await api("/api/raw?key=" + encodeURIComponent("commits/" + tip.id));
+  const sample = (tip.changes || []).find((c) => c.new && c.new.loc.type === "pack")?.new.path || "README.md";
+  T.ctx = { o, ref, tip, root, refRaw, commitRaw, sample };
+  return T.ctx;
+}
+
+const STEPS = [
+  {
+    title: "A branch is one small file that changes",
+    async run(c) {
+      await start(false);
+      const r = G.nodes.get("ref:" + c.ref.name);
+      spot(r.id); await select(r);
+      return `<p>Everything in the store is immutable except branches. The branch <code>${esc(c.ref.name)}</code> is the object <code>refs/${esc(c.ref.name)}</code>, and this is all of it:</p>
+        <pre>${esc(c.refRaw.text)}</pre>
+        <p>Committing writes new objects first, then moves this file with a compare-and-swap: the store accepts the write only if the branch still points where the writer last saw it. That single write is what publishes a commit.</p>`;
+    },
+  },
+  {
+    title: "A commit is named by the hash of its bytes",
+    async run(c) {
+      const n = G.nodes.get("commit:" + c.tip.id);
+      spot("ref:" + c.ref.name, n.id); await select(n);
+      return `<p>The branch points at commit <code>${short(c.tip.id)}</code>. Its name is the BLAKE3 hash of its own ${bytes(c.commitRaw.bytes)} of JSON, so it can never change: any edit would make a different object.</p>
+        <pre>${esc(pretty(c.commitRaw.text))}</pre>
+        <p>Three fields carry the structure: <code>parent</code> (history is a single line), <code>root</code> (the snapshot), and <code>changes</code> (what this commit changed).</p>`;
+    },
+  },
+  {
+    title: "The snapshot root is the whole tree",
+    async run(c) {
+      const n = G.nodes.get("page:" + c.tip.root);
+      spot("commit:" + c.tip.id, n.id); await select(n);
+      return `<p>Every file in the commit, ${num(c.tip.files)} of them (${bytes(c.tip.bytes)}), sits under this one page. The manifest is a tree over all paths sorted as strings, so a directory is just a run of neighbouring paths.</p>
+        <p>The folders on the left are not stored anywhere. pail keeps one long list of paths, split into <b>file lists</b>, with <b>index pages</b> above them saying which paths each list covers. A folder is just a run of neighbouring paths; click one on the left to see which lists hold it.</p>
+        <p>Pages split where a path's hash says to, not at fixed sizes. So editing one file leaves almost every page byte-identical, and identical pages are the same object.</p>`;
+    },
+  },
+  {
+    title: "Index pages split the paths into ranges",
+    async run(c) {
+      const root = G.nodes.get("page:" + c.tip.root);
+      if (!root.expanded) await expand(root);
+      draw();
+      const kids = c.root.children || [];
+      spot(root.id, kids.map((k) => "page:" + k.hash)); await select(G.nodes.get("page:" + kids[0].hash) || root);
+      return `<p>The root has ${plural(kids.length, "child")}. Each child records the last path it covers, the files and bytes under it, and its hash:</p>
+        <pre>${esc(kids.map((k) => `${short(k.hash)}  up to ${k.key}\n            ${num(k.files)} files, ${bytes(k.bytes)}`).join("\n"))}</pre>
+        <p>Finding a file means comparing its path with these last paths and following one child per level: a handful of page reads for any of the ${num(c.tip.files)} files. Select a page in the graph and the files it covers light up on the left.</p>`;
+    },
+  },
+  {
+    title: "File lists hold the files",
+    async run(c) {
+      await trace(c.sample, c.tip.id);
+      const f = await api(`/api/file?path=${encodeURIComponent(c.sample)}&rev=${c.tip.id}`);
+      T.file = f;
+      const ids = ["commit:" + c.tip.id, ...f.spine.map((s) => "page:" + s.hash), fileId(f.entry)];
+      spot(ids); draw();
+      const leaf = f.spine[f.spine.length - 1];
+      const e = f.entry;
+      return `<p>Following <code>${esc(c.sample)}</code> takes ${plural(f.spine.length, "page")}: the snapshot root, then ${f.spine.length - 2 > 0 ? plural(f.spine.length - 2, "index page") + ", then " : ""}a file list. That list holds ${plural(leaf.children, "file")}; this one is number ${num(leaf.index + 1)}. Its entry says:</p>
+        <pre>path      ${esc(e.path)}\nkind      ${e.kind}\nsize      ${num(e.size)} bytes\ncontent   ${short(e.hash)}… (BLAKE3 of the bytes)\nbytes at  ${e.loc.type === "pack" ? `pack ${short(e.loc.pack)}…, offset ${num(e.loc.off)}, length ${num(e.loc.len)}` : e.loc.type}</pre>
+        <p>The content hash identifies the file's bytes everywhere; the location says how to fetch them.</p>`;
+    },
+  },
+  {
+    title: "Where the bytes live",
+    async run(c) {
+      const f = T.file;
+      const e = f.entry;
+      const pack = e.loc.type === "pack" ? "pack:" + e.loc.pack : null;
+      spot(fileId(e), pack); if (pack) { await select(G.nodes.get(pack)); centerOn(G.nodes.get(pack)); }
+      return `<p>Files are stored one of three ways, chosen by size:</p>
+        <p><b>Inline</b>, 64 bytes or less: inside the leaf entry itself, no extra request.</p>
+        <p><b>Packed</b>, up to 1 MB: compressed on its own and appended to a pack with the other files written in the same commit, in path order. ${pack ? `This one is ${bytes(e.loc.len)} at offset ${num(e.loc.off)} of a ${bytes(f.pack.size)} pack holding ${plural(f.pack.blobs.length, "file")}; reading it is one range request.` : ""}</p>
+        <p><b>Chunked</b>, 1 MB or more: cut where the content says to (FastCDC), each chunk its own object, so an edit rewrites only the chunks it touches and identical chunks are stored once.</p>`;
+    },
+  },
+  {
+    title: "Commits share everything that didn't change",
+    async run(c) {
+      if (!c.tip.parent) return `<p>This branch has a single commit, so there is nothing to share yet.</p>`;
+      const parent = addCommit(c.tip.parent);
+      if (!parent.expanded) await expand(parent, { changes: false });
+      const proot = G.nodes.get("page:" + parent.data.root);
+      if (!proot.expanded) await expand(proot);
+      const mine = new Set((c.root.children || []).map((k) => k.hash));
+      const theirs = (proot.data.children || []).map((k) => k.hash);
+      const shared = theirs.filter((h) => mine.has(h));
+      draw();
+      spot("commit:" + c.tip.id, parent.id, "page:" + c.tip.root, proot.id, [...mine, ...theirs].map((h) => "page:" + h));
+      draw(); fit();
+      await select(parent);
+      return `<p>Here is the parent commit with its own root. ${shared.length ? `${num(shared.length)} of its ${theirs.length} children ${shared.length === 1 ? "is" : "are"} the very same page object${shared.length === 1 ? "" : "s"} the newer commit uses, tagged <b>shared by 2</b>.` : "Its children differ at this level; the sharing is further down."}</p>
+        <p>A commit rewrites only the pages on the paths from the root down to the files it changed, about one page per level per changed area. Everything else is reused by hash, which is why a commit on a ${num(c.tip.files)}-file snapshot uploads a few kilobytes of pages, not a copy of the tree.</p>`;
+    },
+  },
+  {
+    title: "Each commit also lists what it changed",
+    async run(c) {
+      const n = G.nodes.get("commit:" + c.tip.id);
+      const changed = [...G.edges.values()].filter((e) => e.from === n.id && e.kind === "changed").map((e) => e.to);
+      spot(n.id, changed); draw(); await select(n); centerOn(n);
+      return `<p>The dashed lines go from the commit straight to the files it changed: ${plural(c.tip.changes.length, "file")} here. For each, the commit records the old and new content hash and where the new bytes are.</p>
+        <p>The tree already implies this (compare two roots), but recording it saves every reader that work. <code>pail log</code> with a path or <code>--stat</code> reads these lists instead of comparing manifests, which is most of why it beats Git on history queries.</p>`;
+    },
+  },
+  {
+    title: "What this machine keeps",
+    async run(c) {
+      spot(); G.spot = null; draw();
+      const l = c.o.local;
+      if (!l) return `<p>This view reads the store directly, so nothing is kept locally. A repository (<code>pail clone --bare</code>) keeps copies and indexes.</p>`;
+      const part = (name) => l.parts.find((p) => p.name === name) || { files: 0, bytes: 0 };
+      return `<p>Everything above lives in the store. This machine's repository, <code>${esc(l.dir)}</code>, keeps derived copies:</p>
+        <pre>blobs     ${bytes(part("blobs").bytes).padEnd(10)} file contents by hash; working copies clone from here\nobjects   ${bytes(part("objects").bytes).padEnd(10)} commits and pages already fetched\ngraph     ${bytes(part("graph").bytes).padEnd(10)} commit graph: history without opening commits\nindex     ${bytes(part("index").bytes).padEnd(10)} Git ids for compatibility</pre>
+        <p>All of it is named by content hash and checked on read, so none of it can go stale: delete any of it and it is fetched or rebuilt. Click any object to explore on your own.</p>`;
+    },
+  },
+];
+
+async function showStep(i) {
+  T.i = Math.max(0, Math.min(STEPS.length - 1, i));
+  const card = $("#tour");
+  card.hidden = false;
+  $("#tour-step").textContent = `How pail stores a repository, ${T.i + 1} of ${STEPS.length}`;
+  $("#tour-title").textContent = STEPS[T.i].title;
+  $("#tour-body").innerHTML = `<p class="busy">Reading the objects…</p>`;
+  $("#tour-dots").innerHTML = STEPS.map((_, j) => `<i class="${j === T.i ? "on" : ""}"></i>`).join("");
+  $("#tour-back").disabled = T.i === 0;
+  $("#tour-next").textContent = T.i === STEPS.length - 1 ? "Done" : "Next";
+  const at = T.i;
+  try {
+    const c = await tourContext();
+    const html = await STEPS[at].run(c);
+    if (T.i === at) $("#tour-body").innerHTML = html;
+  } catch (e) {
+    $("#tour-body").innerHTML = `<p class="error">${esc(e.message)}</p>`;
+  }
+  draw();
+}
+
+function closeTour() {
+  $("#tour").hidden = true;
+  G.spot = null;
+  draw();
+  try { localStorage.setItem("pail-inspect-toured", "1"); } catch {}
+}
+
+$("#learn").onclick = () => showStep(0);
+$("#tour-next").onclick = () => (T.i === STEPS.length - 1 ? closeTour() : showStep(T.i + 1));
+$("#tour-back").onclick = () => showStep(T.i - 1);
+$("#tour-close").onclick = closeTour;
+addEventListener("keydown", (e) => {
+  if ($("#tour").hidden || e.target.closest("input")) return;
+  if (e.key === "ArrowRight") showStep(T.i + 1);
+  if (e.key === "ArrowLeft") showStep(T.i - 1);
+  if (e.key === "Escape") closeTour();
+});
 
 // ------------------------------------------------------------------ wiring
 
@@ -523,7 +929,7 @@ $("#nodes").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key 
 $("#nodes").addEventListener("pointerover", (e) => { const n = nodeOf(e.target); if (n && G.hover !== n.id) { G.hover = n.id; draw(); } });
 $("#nodes").addEventListener("pointerleave", () => { G.hover = null; draw(); });
 $("#fit").onclick = fit;
-$("#reset").onclick = start;
+$("#reset").onclick = () => start();
 $("#trace").onsubmit = (e) => { e.preventDefault(); trace($("#path").value); };
 
 (async () => {
@@ -533,6 +939,9 @@ $("#trace").onsubmit = (e) => { e.preventDefault(); trace($("#path").value); };
     $("#store").textContent = G.overview.store;
     $("#side").innerHTML = `<p class="empty">Opening the default branch…</p>`;
     await start();
+    let toured = false;
+    try { toured = !!localStorage.getItem("pail-inspect-toured"); } catch {}
+    if (!toured) showStep(0);
   } catch (e) {
     $("#side").innerHTML = `<p class="error">${esc(e.message)}</p>`;
   }

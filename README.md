@@ -144,7 +144,13 @@ pail inspect                       # in a working copy or bare repository; opens
 pail --store s3://bucket/repo inspect --addr 127.0.0.1:7777 --no-open
 ```
 
-An object graph of the store, drawn in columns by how objects reference each other:
+Three panes: the **logical** view (the files and folders of a commit) on the left, the
+**physical** objects that store them in the middle, details on the right. Click a folder
+and the graph shows the index pages and file lists covering its paths and the packs holding
+its bytes; select a page and the files it holds light up on the left. "How it works" walks
+through the model step by step on your repository's real objects.
+
+The graph draws objects in columns by how they reference each other:
 branches → commits (parent chain) → manifest pages by level → leaf pages → files → packs and
 chunks. Click an object to expand what it references; big fan-outs open 30 at a time.
 Objects are drawn once, so pages that several commits share show up as one node with a

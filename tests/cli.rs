@@ -611,6 +611,11 @@ fn inspect_serves_the_object_graph() {
     let p = get(&format!("/api/pack/{pack}"));
     assert!(p["blobs"].as_array().unwrap().iter().any(|b| b["paths"][0] == "src/lib.rs"));
     assert_eq!(get("/api/file?path=tiny")["entry"]["loc"]["type"], "inline");
+    // Logical → physical: the pages and packs behind a folder.
+    let cover = get("/api/cover?path=src");
+    assert_eq!(cover["files"], 1);
+    assert!(cover["storage"].as_array().unwrap().iter().any(|s| s["kind"] == "pack"));
+    assert_eq!(cover["pages"].as_array().unwrap().iter().filter(|p| p["level"] == 0).count(), 1);
     let page = get(&format!("/api/page/{}", c["root"].as_str().unwrap()));
     assert!(page["entries"].is_array() || page["children"].is_array());
     child.kill().unwrap();

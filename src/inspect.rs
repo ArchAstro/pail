@@ -153,6 +153,17 @@ impl Inspector {
         }))
     }
 
+    /// An object's stored bytes, as text, for the small textual ones: a branch ref, the
+    /// store's HEAD, a commit (its JSON, shortened when it lists many changes).
+    async fn raw(&self, key: &str) -> Result<Value> {
+        let ok = key == "HEAD" || key.starts_with("refs/") || key.starts_with("commits/");
+        anyhow::ensure!(ok, "only refs, HEAD and commits are shown as text");
+        let data = self.ctx.repo.store.get(key).await?;
+        let text = String::from_utf8_lossy(&data);
+        let shown: String = text.chars().take(5000).collect();
+        Ok(json!({"key": key, "bytes": data.len(), "text": shown, "truncated": text.len() > shown.len()}))
+    }
+
     async fn page(&self, h: &str) -> Result<Value> {
         let h = Hash::from_hex(h)?;
         let p = self.ctx.repo.page(&h).await?;
@@ -191,6 +202,80 @@ impl Inspector {
             })
             .collect();
         Ok(json!({"commit": h.hex(), "path": path, "items": items}))
+    }
+
+    /// The physical objects behind a folder of the logical tree: every manifest page whose path
+    /// range overlaps the folder (root to leaves), and the packs and chunks its files use.
+    async fn cover(&self, rev: Option<&str>, dir: &str) -> Result<Value> {
+        let h = self.commit_id(rev).await?;
+        let c = self.ctx.commit(&h).await?;
+        let dir = dir.trim_matches('/');
+        let (lo, hi) = if dir.is_empty() { (String::new(), "\u{10FFFF}".to_string()) } else { (format!("{dir}/"), format!("{dir}0")) };
+        let mut pages = vec![];
+        let mut leaves = 0;
+        let mut storage: BTreeMap<String, (String, u64, u64, std::collections::BTreeSet<String>)> = BTreeMap::new();
+        let mut files = 0u64;
+        // (page, parent, range low (exclusive), range high (inclusive))
+        let mut stack: Vec<(Hash, Option<Hash>, Option<String>, Option<String>)> = vec![(c.root, None, None, None)];
+        while let Some((ph, parent, rlo, rhi)) = stack.pop() {
+            let p = self.ctx.repo.page(&ph).await?;
+            let level = p.level();
+            let (count, n_files) = match &*p {
+                Page::Node { children, .. } => {
+                    let mut prev: Option<String> = rlo.clone();
+                    let mut picked = vec![];
+                    for ch in children {
+                        let overlaps = ch.key.as_str() >= lo.as_str() && prev.as_deref().is_none_or(|pv| pv < hi.as_str());
+                        if overlaps {
+                            picked.push((ch.hash, Some(ph), prev.clone(), Some(ch.key.clone())));
+                        }
+                        prev = Some(ch.key.clone());
+                    }
+                    let n = picked.len();
+                    for item in picked.into_iter().rev() {
+                        stack.push(item);
+                    }
+                    (n, children.iter().map(|c| c.files).sum::<u64>())
+                }
+                Page::Leaf(es) => {
+                    leaves += 1;
+                    let inside: Vec<&Entry> = es.iter().filter(|e| e.path.as_str() >= lo.as_str() && e.path.as_str() < hi.as_str()).collect();
+                    files += inside.len() as u64;
+                    for e in &inside {
+                        match &e.loc {
+                            Loc::Pack { pack, len, .. } => {
+                                let s = storage.entry(pack.hex()).or_insert(("pack".into(), 0, 0, Default::default()));
+                                s.1 += 1;
+                                s.2 += len;
+                                s.3.insert(ph.hex());
+                            }
+                            Loc::Chunks(cs) => {
+                                for ch in cs {
+                                    let s = storage.entry(ch.hash.hex()).or_insert(("chunk".into(), 0, 0, Default::default()));
+                                    s.1 += 1;
+                                    s.2 += ch.len;
+                                    s.3.insert(ph.hex());
+                                }
+                            }
+                            _ => {
+                                let s = storage.entry("inline".into()).or_insert(("inline".into(), 0, 0, Default::default()));
+                                s.1 += 1;
+                                s.2 += e.size;
+                                s.3.insert(ph.hex());
+                            }
+                        }
+                    }
+                    (inside.len(), es.len() as u64)
+                }
+            };
+            if pages.len() < 400 {
+                pages.push(json!({"hash": ph.hex(), "parent": parent.map(|p| p.hex()), "level": level, "range": [rlo, rhi],
+                                  "overlap": count, "files": n_files}));
+            }
+        }
+        let mut storage: Vec<Value> = storage.into_iter().map(|(h, (kind, n, b, ls))| json!({"hash": h, "kind": kind, "files": n, "bytes": b, "leaves": ls})).collect();
+        storage.sort_by(|a, b| b["bytes"].as_u64().cmp(&a["bytes"].as_u64()));
+        Ok(json!({"commit": h.hex(), "root": c.root.hex(), "dir": dir, "files": files, "leaves": leaves, "pages": pages, "storage": storage}))
     }
 
     /// A file and the physical path to its bytes: the pages from the root to its leaf, its
@@ -300,9 +385,11 @@ impl Inspector {
         match parts.as_slice() {
             ["overview"] => self.overview().await,
             ["store"] => self.store_prefixes().await,
+            ["raw"] => self.raw(q.get("key").context("key is required")?).await,
             ["log"] => self.log(rev, q.get("n").and_then(|n| n.parse().ok()).unwrap_or(50), q.get("skip").and_then(|n| n.parse().ok()).unwrap_or(0)).await,
             ["commit", r] => self.commit(r).await,
             ["page", h] => self.page(h).await,
+            ["cover"] => self.cover(rev, q.get("path").map(String::as_str).unwrap_or("")).await,
             ["tree"] => self.tree(rev, q.get("path").map(String::as_str).unwrap_or("")).await,
             ["file"] => self.file(rev, q.get("path").context("path is required")?).await,
             ["pack", h] => {
