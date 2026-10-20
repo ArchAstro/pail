@@ -328,7 +328,7 @@ the cloud SDK's chain (gcloud ADC, `GOOGLE_*`, `AWS_*`).
 ```
                          ┌ pail-credential-gcloud           your gcloud login
 pail ─▶ provider for ────┼ pail-credential-gcs-downscoped   gcloud, narrowed to one repo (CAB)
-        this store URL   ├ pail-credential-archdev          your ArchDev login → archdev.ai/api/pail
+        this store URL   ├ pail-credential-archdev          your ArchDev login → pail.archdev.ai/<org>/<repo>
         (config)         └ pail-credential-<yours>          any SSO / broker / vault
    │
    ├─ gs://, s3://  ─▶ token or keys, straight to the bucket (no server)

@@ -233,7 +233,7 @@ pail-credential-<name> (in ~/.local/share/pail/extensions or on PATH) that speak
 pail-credential/1 protocol. Without one, pail uses the cloud SDK's chain (ambient).
 
   pail auth list                           # installed and bundled providers
-  pail auth install archdev                # bundled: your ArchDev login (archdev.ai/api/pail)
+  pail auth install archdev                # bundled: your ArchDev login (pail.archdev.ai)
   pail auth install gcloud                 # bundled: your gcloud login
   pail auth install gcs-downscoped         # bundled: gcloud, narrowed to one repository
   pail auth install ./pail-credential-acme # anything you or your company ships
