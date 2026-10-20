@@ -74,10 +74,6 @@ button.primary { background: var(--ink); color: var(--paper); border-color: var(
 .plane { position: relative; overflow: hidden; cursor: grab; background-image: radial-gradient(var(--grid) 1px, transparent 1px); background-size: 22px 22px; }
 .plane.dragging { cursor: grabbing; }
 svg { width: 100%; height: 100%; display: block; user-select: none; }
-.col-label { font: 600 13px var(--sans); fill: var(--ink); }
-.col-what { font: 12px var(--sans); fill: var(--muted); }
-.col-rule { stroke: var(--rule); stroke-dasharray: 2 5; }
-#headbg { fill: var(--paper); opacity: 0.94; }
 .edge { fill: none; stroke-width: 1.4; opacity: 0.5; transition: opacity 120ms; }
 .edge.changed { stroke-dasharray: 4 4; }
 .edge.dim { opacity: 0.08; }
@@ -96,6 +92,7 @@ svg { width: 100%; height: 100%; display: block; user-select: none; }
 .node.more rect.body { fill: transparent; stroke-dasharray: 4 3; }
 .node rect.share { fill: var(--page); }
 .node text.share { font: 600 10.5px var(--sans); fill: var(--sheet); }
+.node text.type { font: 600 10.5px var(--sans); fill: var(--sheet); letter-spacing: 0.01em; }
 .node.more text { fill: var(--muted); }
 @media (prefers-reduced-motion: reduce) { .node, #world { transition: none !important; } }
 
@@ -172,7 +169,7 @@ pre.preview { margin: 0; max-height: 360px; overflow: auto; font: 12px/1.55 var(
     <div class="tree" id="tree"></div>
   </nav>
   <div class="plane" id="plane">
-    <svg id="svg" aria-label="Object graph"><g id="world"><g id="rules"></g><g id="edges"></g><g id="nodes"></g></g><rect id="headbg" x="0" y="0" width="100%" height="62"/><g id="cols"></g></svg>
+    <svg id="svg" aria-label="Object graph"><g id="world"><g id="edges"></g><g id="nodes"></g></g></svg>
     <div class="hint" id="hint"></div>
 
     <div class="hud"><button id="fit">Fit</button><button id="reset">Start over</button></div>
@@ -207,7 +204,7 @@ async function api(path) {
 // ------------------------------------------------------------------ the graph model
 
 const G = { nodes: new Map(), edges: new Map(), sel: null, hover: null, maxLevel: 1, rev: null, overview: null, seq: 0 };
-const W = 204, H = 50, COLW = 238, GAP = 14;
+const W = 204, H = 50, COLW = 238, GAP = 24;
 // Only the layers in use get a column, packed left to right.
 let SLOTS = new Map();
 const xOf = (c) => 30 + (SLOTS.get(c) ?? c) * COLW;
@@ -221,15 +218,15 @@ function column(n) {
   if (n.kind === "more" && n.parentKind === "pack") return 3 + G.maxLevel;
   return 4 + G.maxLevel;
 }
-// What each column holds, in two lines: a name and what it is for.
-function columnLabel(i) {
-  if (i === 0) return ["Branches", "the only objects that change"];
-  if (i === 1) return ["Commits", "history, newest first"];
-  if (i === 2) return ["Snapshot roots", "one per commit: the whole tree"];
-  if (i < 2 + G.maxLevel) return ["Index pages", "split the paths into ranges"];
-  if (i === 2 + G.maxLevel) return ["File lists", "path, size and bytes of each file"];
-  if (i === 3 + G.maxLevel) return ["Files", "one entry per file"];
-  return ["Packs and chunks", "where the bytes are stored"];
+// What a node is, named on the node itself: the object type, plus the page's role.
+function typeLabel(n) {
+  if (n.kind === "ref") return "branch ref";
+  if (n.kind === "commit") return "commit";
+  if (n.kind === "page") return n.root ? "manifest root page" : n.level === 0 ? `leaf page: file list` : `index page, level ${n.level}`;
+  if (n.kind === "file") return "file entry";
+  if (n.kind === "pack") return "pack";
+  if (n.kind === "chunk") return "chunk";
+  return null;
 }
 
 // A page's slice of the filesystem, from the paths around it: "services/platform/…" when it
@@ -349,7 +346,7 @@ function layout() {
   const linked = new Map();
   const link = (a, b) => { if (!linked.has(a)) linked.set(a, []); linked.get(a).push(b); };
   for (const e of G.edges.values()) { link(e.to, e.from); link(e.from, e.to); }
-  const top = 72;
+  const top = 30;
   for (const c of [...cols.keys()].sort((a, b) => a - b)) {
     const list = cols.get(c);
     const want = (n) => {
@@ -370,21 +367,14 @@ function layout() {
 // ------------------------------------------------------------------ drawing
 
 const view = { x: 0, y: 0, k: 1 };
-// Column headers pan sideways with the graph but stay pinned to the top.
 function applyView() {
   $("#world").setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
-  $("#cols").setAttribute("transform", `translate(${view.x},0) scale(${view.k})`);
 }
 const color = (k) => `var(--${k === "more" ? "faint" : k})`;
 
 function draw() {
   layout();
-  const cols = $("#cols"), edges = $("#edges"), nodes = $("#nodes");
-  const used = new Set([...G.nodes.values()].map(column));
-  const maxY = Math.max(400, ...[...G.nodes.values()].map((n) => n.y + H)) + 40;
-  const order = [...used].sort((a, b) => a - b);
-  cols.innerHTML = order.map((c) => { const [name, what] = columnLabel(c); return `<text class="col-label" x="${xOf(c)}" y="26">${esc(name)}</text><text class="col-what" x="${xOf(c)}" y="42">${esc(what)}</text>`; }).join("");
-  $("#rules").innerHTML = order.map((c) => `<line class="col-rule" x1="${xOf(c) - 16}" y1="0" x2="${xOf(c) - 16}" y2="${maxY}"/>`).join("");
+  const nodes = $("#nodes");
   // Hover only strengthens a node's own edges; fading is reserved for an explicit spotlight
   // (a folder, a trace, the tour), so moving the mouse never rearranges what is visible.
   const focus = G.hover || G.sel;
@@ -439,12 +429,17 @@ function drawNodes(nodes, focus, fade, near) {
       requestAnimationFrame(() => requestAnimationFrame(() => (g.style.opacity = "")));
     }
     g.setAttribute("class", ["node", n.kind === "more" ? "more" : "", G.sel === n.id ? "sel" : "", fade && !near.has(n.id) ? "dim" : ""].join(" "));
-    g.setAttribute("aria-label", `${n.kind} ${n.title}`);
+    const type = typeLabel(n);
+    g.setAttribute("aria-label", `${type || n.kind}: ${n.title}`);
     const expandable = n.kind !== "more" && n.kind !== "chunk" && !n.expanded;
     const line2 = n.hash ? `<text class="id" x="14" y="38">${esc(short(n.hash))}</text>${n.sub ? `<text class="sub" x="94" y="38">${esc(clip(n.sub, 17))}</text>` : ""}` : `<text class="sub" x="14" y="38">${esc(clip(n.sub, 30))}</text>`;
     g.innerHTML = `<rect class="body" width="${W}" height="${H}" rx="9"/><rect width="4" height="${H - 16}" x="0" y="8" rx="2" fill="${color(n.kind)}"/>
+      ${type ? `<rect class="type" x="10" y="-9" width="${type.length * 6 + 16}" height="18" rx="9" fill="${color(n.kind)}"/><text class="type" x="18" y="4">${esc(type)}</text>` : ""}
       <text x="14" y="20">${esc(clip(n.title, 25))}</text>${line2}${expandable ? `<text class="badge" x="${W - 18}" y="21">+</text>` : ""}
       ${(indeg.get(n.id) || 0) > 1 ? `<rect class="share" x="${W - 84}" y="-9" width="72" height="18" rx="9"/><text class="share" x="${W - 48}" y="4" text-anchor="middle">shared by ${indeg.get(n.id)}</text>` : ""}`;
+    // Size the type pill to its text.
+    const tt = g.querySelector("text.type");
+    if (tt) { const w = tt.getComputedTextLength(); if (w) g.querySelector("rect.type").setAttribute("width", w + 16); }
     g.style.transform = `translate(${n.x}px, ${n.y}px)`;
   }
   for (const g of [...nodes.children]) if (!seen.has(g.dataset.id)) g.remove();
