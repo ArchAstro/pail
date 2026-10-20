@@ -233,6 +233,7 @@ pail-credential-<name> (in ~/.local/share/pail/extensions or on PATH) that speak
 pail-credential/1 protocol. Without one, pail uses the cloud SDK's chain (ambient).
 
   pail auth list                           # installed and bundled providers
+  pail auth install archdev                # bundled: your ArchDev login (archdev.ai/api/pail)
   pail auth install gcloud                 # bundled: your gcloud login
   pail auth install gcs-downscoped         # bundled: gcloud, narrowed to one repository
   pail auth install ./pail-credential-acme # anything you or your company ships
@@ -257,7 +258,8 @@ with a bearer token from their credential helper. Run any number of instances (C
 Lambda behind a URL, a VM); nothing is kept between requests.
 
 Each request is authorized by --auth-command with PAIL_AUTH_TOKEN, PAIL_AUTH_REPO and
-PAIL_AUTH_OP (read|write) in its environment: exit 0 allows. Answers are cached a minute.
+PAIL_AUTH_OP (read|write) in its environment: exit 0 allows, exit 3 forbids (403), any other
+exit rejects the token (401, so the client fetches a new one). Answers are cached a minute.
 
 Examples:
   pail serve --store gs://acme-vcs --addr 0.0.0.0:8080 --auth-command 'acme-sso verify'

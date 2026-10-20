@@ -71,6 +71,9 @@ pub struct Store {
     local_root: Option<PathBuf>,
     pub url: String,
     pub stats: Arc<Stats>,
+    /// The credential provider's cache, dropped when the store answers 401 so the next request
+    /// fetches a fresh credential (a provider's idea of expiry can be wrong).
+    creds: Option<Arc<crate::creds::Source>>,
 }
 
 impl Store {
@@ -103,6 +106,7 @@ impl Store {
                     local_root: Some(root),
                     url: url.to_string(),
                     stats,
+                    creds: None,
                 })
             }
             "s3" => {
@@ -110,18 +114,18 @@ impl Store {
                 let mut b = AmazonS3Builder::from_env()
                     .with_bucket_name(bucket)
                     .with_conditional_put(S3ConditionalPut::ETagMatch);
-                if let Some(src) = helper {
+                if let Some(src) = helper.clone() {
                     b = b.with_credentials(Arc::new(crate::creds::AwsProvider(src)));
                 }
                 let s3 = b.build()?;
-                Ok(Store { inner: Arc::new(s3), prefix, local_root: None, url: url.to_string(), stats })
+                Ok(Store { inner: Arc::new(s3), prefix, local_root: None, url: url.to_string(), stats, creds: helper })
             }
             "gs" => {
                 let bucket = parsed.host_str().ok_or_else(|| anyhow!("missing bucket"))?;
                 let mut b = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
                 if let Ok(base) = std::env::var("PAIL_GCS_BASE_URL") {
                     b = b.with_base_url(&base).with_bearer_token("emulator");
-                } else if let Some(src) = helper {
+                } else if let Some(src) = helper.clone() {
                     b = b.with_credentials(Arc::new(crate::creds::GcsProvider(src)));
                 } else if let Ok(token) = std::env::var("PAIL_GCS_TOKEN") {
                     // e.g. `PAIL_GCS_TOKEN=$(gcloud auth print-access-token)`
@@ -133,13 +137,21 @@ impl Store {
                     local_root: None,
                     url: url.to_string(),
                     stats,
+                    creds: helper,
                 })
             }
             "https" | "http" => {
                 // A pail proxy: the whole URL is the repository; keys are relative to it.
-                let auth = helper.map(|src| Arc::new(crate::creds::BearerProvider(src)));
+                let auth = helper.clone().map(|src| Arc::new(crate::creds::BearerProvider(src)));
                 let http = crate::httpstore::HttpStore::new(url, auth)?;
-                Ok(Store { inner: Arc::new(http), prefix: String::new(), local_root: None, url: url.to_string(), stats })
+                Ok(Store {
+                    inner: Arc::new(http),
+                    prefix: String::new(),
+                    local_root: None,
+                    url: url.to_string(),
+                    stats,
+                    creds: helper,
+                })
             }
             s => bail!("unsupported store scheme {s}:// (use file://, s3://, gs:// or https://)"),
         }
@@ -173,7 +185,7 @@ impl Store {
             };
         }
         let path = self.path(key);
-        let got = retry(|| async {
+        let got = self.retry(|| async {
             match self.inner.get_opts(&path, GetOptions::default()).await {
                 Ok(r) => {
                     let v = Version { etag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
@@ -195,7 +207,7 @@ impl Store {
     pub async fn get_ranges(&self, key: &str, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let path = self.path(key);
-        let out = retry(|| self.inner.get_ranges(&path, ranges)).await.with_context(|| format!("range read {key}"))?;
+        let out = self.retry(|| self.inner.get_ranges(&path, ranges)).await.with_context(|| format!("range read {key}"))?;
         let n: usize = out.iter().map(|b| b.len()).sum();
         self.stats.bytes_down.fetch_add(n as u64, Ordering::Relaxed);
         Ok(out)
@@ -205,7 +217,7 @@ impl Store {
     pub async fn read_range(&self, key: &str, range: Range<u64>) -> Result<Option<(Bytes, u64)>> {
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let path = self.path(key);
-        let got = retry(|| async {
+        let got = self.retry(|| async {
             let opts = GetOptions { range: Some(range.clone().into()), ..Default::default() };
             match self.inner.get_opts(&path, opts).await {
                 Ok(r) => {
@@ -232,7 +244,7 @@ impl Store {
         let path = self.path(key);
         // Safe to retry: content-addressed, so a retried create that finds the object
         // already written (by our earlier attempt) is a success.
-        retry(|| async {
+        self.retry(|| async {
             let opts = PutOptions { mode: PutMode::Create, ..Default::default() };
             match self.inner.put_opts(&path, PutPayload::from(data.clone()), opts).await {
                 Ok(_) => Ok(true),
@@ -251,7 +263,7 @@ impl Store {
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
         let path = self.path(key);
-        retry(|| self.inner.put(&path, PutPayload::from(data.clone()))).await?;
+        self.retry(|| self.inner.put(&path, PutPayload::from(data.clone()))).await?;
         Ok(())
     }
 
@@ -268,7 +280,15 @@ impl Store {
             Some(v) => PutMode::Update(UpdateVersion { e_tag: v.etag.clone(), version: v.version.clone() }),
         };
         let opts = PutOptions { mode, ..Default::default() };
-        match self.inner.put_opts(&self.path(key), PutPayload::from(data), opts).await {
+        // A refused credential means nothing was written, so asking again is safe; any other
+        // outcome is final (a retried CAS could not tell its own earlier success from a loss).
+        let path = self.path(key);
+        let attempt = || self.inner.put_opts(&path, PutPayload::from(data.clone()), opts.clone());
+        let result = match attempt().await {
+            Err(object_store::Error::Unauthenticated { .. }) if self.drop_credentials() => attempt().await,
+            r => r,
+        };
+        match result {
             Ok(r) => Ok(Cas::Ok(Version { etag: r.e_tag, version: r.version })),
             Err(object_store::Error::AlreadyExists { .. }) | Err(object_store::Error::Precondition { .. }) => {
                 Ok(Cas::Conflict)
@@ -298,7 +318,7 @@ impl Store {
     pub async fn size(&self, key: &str) -> Result<Option<u64>> {
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let p = self.path(key);
-        match retry(|| self.inner.head(&p)).await {
+        match self.retry(|| self.inner.head(&p)).await {
             Ok(m) => Ok(Some(m.size)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(e.into()),
@@ -308,7 +328,7 @@ impl Store {
     pub async fn list_meta(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
         let p = self.path(prefix.trim_end_matches('/'));
         let strip = if self.prefix.is_empty() { 0 } else { self.prefix.len() + 1 };
-        let items: Vec<_> = match retry(|| self.inner.list(Some(&p)).try_collect()).await {
+        let items: Vec<_> = match self.retry(|| self.inner.list(Some(&p)).try_collect()).await {
             Ok(v) => v,
             Err(object_store::Error::NotFound { .. }) => vec![],
             Err(e) => return Err(e.into()),
@@ -358,17 +378,42 @@ fn local_cas(root: &FsPath, key: &str, data: &[u8], expected: Option<&Version>) 
     Ok(Cas::Ok(local_version(data)))
 }
 
-/// Retry transient failures of idempotent operations (connection resets, 5xx, throttling).
-/// Definitive answers (not found, already exists, precondition failed) are returned at once.
-async fn retry<T, F, Fut>(mut op: F) -> object_store::Result<T>
+impl Store {
+    /// Forget the cached credential so the next request gets a fresh one. False when there is
+    /// no provider cache to drop (ambient credentials): retrying would not change anything.
+    fn drop_credentials(&self) -> bool {
+        match &self.creds {
+            Some(c) => {
+                c.invalidate();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Retry transient failures of idempotent operations (connection resets, 5xx, throttling),
+    /// and a refused credential once, with a fresh one. Definitive answers (not found, already
+    /// exists, precondition failed) are returned at once.
+    async fn retry<T, F, Fut>(&self, op: F) -> object_store::Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = object_store::Result<T>>,
+    {
+        retry(op, || self.drop_credentials()).await
+    }
+}
+
+async fn retry<T, F, Fut>(mut op: F, mut refresh: impl FnMut() -> bool) -> object_store::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = object_store::Result<T>>,
 {
     let mut attempt = 0u32;
+    let mut refreshed = false;
     loop {
         match op().await {
             Ok(v) => return Ok(v),
+            Err(object_store::Error::Unauthenticated { .. }) if !refreshed && refresh() => refreshed = true,
             Err(e @ object_store::Error::NotFound { .. })
             | Err(e @ object_store::Error::AlreadyExists { .. })
             | Err(e @ object_store::Error::Precondition { .. })

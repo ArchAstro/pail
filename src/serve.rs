@@ -7,6 +7,8 @@
 //! ```text
 //! PAIL_AUTH_TOKEN=<bearer> PAIL_AUTH_REPO=<repo path> PAIL_AUTH_OP=read|write <cmd>
 //!     exit 0: allowed (stdout's first line, if any, names the principal for the log)
+//!     exit 3: a known token that may not do this (403)
+//!     other:  the token is not accepted (401: the client fetches a new credential)
 //! ```
 //!
 //! Answers are cached for a minute per (token, repo, op). Nothing else is kept between
@@ -32,7 +34,7 @@ pub struct Proxy {
     root: String,
     auth: Option<String>,
     stores: Mutex<HashMap<String, Store>>,
-    decisions: Mutex<HashMap<(String, String, &'static str), (bool, Instant)>>,
+    decisions: Mutex<HashMap<(String, String, &'static str), (u16, Instant)>>,
 }
 
 struct Reply {
@@ -95,9 +97,14 @@ impl Proxy {
             return Err(Reply::new(401, "a bearer token is required").header("WWW-Authenticate", "Bearer".into()));
         };
         let key = (blake3::hash(token.as_bytes()).to_hex().to_string(), repo.to_string(), op);
-        if let Some((ok, at)) = self.decisions.lock().unwrap().get(&key) {
+        let answer = |status: u16| match status {
+            200 => Ok(()),
+            403 => Err(Reply::new(403, format!("not allowed to {op} {repo}"))),
+            _ => Err(Reply::new(401, "the token was not accepted").header("WWW-Authenticate", "Bearer".into())),
+        };
+        if let Some((status, at)) = self.decisions.lock().unwrap().get(&key) {
             if at.elapsed() < AUTH_TTL {
-                return if *ok { Ok(()) } else { Err(Reply::new(403, format!("not allowed to {op} {repo}"))) };
+                return answer(*status);
             }
         }
         let out = Command::new("sh")
@@ -108,17 +115,21 @@ impl Proxy {
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
             .output();
-        let ok = matches!(&out, Ok(o) if o.status.success());
-        if let Ok(o) = &out {
-            if ok {
+        let status = match &out {
+            Ok(o) if o.status.success() => {
                 let who = String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string();
                 if !who.is_empty() {
                     eprintln!("auth: {who} may {op} {repo}");
                 }
+                200
             }
-        }
-        self.decisions.lock().unwrap().insert(key, (ok, Instant::now()));
-        if ok { Ok(()) } else { Err(Reply::new(403, format!("not allowed to {op} {repo}"))) }
+            Ok(o) if o.status.code() == Some(3) => 403,
+            Ok(_) => 401,
+            // The auth command could not run: not a verdict on the token, so not cached.
+            Err(e) => return Err(Reply::new(503, format!("auth command failed: {e}"))),
+        };
+        self.decisions.lock().unwrap().insert(key, (status, Instant::now()));
+        answer(status)
     }
 
     async fn handle(&self, method: &str, url: &str, headers: &[(String, String)], body: Bytes) -> Reply {

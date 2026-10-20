@@ -853,7 +853,7 @@ fn proxy_store_with_a_credential_helper() {
     let t = std::fs::canonicalize(tmp.path()).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let auth = t.join("auth.sh");
-    write(&auth, "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN:$PAIL_AUTH_REPO:$PAIL_AUTH_OP\" in\n  tok-alice:team/app:*) echo alice;;\n  tok-bob:team/app:read) echo bob;;\n  *) exit 1;;\nesac\n");
+    write(&auth, "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN:$PAIL_AUTH_REPO:$PAIL_AUTH_OP\" in\n  tok-alice:team/app:*) echo alice;;\n  tok-bob:team/app:read) echo bob;;\n  tok-bob:*) exit 3;;\n  *) exit 1;;\nesac\n");
     let calls = t.join("helper-calls");
     // The company's provider, shipped as an extension: `describe`, and `get` answering with
     // the token the user holds (TOK stands in for their login).
@@ -916,6 +916,7 @@ fn proxy_store_with_a_credential_helper() {
     // Unknown token: nothing.
     let out = as_user(&t, "tok-eve", &["clone", &store, "e"]);
     assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("401"), "{}", String::from_utf8_lossy(&out.stderr));
 
     // The helper got the pail-credential/1 request, and its answer was reused from the cache.
     let reqs = std::fs::read_to_string(&calls).unwrap();
@@ -924,4 +925,19 @@ fn proxy_store_with_a_credential_helper() {
     ok(as_user(&a, "tok-alice", &["log", "-1"]));
     assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), alice_calls, "cached");
     assert!(ok(as_user(&a, "tok-alice", &["auth", "logout"])).contains("forgot"));
+
+    // A provider whose cached token the store stops accepting (it claimed a far expiry):
+    // the 401 drops the cache, the provider is asked again, and the command succeeds.
+    let calls = t.join("rot-calls");
+    let rot = t.join("pail-credential-rot");
+    write(&rot, &format!("#!/bin/sh\ncat >/dev/null\necho x >> {c}\nif [ $(wc -l < {c}) -eq 1 ]; then T=tok-stale; else T=tok-alice; fi\necho \"{{\\\"token\\\":\\\"$T\\\",\\\"expires_at\\\":4102444800}}\"\n", c = calls.display()));
+    ok(as_user(&t, "tok-alice", &["auth", "install", &rot.to_string_lossy()]));
+    let out = cmd(&a, &["sync"])
+        .env("PAIL_EXTENSIONS_DIR", &ext)
+        .env("PAIL_CREDENTIAL_PROVIDER", "rot")
+        .env("XDG_CACHE_HOME", t.join("cache-rot"))
+        .output()
+        .unwrap();
+    assert!(ok(out).contains("main @"));
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2, "asked once more after the 401");
 }

@@ -52,6 +52,7 @@ const BARE_TOKEN_SECS: u64 = 45 * 60;
 
 /// Extensions that ship with pail and `pail auth install <name>` writes out.
 pub const BUNDLED: &[(&str, &str)] = &[
+    ("archdev", include_str!("../extensions/pail-credential-archdev")),
     ("gcloud", include_str!("../extensions/pail-credential-gcloud")),
     ("gcs-downscoped", include_str!("../extensions/pail-credential-gcs-downscoped")),
 ];
@@ -219,6 +220,14 @@ impl Source {
     fn cache_path(&self) -> Option<PathBuf> {
         let key = blake3::hash(format!("{:?}\n{}", self.provider, self.store).as_bytes()).to_hex();
         Some(cache_dir()?.join(&key[..32]))
+    }
+
+    /// Forget the cached credential (memory and disk): the store refused it.
+    pub fn invalidate(&self) {
+        *self.mem.lock().unwrap() = None;
+        if let Some(p) = self.cache_path() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     /// A fresh credential: memory, then disk, then the helper.

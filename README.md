@@ -328,7 +328,7 @@ the cloud SDK's chain (gcloud ADC, `GOOGLE_*`, `AWS_*`).
 ```
                          ┌ pail-credential-gcloud           your gcloud login
 pail ─▶ provider for ────┼ pail-credential-gcs-downscoped   gcloud, narrowed to one repo (CAB)
-        this store URL   ├ pail-credential-archdev          ArchAstro mints a scoped token
+        this store URL   ├ pail-credential-archdev          your ArchDev login → archdev.ai/api/pail
         (config)         └ pail-credential-<yours>          any SSO / broker / vault
    │
    ├─ gs://, s3://  ─▶ token or keys, straight to the bucket (no server)
@@ -360,7 +360,9 @@ pail auth logout                             # forget cached credentials
 5. **Proxy:** `pail serve --store gs://acme-vcs --auth-command <cmd>` serves
    `https://host/<repo>` (GET/HEAD/PUT with If-Match/If-None-Match, DELETE, list). The CAS
    contract tests pass through it. The auth command gets `PAIL_AUTH_TOKEN`, `PAIL_AUTH_REPO`
-   and `PAIL_AUTH_OP` and allows with exit 0; answers are cached a minute.
+   and `PAIL_AUTH_OP`: exit 0 allows, 3 forbids (403), anything else rejects the token (401).
+   Answers are cached a minute. On a 401, pail drops its cached credential, asks the provider
+   again and retries once.
 
 ## Hooks
 
