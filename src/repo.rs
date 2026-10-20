@@ -511,6 +511,7 @@ impl Repo {
                 Loc::Inline(b) => out[i] = Some(Bytes::from(b.clone())),
                 Loc::Pack { pack, .. } => by_pack.entry(*pack).or_default().push(i),
                 Loc::Chunks(_) => chunked.push(i),
+                Loc::Unresolved => bail!("{}: content {} is not cached and has no known location", e.path, e.hash.short()),
             }
         }
         let jobs = by_pack
@@ -612,6 +613,26 @@ impl Repo {
                 }
             }
             let tree = self.apply_delta(head_root, &req.delta).await?;
+            // The exact change against the parent this commit lands on: paths whose kind or
+            // content differ (no-op edits drop out).
+            let mut changes = BTreeMap::new();
+            for (path, new) in &req.delta {
+                let old = self.get_entry(head_root, path).await?;
+                let same = match (&old, new) {
+                    (Some(a), Some(b)) => a.same_content(b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if !same {
+                    changes.insert(
+                        path.clone(),
+                        crate::objects::FileChange {
+                            old: old.as_ref().map(|e| crate::objects::FileState::of(e, false)),
+                            new: new.as_ref().map(|e| crate::objects::FileState::of(e, true)),
+                        },
+                    );
+                }
+            }
             pages_written += self.upload_pages(&tree.pages).await?;
             let generation = match parent {
                 Some(p) => self.commit_obj(&p).await?.generation + 1,
@@ -629,6 +650,7 @@ impl Repo {
                 committer_date: req.committer_date.clone(),
                 message: req.message.clone(),
                 meta: req.meta.clone(),
+                changes: Some(crate::objects::Changes::new(&changes)),
             };
             let (ch, data) = commit.encode();
             self.store.put_new(&commit_key(&ch), data.clone()).await?;

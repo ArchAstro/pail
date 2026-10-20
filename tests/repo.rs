@@ -195,3 +195,54 @@ async fn concurrent_commits_replay_or_conflict() {
     let conflict = err.downcast_ref::<ConflictError>().expect("conflict error");
     assert_eq!(conflict.paths, vec!["shared.txt".to_string()]);
 }
+
+/// Every commit's change list is exactly the manifest diff from the parent it landed on,
+/// including commits replayed onto a newer head and edits that change nothing.
+#[tokio::test]
+async fn change_lists_match_manifest_diffs() {
+    let (_d, repo) = temp_repo();
+    let repo = Arc::new(repo);
+    let d0 = put_files(&repo, &[("a.txt", "a0"), ("b.txt", "b0"), ("dir/c.txt", "c0")]).await;
+    let c0 = repo.commit(req("main", None, d0, "init")).await.unwrap().commit;
+    // Concurrent writers from the same base: most land by replay onto someone else's commit.
+    let mut tasks = vec![];
+    for i in 0..8 {
+        let repo = repo.clone();
+        tasks.push(tokio::spawn(async move {
+            let d = put_files(&repo, &[(&format!("w/{i}.txt"), &format!("writer {i}"))]).await;
+            repo.commit(req("main", Some(c0), d, &format!("w{i}"))).await.unwrap()
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    // A modification, a deletion, and a no-op rewrite of b.txt in one commit.
+    let (head, _) = repo.read_ref("main").await.unwrap().unwrap();
+    let mut d = put_files(&repo, &[("a.txt", "a1"), ("b.txt", "b0")]).await;
+    d.insert("dir/c.txt".into(), None);
+    repo.commit(req("main", Some(head), d, "edit")).await.unwrap();
+
+    let (mut cur, _) = repo.read_ref("main").await.unwrap().unwrap();
+    let mut checked = 0;
+    loop {
+        let c = repo.commit_obj(&cur).await.unwrap();
+        let listed = c.change_list().expect("new commits record their changes");
+        let actual = repo.diff(repo.root_of(c.parent).await.unwrap(), c.root).await.unwrap();
+        let key = |cs: &[pail::manifest::Change]| -> Vec<(String, Option<Hash>, Option<Hash>)> {
+            cs.iter().map(|c| (c.path.clone(), c.old.as_ref().map(|e| e.hash), c.new.as_ref().map(|e| e.hash))).collect()
+        };
+        assert_eq!(key(&listed), key(&actual), "commit {}", c.message);
+        for (l, a) in listed.iter().zip(&actual) {
+            assert_eq!(l.new.as_ref().map(|e| &e.loc), a.new.as_ref().map(|e| &e.loc), "new side must locate the bytes");
+        }
+        if c.message == "edit" {
+            assert_eq!(listed.len(), 2, "the no-op rewrite of b.txt is not a change");
+        }
+        checked += 1;
+        match c.parent {
+            Some(p) => cur = p,
+            None => break,
+        }
+    }
+    assert_eq!(checked, 10);
+}

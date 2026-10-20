@@ -279,17 +279,37 @@ impl<'a> DiffPrinter<'a> {
         cs.iter().filter(|c| c.old.is_none() || c.new.is_none()).flat_map(|c| [&c.old, &c.new]).flatten().collect()
     }
 
+    /// Give old versions named only by hash (from change lists) a location: the local cache
+    /// serves them by hash; otherwise they are looked up in the parent's manifest.
+    async fn locate(&self, parent: Option<Hash>, entries: Vec<Entry>) -> Result<Vec<Entry>> {
+        let blobs = self.ctx.repo.blobs.as_ref();
+        let mut out = Vec::with_capacity(entries.len());
+        let mut root = None;
+        for e in entries {
+            if !matches!(e.loc, crate::manifest::Loc::Unresolved) || blobs.is_some_and(|b| b.has(&e.hash)) {
+                out.push(e);
+                continue;
+            }
+            if root.is_none() {
+                root = Some(self.ctx.repo.root_of(parent).await?);
+            }
+            match self.ctx.repo.get_entry(root.unwrap(), &e.path).await? {
+                Some(found) if found.hash == e.hash => out.push(found),
+                _ => anyhow::bail!("{}: old version {} not found in the parent commit", e.path, e.hash.short()),
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetch, in one batched read, the contents the next commits will need (replacing what
     /// was fetched for the previous batch).
-    pub async fn prefetch<'c>(&self, changes: impl Iterator<Item = &'c [Change]>) -> Result<()> {
+    pub async fn prefetch(&self, shown: &[Shown]) -> Result<()> {
         let mut want: Vec<Entry> = vec![];
         let mut seen = std::collections::HashSet::new();
-        for cs in changes {
-            for e in self.wanted(cs) {
-                if seen.insert(e.hash) {
-                    want.push(e.clone());
-                }
-            }
+        for s in shown {
+            let Some(cs) = s.changes.as_deref() else { continue };
+            let mine: Vec<Entry> = self.wanted(cs).into_iter().filter(|e| seen.insert(e.hash)).cloned().collect();
+            want.extend(self.locate(s.commit.parent, mine).await?);
         }
         let data = self.ctx.repo.read_files(&want).await?;
         *self.prefetched.lock().unwrap() = want.iter().map(|e| e.hash).zip(data).collect();
@@ -297,7 +317,7 @@ impl<'a> DiffPrinter<'a> {
     }
 
     /// Contents of every entry in the changes, by content hash.
-    pub async fn load(&self, changes: &[Change]) -> Result<HashMap<Hash, Bytes>> {
+    pub async fn load(&self, parent: Option<Hash>, changes: &[Change]) -> Result<HashMap<Hash, Bytes>> {
         let mut out = HashMap::new();
         let mut want: Vec<Entry> = vec![];
         {
@@ -316,6 +336,7 @@ impl<'a> DiffPrinter<'a> {
                 }
             }
         }
+        let want = self.locate(parent, want).await?;
         let data = self.ctx.repo.read_files(&want).await?;
         out.extend(want.iter().map(|e| e.hash).zip(data));
         Ok(out)
@@ -410,7 +431,7 @@ impl<'a> DiffPrinter<'a> {
         if self.o.full_index { id.to_string() } else { id[..self.abbrev.min(id.len())].to_string() }
     }
 
-    pub async fn print(&self, _s: &Shown, changes: &[Change], out: &mut dyn Write) -> Result<()> {
+    pub async fn print(&self, s: &Shown, changes: &[Change], out: &mut dyn Write) -> Result<()> {
         let needed: Vec<Change> = {
             let w: std::collections::HashSet<Hash> = self.wanted(changes).iter().map(|e| e.hash).collect();
             changes
@@ -422,7 +443,7 @@ impl<'a> DiffPrinter<'a> {
                 })
                 .collect()
         };
-        let data = self.load(&needed).await?;
+        let data = self.load(s.commit.parent, &needed).await?;
         let pairs = if self.o.renames {
             self.pairs(changes, &data)
         } else {

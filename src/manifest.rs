@@ -52,6 +52,10 @@ pub enum Loc {
     Pack { pack: Hash, off: u64, len: u64 },
     /// Large files: content-defined chunks, each its own object.
     Chunks(Vec<ChunkRef>),
+    /// Location not known yet: an old file version named by a commit's change list. Readers
+    /// find it by content hash in the local cache, or in the parent's manifest. Never stored
+    /// in a page.
+    Unresolved,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +156,7 @@ pub fn encode_page(page: &Page) -> Vec<u8> {
                             w.varint(c.len);
                         }
                     }
+                    Loc::Unresolved => panic!("unresolved location for {} in a manifest page", e.path),
                 }
                 prev = &e.path;
             }

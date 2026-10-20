@@ -14,7 +14,7 @@ directly. There is no server.
 ├─ packs/<blake3>.pack   small files, concatenated, read with range GETs
 ├─ chunks/<blake3>       large files, FastCDC chunks, deduped globally
 ├─ pages/<blake3>        manifest pages (prolly tree over sorted paths)
-├─ commits/<blake3>      JSON commit objects
+├─ commits/<blake3>      JSON commit objects, each with its change list
 ├─ refs/<branch>         {"commit": "<hash>"}, updated only by CAS
 └─ reflog/<branch>/…     written only when a branch is force-moved
 ```
@@ -102,6 +102,22 @@ pail --store … ls -l HEAD:src  |  pail --store … cat HEAD~2:README.md
    from pail data; `--ids=git` prints the Git commit ids of mirrored history.
 3. `snapshot::Snapshot` is the library API behind it: `stat`, `list_dir`, `walk`, `read`,
    `read_range` for any commit, reading only the manifest pages and packs it needs.
+
+### Commits carry their change lists
+
+Like Mononoke's Bonsai changesets, every commit records the files it changed against its
+parent: path → old (kind, size, content hash) and new (kind, size, content hash, location),
+or a deletion. It is computed at commit time against the parent the commit actually lands on
+(so replayed commits are right), covered by the commit hash, and checked by pail-mirror's
+proof against the manifest diff for every commit. `log`, `show` and `fetch --history` read
+it instead of diffing manifests; commits written before change lists fall back to diffing.
+The list stays raw JSON until read, so walking history doesn't parse it.
+
+| (warm, median ms) | manifest diffs | change lists | git |
+|---|---|---|---|
+| `log --name-status -n 200` | 169 | 24 | 33 |
+| `log -- services/rust` (2,221 commits) | 1,623 | 122 | 308 |
+| `log --stat -n 200` | 343 | 187 | 124 |
 
 ### Local content cache
 

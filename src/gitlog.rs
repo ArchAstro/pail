@@ -480,6 +480,10 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
         let diffs: Vec<Option<Vec<Change>>> = if wants_diff {
             use futures::StreamExt;
             futures::stream::iter(batch.iter().map(|(_, c)| async move {
+                // The commit's own change list when it has one; a manifest diff otherwise.
+                if let Some(cs) = c.change_list() {
+                    return Ok(Some(cs));
+                }
                 let from = ctx.repo.root_of(c.parent).await?;
                 ctx.repo.diff(from, c.root).await.map(Some)
             }))
@@ -632,7 +636,8 @@ pub struct Printer<'a> {
 }
 
 impl<'a> Printer<'a> {
-    pub async fn new(ctx: &'a Ctx, o: &'a LogOpts, tty: bool) -> Result<Printer<'a>> {
+    /// `any_merge`: whether a commit to be shown is a merge (its `Merge:` line abbreviates).
+    pub async fn new(ctx: &'a Ctx, o: &'a LogOpts, tty: bool, any_merge: bool) -> Result<Printer<'a>> {
         let color = o.color.unwrap_or(tty);
         let decorate = o.decorate.unwrap_or(if tty { Decorate::Short } else { Decorate::No });
         let needs_decor = decorate != Decorate::No || matches!(&o.format, Format::User { fmt, .. } if fmt.contains("%d") || fmt.contains("%D"));
@@ -656,11 +661,17 @@ impl<'a> Printer<'a> {
                 decorations.entry(h).or_default().push((name(&b), false));
             }
         }
+        let abbrev_commit = o.abbrev_commit.unwrap_or(matches!(o.format, Format::Oneline | Format::Reference));
+        // The default length needs every commit id; only compute it if something abbreviates.
+        let uses_short = abbrev_commit
+            || (any_merge && !matches!(o.format, Format::Oneline | Format::Raw | Format::User { .. }))
+            || matches!(&o.format, Format::User { fmt, .. } if fmt.contains("%h") || fmt.contains("%p") || fmt.contains("%t"))
+            || (o.diff.any_output() && (o.diff.patch || o.diff.raw));
         let abbrev = match o.abbrev {
             Some(a) => a,
-            None => ctx.default_abbrev().await?,
+            None if uses_short => ctx.default_abbrev().await?,
+            None => 7,
         };
-        let abbrev_commit = o.abbrev_commit.unwrap_or(matches!(o.format, Format::Oneline | Format::Reference));
         Ok(Printer {
             ctx,
             o,

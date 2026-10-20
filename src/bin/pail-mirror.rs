@@ -319,6 +319,8 @@ async fn import_delta(repo: &Repo, git: &Git, branch: &str, base: Hash, sha: &st
 struct Proof {
     tree_match: bool,
     commit_match: bool,
+    /// The commit's recorded change list equals the manifest diff from its parent.
+    changes_match: bool,
     rebuilt_commit: String,
     contents_checked: usize,
     files: usize,
@@ -374,9 +376,26 @@ async fn prove(verifier: &Repo, ids: &mut BlobIds, pail: Hash, git_sha: &str, gi
         message,
     };
     let rebuilt_commit = object_id("commit", &commit_bytes(&rebuilt));
+    // The change list must be exactly the manifest diff from the parent (old side: kind, size,
+    // hash; new side: those plus location).
+    let changes_match = match pc.change_list() {
+        None => true,
+        Some(listed) => {
+            let parent_root = verifier.root_of(pc.parent).await?;
+            let actual = verifier.diff(parent_root, pc.root).await?;
+            let key = |e: &Option<Entry>, loc: bool| {
+                e.as_ref().map(|e| (e.kind as u8, e.size, e.hash, if loc { format!("{:?}", e.loc) } else { String::new() }))
+            };
+            listed.len() == actual.len()
+                && listed.iter().zip(&actual).all(|(l, a)| {
+                    l.path == a.path && key(&l.old, false) == key(&a.old, false) && key(&l.new, true) == key(&a.new, true)
+                })
+        }
+    };
     Ok(Proof {
         tree_match: tree == git_tree,
         commit_match: rebuilt_commit == git_sha,
+        changes_match,
         rebuilt_commit,
         contents_checked: checked,
         files: entries.len(),
@@ -572,10 +591,16 @@ async fn run(args: RunArgs) -> Result<()> {
                 import_ms,
                 verify_ms: t.elapsed().as_millis(),
                 contents_checked: p.contents_checked,
-                tree_match: p.tree_match,
+                tree_match: p.tree_match && p.changes_match,
                 commit_match: p.commit_match,
                 attempts,
-                note: if p.commit_match { String::new() } else { format!("rebuilt {}", p.rebuilt_commit) },
+                note: if !p.changes_match {
+                    "change list differs from the manifest diff".to_string()
+                } else if p.commit_match {
+                    String::new()
+                } else {
+                    format!("rebuilt {}", p.rebuilt_commit)
+                },
             };
             record(&dash, &c.state_dir, rec)?;
             seq += 1;
@@ -632,12 +657,18 @@ async fn run(args: RunArgs) -> Result<()> {
                 import_ms,
                 verify_ms: t.elapsed().as_millis(),
                 contents_checked: p.contents_checked,
-                tree_match: p.tree_match,
+                tree_match: p.tree_match && p.changes_match,
                 commit_match: p.commit_match,
                 attempts,
-                note: if p.commit_match { String::new() } else { format!("rebuilt {}", p.rebuilt_commit) },
+                note: if !p.changes_match {
+                    "change list differs from the manifest diff".to_string()
+                } else if p.commit_match {
+                    String::new()
+                } else {
+                    format!("rebuilt {}", p.rebuilt_commit)
+                },
             };
-            let ok = rec.commit_match;
+            let ok = rec.commit_match && rec.tree_match;
             record(&dash, &c.state_dir, rec)?;
             if !ok {
                 push_error(&dash, format!("{} did not reproduce byte for byte", &sha[..10]));
@@ -735,7 +766,7 @@ async fn verify(args: VerifyArgs) -> Result<()> {
         let sha = pc.meta.get("git.commit").context("commit lacks git.commit")?;
         let raw = git.commit_info(sha)?;
         let p = prove(&verifier, &mut ids, *h, sha, &raw.tree).await?;
-        if p.commit_match && p.tree_match {
+        if p.commit_match && p.tree_match && p.changes_match {
             ok += 1;
         } else {
             bad += 1;

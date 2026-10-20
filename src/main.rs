@@ -330,10 +330,11 @@ async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
     o.paths = paths;
     let spec = Pathspec::new(&o.paths)?;
     let commits = walk(ctx, &o, &spec, o.diff.any_output()).await?;
-    let mut printer = Printer::new(ctx, &o, out.tty).await?;
+    let any_merge = commits.iter().any(|c| c.commit.meta.get("git.parents").is_some_and(|p| p.contains(' ')));
+    let mut printer = Printer::new(ctx, &o, out.tty, any_merge).await?;
     // Contents for diffs are fetched 64 commits at a time in one batched read.
     for chunk in commits.chunks(64) {
-        printer.diff.prefetch(chunk.iter().filter_map(|c| c.changes.as_deref())).await?;
+        printer.diff.prefetch(chunk).await?;
         for c in chunk {
             printer.show(c, &mut *out.w).await?;
         }
@@ -689,8 +690,14 @@ async fn run(cli: Cli) -> Result<()> {
                         }
                         commits += 1;
                         let c = ctx.commit(&h).await?;
-                        let from = ctx.repo.root_of(c.parent).await?;
-                        for ch in ctx.repo.diff(from, c.root).await? {
+                        let changes = match c.change_list() {
+                            Some(cs) => cs,
+                            None => {
+                                let from = ctx.repo.root_of(c.parent).await?;
+                                ctx.repo.diff(from, c.root).await?
+                            }
+                        };
+                        for ch in changes {
                             if let Some(e) = ch.new {
                                 want.entry(e.hash).or_insert(e);
                             }

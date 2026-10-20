@@ -254,14 +254,19 @@ pub async fn show(ctx: &Ctx, args: &[String], out: &mut dyn Write, tty: bool) ->
     let names = if o.revs.is_empty() { vec!["HEAD".to_string()] } else { std::mem::take(&mut o.revs) };
     let objs = GitObjects::new(ctx);
     let spec = Pathspec::new(&o.paths)?;
-    let mut printer = Printer::new(ctx, &o, tty).await?;
+    let mut printer = Printer::new(ctx, &o, tty, true).await?;
     for name in &names {
         match resolve(&objs, name).await? {
             Object::Commit { hash, commit } => {
                 // Merges show Git's combined diff, which pail's first-parent history lacks.
                 let merge = commit.meta.get("git.parents").is_some_and(|p| p.split_whitespace().count() > 1);
-                let from = ctx.repo.root_of(commit.parent).await?;
-                let all = ctx.repo.diff(from, commit.root).await?;
+                let all = match commit.change_list() {
+                    Some(cs) => cs,
+                    None => {
+                        let from = ctx.repo.root_of(commit.parent).await?;
+                        ctx.repo.diff(from, commit.root).await?
+                    }
+                };
                 // With paths, commits that don't touch them are not shown (as in log).
                 if !spec.is_empty() && !all.iter().any(|c| spec.matches(&c.path)) {
                     continue;

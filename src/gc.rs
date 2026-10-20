@@ -65,7 +65,7 @@ pub async fn gc(repo: &Repo, grace_secs: i64, dry_run: bool) -> Result<GcReport>
                             packs.insert(pack.hex());
                         }
                         Loc::Chunks(cs) => chunks.extend(cs.iter().map(|c| c.hash.hex())),
-                        Loc::Inline(_) => {}
+                        Loc::Inline(_) | Loc::Unresolved => {}
                     }
                 }
             }
