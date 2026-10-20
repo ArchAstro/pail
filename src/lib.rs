@@ -9,6 +9,7 @@ pub mod gitdiff;
 pub mod gitlog;
 pub mod gitobj;
 pub mod gitsrc;
+pub mod graph;
 pub mod hash;
 pub mod manifest;
 pub mod objects;

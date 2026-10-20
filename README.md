@@ -137,15 +137,33 @@ pail cache prune --max-size 20G                     # drop least recently used c
 `PAIL_HOME` moves it; `PAIL_BLOBS=off` turns content caching off.
 
 On firstlanding (2,203 commits), `fetch --history` pulled 8,092 file versions (259 MB) in 22s.
-With the cache warm:
 
-| | pail | git |
-|---|---|---|
-| `log --oneline` (all) | 0.12s | 0.28s |
-| `log -p -n 200` | 0.47s | 0.18s |
-| `log --name-status -- <dir>` (all) | 1.5s | 0.45s |
-| `ls-tree -r HEAD` | 0.19s | 0.08s |
-| `cat-file -p HEAD` | 0.15s | 0.05s |
+### Local indexes
+
+Derived, rebuildable, never stale (everything they index is immutable):
+
+1. Commit graph (per store, like Git's commit-graph): every commit's metadata and changed
+   paths in one append-only file plus a sorted, memory-mapped index by pail id and Git id.
+   Walks, `A..B`, id/prefix lookups and abbreviation lengths read it, never commit objects;
+   `log -- <path>` filters on its changed paths.
+2. HEAD resolves only when used; the store's default branch is remembered.
+3. Git ids: blob ids in one index by content hash; root tree ids by manifest root (mirrored
+   commits record `git.tree`, checked by the proof).
+4. Line diffs for a batch of commits are computed in parallel, then printed in order.
+
+Same range as `git log --first-parent` (2,221 commits), warm caches, median of 15:
+
+| ms | before | pail | git |
+|---|---|---|---|
+| `log --oneline -1` | 77 | 6 | 12 |
+| `log --format=%s` | 56 | 13 | 32 |
+| `log --name-status -n 200` | 169 | 20 | 42 |
+| `log --stat -n 200` | 343 | 93 | 112 |
+| `log -p -n 200` | 507 | 126 | 122 |
+| `log -- services/rust` | 1,623 | 14 | 44 |
+| `cat-file -p <id>:path` | 26 | 6 | 10 |
+| `cat-file -p <commit>` | 83 | 5 | 9 |
+| `rev-parse <short id>` | 233 | 5 | 10 |
 
 Proof: `scripts/gitlog-compat.sh` and `scripts/gitinspect-compat.sh` run each command with the
 same arguments through `git` and `pail` on mirrored history and compare bytes. On firstlanding

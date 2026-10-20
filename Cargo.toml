@@ -17,6 +17,7 @@ globset = "0.4.20"
 hex = "0.4"
 ignore = "0.4"
 libc = "0.2.191"
+memmap2 = "0.9.11"
 object_store = { version = "0.14", features = ["aws", "gcp"] }
 rand = "0.9"
 regex = "1"

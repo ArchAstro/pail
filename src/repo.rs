@@ -90,6 +90,9 @@ pub struct Repo {
     pub blobs: Option<crate::blobs::Blobs>,
     pages: Mutex<HashMap<Hash, Arc<Page>>>,
     commits: Mutex<HashMap<Hash, Arc<Commit>>>,
+    /// Commit metadata (no change lists) served by the local commit graph.
+    metas: Mutex<HashMap<Hash, Arc<Commit>>>,
+    graph: std::sync::OnceLock<Option<crate::graph::Graph>>,
 }
 
 pub fn default_cache_dir() -> Option<PathBuf> {
@@ -107,7 +110,15 @@ impl Repo {
     }
 
     pub fn with_store(store: Store, cache_dir: Option<PathBuf>) -> Repo {
-        Repo { store, cache_dir, blobs: None, pages: Mutex::default(), commits: Mutex::default() }
+        Repo {
+            store,
+            cache_dir,
+            blobs: None,
+            pages: Mutex::default(),
+            commits: Mutex::default(),
+            metas: Mutex::default(),
+            graph: std::sync::OnceLock::new(),
+        }
     }
 
     fn cache_path(&self, kind: &str, h: &Hash) -> Option<PathBuf> {
@@ -200,6 +211,57 @@ impl Repo {
         Ok(c)
     }
 
+    /// The local commit graph (None when the metadata cache is off).
+    pub fn graph(&self) -> Option<&crate::graph::Graph> {
+        self.graph.get_or_init(|| self.cache_dir.as_ref().and_then(|d| crate::graph::Graph::open(d, &self.store.url).ok())).as_ref()
+    }
+
+    /// Make the graph hold `tips` and all their ancestors: walk each tip down to the first
+    /// commit it already knows, then append oldest first.
+    pub async fn ensure_graph(&self, tips: &[Hash]) -> Result<()> {
+        let Some(g) = self.graph() else { return Ok(()) };
+        let view = g.view();
+        let mut seen = HashSet::new();
+        let mut order: Vec<(Hash, Arc<Commit>)> = vec![];
+        for tip in tips {
+            let mut chain = vec![];
+            let mut cur = Some(*tip);
+            while let Some(h) = cur {
+                if view.contains(&h) || !seen.insert(h) {
+                    break;
+                }
+                let c = self.commit_obj(&h).await?;
+                cur = c.parent;
+                chain.push((h, c));
+            }
+            chain.reverse();
+            order.extend(chain);
+        }
+        if !order.is_empty() {
+            g.append(&order)?;
+        }
+        Ok(())
+    }
+
+    /// A commit's metadata without its change list: from memory, the commit graph, or the
+    /// commit object. Use `commit_obj` when the change list is needed.
+    pub async fn commit_meta(&self, h: &Hash) -> Result<Arc<Commit>> {
+        if let Some(c) = self.commits.lock().unwrap().get(h).or(self.metas.lock().unwrap().get(h)) {
+            return Ok(c.clone());
+        }
+        if let Some(c) = self.graph().and_then(|g| g.view().get(h)) {
+            let c = Arc::new(c);
+            self.metas.lock().unwrap().insert(*h, c.clone());
+            return Ok(c);
+        }
+        self.commit_obj(h).await
+    }
+
+    /// Paths a commit changed, from the commit graph (None if it doesn't know them).
+    pub fn changed_paths(&self, h: &Hash) -> Option<Vec<String>> {
+        self.graph()?.view().changed_paths(h)
+    }
+
     /// Up to `n` commits starting at `start`, newest first.
     pub async fn log(&self, start: Hash, n: usize) -> Result<Vec<(Hash, Arc<Commit>)>> {
         let mut out = vec![];
@@ -223,7 +285,7 @@ impl Repo {
             if x == y {
                 return Ok(Some(x));
             }
-            let (cx, cy) = (self.commit_obj(&x).await?, self.commit_obj(&y).await?);
+            let (cx, cy) = (self.commit_meta(&x).await?, self.commit_meta(&y).await?);
             if cx.generation >= cy.generation {
                 a = cx.parent;
             }
@@ -234,13 +296,13 @@ impl Repo {
     }
 
     pub async fn is_ancestor(&self, ancestor: Hash, of: Hash) -> Result<bool> {
-        let target = self.commit_obj(&ancestor).await?.generation;
+        let target = self.commit_meta(&ancestor).await?.generation;
         let mut cur = Some(of);
         while let Some(h) = cur {
             if h == ancestor {
                 return Ok(true);
             }
-            let c = self.commit_obj(&h).await?;
+            let c = self.commit_meta(&h).await?;
             if c.generation <= target {
                 return Ok(false);
             }

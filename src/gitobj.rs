@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use bytes::Bytes;
 
 use crate::gitsrc::{RawCommit, commit_bytes, mode_for_kind, object_id};
@@ -49,7 +49,6 @@ pub struct TreeItem {
 
 pub struct GitObjects<'a> {
     pub ctx: &'a Ctx,
-    blob_ids: std::sync::Mutex<HashMap<Hash, String>>,
 }
 
 /// Git blob ids by content hash, kept in one append-only file (`<blake3> <sha1>` lines) and
@@ -69,6 +68,23 @@ fn load_blob_index() -> HashMap<Hash, String> {
         .collect()
 }
 
+/// Git blob ids by content hash for this process, loaded from the index on first use.
+fn blob_index() -> &'static std::sync::Mutex<HashMap<Hash, String>> {
+    static IDX: std::sync::OnceLock<std::sync::Mutex<HashMap<Hash, String>>> = std::sync::OnceLock::new();
+    IDX.get_or_init(|| std::sync::Mutex::new(load_blob_index()))
+}
+
+/// The Git blob id of content already in hand: from the index, else hashed and recorded.
+pub fn blob_id_of(h: &Hash, data: &[u8]) -> String {
+    if let Some(id) = blob_index().lock().unwrap().get(h) {
+        return id.clone();
+    }
+    let id = object_id("blob", data);
+    blob_index().lock().unwrap().insert(*h, id.clone());
+    append_blob_index(&[(*h, id.clone())]);
+    id
+}
+
 fn append_blob_index(new: &[(Hash, String)]) {
     use std::io::Write;
     let Some(p) = blob_index_path() else { return };
@@ -83,9 +99,39 @@ fn append_blob_index(new: &[(Hash, String)]) {
     }
 }
 
+/// Git tree ids by manifest root (both immutable), in one append-only file.
+fn tree_cache() -> &'static std::sync::Mutex<HashMap<Hash, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Hash, String>>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let map = crate::repo::default_cache_dir()
+            .and_then(|d| std::fs::read_to_string(d.join("gittree.idx")).ok())
+            .map(|t| {
+                t.lines()
+                    .filter_map(|l| {
+                        let (r, g) = l.split_once(' ')?;
+                        (g.len() == 40).then(|| Some((Hash::from_hex(r).ok()?, g.to_string()))).flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        std::sync::Mutex::new(map)
+    })
+}
+
+fn tree_cache_put(root: Hash, tree: &str) {
+    use std::io::Write;
+    tree_cache().lock().unwrap().insert(root, tree.to_string());
+    if let Some(d) = crate::repo::default_cache_dir() {
+        let _ = std::fs::create_dir_all(&d);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("gittree.idx")) {
+            let _ = f.write_all(format!("{} {tree}\n", root.hex()).as_bytes());
+        }
+    }
+}
+
 impl<'a> GitObjects<'a> {
     pub fn new(ctx: &'a Ctx) -> GitObjects<'a> {
-        GitObjects { ctx, blob_ids: std::sync::Mutex::new(load_blob_index()) }
+        GitObjects { ctx }
     }
 
     /// Git blob ids for entries, reading content only for ids not cached.
@@ -94,7 +140,7 @@ impl<'a> GitObjects<'a> {
         let mut missing: Vec<Entry> = vec![];
         let mut queued = std::collections::HashSet::new();
         {
-            let mem = self.blob_ids.lock().unwrap();
+            let mem = blob_index().lock().unwrap();
             for e in entries {
                 if out.contains_key(&e.hash) {
                     continue;
@@ -124,14 +170,14 @@ impl<'a> GitObjects<'a> {
             append_blob_index(&new);
             start = end;
         }
-        self.blob_ids.lock().unwrap().extend(out.iter().map(|(k, v)| (*k, v.clone())));
+        blob_index().lock().unwrap().extend(out.iter().map(|(k, v)| (*k, v.clone())));
         Ok(out)
     }
 
     /// Resolve `<rev>`, `<rev>^{tree}`, `<rev>:<path>`.
     pub async fn resolve(&self, name: &str) -> Result<Object> {
         if let Some((rev, path)) = name.split_once(':') {
-            let commit = if rev.is_empty() { self.ctx.head.context("HEAD has no commits")? } else { self.ctx.resolve(rev).await? };
+            let commit = if rev.is_empty() { self.ctx.head_commit().await? } else { self.ctx.resolve(rev).await? };
             let path = path.trim_start_matches("./").trim_matches('/');
             let snap = Snapshot::open(&self.ctx.repo, commit).await?;
             return match snap.stat(path).await? {
@@ -190,6 +236,23 @@ impl<'a> GitObjects<'a> {
     }
 
     pub async fn tree_id(&self, commit: Hash, dir: &str) -> Result<String> {
+        if dir.is_empty() {
+            // Root trees: recorded by mirrored commits, else cached by manifest root.
+            let c = self.ctx.commit(&commit).await?;
+            if let Some(t) = c.meta.get("git.tree") {
+                return Ok(t.clone());
+            }
+            if let Some(t) = tree_cache().lock().unwrap().get(&c.root) {
+                return Ok(t.clone());
+            }
+            let t = self.compute_tree_id(commit, "").await?;
+            tree_cache_put(c.root, &t);
+            return Ok(t);
+        }
+        self.compute_tree_id(commit, dir).await
+    }
+
+    async fn compute_tree_id(&self, commit: Hash, dir: &str) -> Result<String> {
         let snap = Snapshot::open(&self.ctx.repo, commit).await?;
         let files = snap.walk(dir).await?;
         let ids = self.blob_ids(&files).await?;

@@ -232,6 +232,7 @@ fn meta_for(sha: &str, raw: &RawCommit) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     m.insert("git.commit".into(), sha.to_string());
     m.insert("git.parents".into(), raw.parents.join(" "));
+    m.insert("git.tree".into(), raw.tree.clone());
     if !raw.extra_headers.is_empty() {
         match std::str::from_utf8(&raw.extra_headers) {
             Ok(s) => m.insert("git.extra_headers".into(), s.to_string()),
@@ -393,7 +394,8 @@ async fn prove(verifier: &Repo, ids: &mut BlobIds, pail: Hash, git_sha: &str, gi
         }
     };
     Ok(Proof {
-        tree_match: tree == git_tree,
+        // A recorded git.tree must be the tree rebuilt from stored content.
+        tree_match: tree == git_tree && pc.meta.get("git.tree").is_none_or(|t| *t == tree),
         commit_match: rebuilt_commit == git_sha,
         changes_match,
         rebuilt_commit,

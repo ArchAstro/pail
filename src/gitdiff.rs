@@ -9,7 +9,7 @@ use anyhow::Result;
 use bytes::Bytes;
 
 use crate::gitlog::Shown;
-use crate::gitsrc::{mode_for_kind, object_id};
+use crate::gitsrc::mode_for_kind;
 use crate::hash::Hash;
 use crate::manifest::{Change, Entry, Kind};
 use crate::rev::Ctx;
@@ -247,15 +247,15 @@ pub struct DiffPrinter<'a> {
     o: &'a DiffOpts,
     color: bool,
     abbrev: usize,
-    /// Git blob ids by pail content hash.
-    blob_ids: std::sync::Mutex<HashMap<Hash, String>>,
     /// Contents fetched ahead for the commits about to print.
     prefetched: std::sync::Mutex<HashMap<Hash, Bytes>>,
+    /// Line diffs computed ahead (in parallel) by (old, new) content.
+    scripts: std::sync::Mutex<HashMap<(Hash, Hash), std::sync::Arc<Vec<crate::xdiff::Change>>>>,
 }
 
 impl<'a> DiffPrinter<'a> {
     pub async fn new(ctx: &'a Ctx, o: &'a DiffOpts, color: bool, abbrev: usize) -> Result<DiffPrinter<'a>> {
-        Ok(DiffPrinter { ctx, o, color, abbrev, blob_ids: Default::default(), prefetched: Default::default() })
+        Ok(DiffPrinter { ctx, o, color, abbrev, prefetched: Default::default(), scripts: Default::default() })
     }
 
     /// Entries whose contents the requested output needs: all of them for stats, patches and
@@ -312,7 +312,49 @@ impl<'a> DiffPrinter<'a> {
             want.extend(self.locate(s.commit.parent, mine).await?);
         }
         let data = self.ctx.repo.read_files(&want).await?;
-        *self.prefetched.lock().unwrap() = want.iter().map(|e| e.hash).zip(data).collect();
+        let data: HashMap<Hash, Bytes> = want.iter().map(|e| e.hash).zip(data).collect();
+        // Line diffs for every modified text file in the batch, spread over the cores.
+        let lines = self.o.stat || self.o.numstat || self.o.shortstat || (self.o.patch && !self.o.no_patch);
+        let mut jobs: Vec<(Hash, Hash)> = vec![];
+        if lines {
+            let mut seen = std::collections::HashSet::new();
+            for s in shown {
+                for c in s.changes.iter().flatten() {
+                    if let (Some(a), Some(b)) = (&c.old, &c.new) {
+                        if a.hash != b.hash && seen.insert((a.hash, b.hash)) {
+                            jobs.push((a.hash, b.hash));
+                        }
+                    }
+                }
+            }
+        }
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
+        let mut computed: Vec<((Hash, Hash), Vec<crate::xdiff::Change>)> = vec![];
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = jobs
+                .chunks(jobs.len().div_ceil(threads).max(1))
+                .map(|chunk| {
+                    let data = &data;
+                    sc.spawn(move || {
+                        chunk
+                            .iter()
+                            .filter_map(|&(a, b)| {
+                                let (x, y) = (data.get(&a)?, data.get(&b)?);
+                                if is_binary(x) || is_binary(y) {
+                                    return None;
+                                }
+                                Some(((a, b), crate::xdiff::diff(x, y).2))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for h in handles {
+                computed.extend(h.join().expect("diff thread panicked"));
+            }
+        });
+        *self.scripts.lock().unwrap() = computed.into_iter().map(|(k, v)| (k, std::sync::Arc::new(v))).collect();
+        *self.prefetched.lock().unwrap() = data;
         Ok(())
     }
 
@@ -423,8 +465,7 @@ impl<'a> DiffPrinter<'a> {
     }
 
     fn blob_id(&self, e: &Entry, data: &HashMap<Hash, Bytes>) -> String {
-        let mut m = self.blob_ids.lock().unwrap();
-        m.entry(e.hash).or_insert_with(|| object_id("blob", data.get(&e.hash).map(|b| &b[..]).unwrap_or(b""))).clone()
+        crate::gitobj::blob_id_of(&e.hash, data.get(&e.hash).map(|b| &b[..]).unwrap_or(b""))
     }
 
     fn abbrev_id(&self, id: &str) -> String {
@@ -449,7 +490,7 @@ impl<'a> DiffPrinter<'a> {
         } else {
             let mut o2 = self.o.clone();
             o2.renames = false;
-            let p = DiffPrinter { ctx: self.ctx, o: &o2, color: self.color, abbrev: self.abbrev, blob_ids: Default::default(), prefetched: Default::default() };
+            let p = DiffPrinter { ctx: self.ctx, o: &o2, color: self.color, abbrev: self.abbrev, prefetched: Default::default(), scripts: Default::default() };
             p.pairs(changes, &data)
         };
         let mut sep = false;
@@ -481,7 +522,7 @@ impl<'a> DiffPrinter<'a> {
             sep = true;
         }
         let needs_counts = self.o.stat || self.o.numstat || self.o.shortstat;
-        let counts: Vec<Counts> = if needs_counts { pairs.iter().map(|p| counts(p, &data)).collect() } else { vec![] };
+        let counts: Vec<Counts> = if needs_counts { pairs.iter().map(|p| self.counts(p, &data)).collect() } else { vec![] };
         if self.o.numstat {
             for (p, c) in pairs.iter().zip(&counts) {
                 let name = stat_name(p);
@@ -697,7 +738,8 @@ impl<'a> DiffPrinter<'a> {
             return Ok(());
         }
         writeln!(out, "--- {la}\n+++ {lb}")?;
-        emit_hunks(old, new, self.o.context, self.color, out)
+        let script = self.script(p, old, new);
+        emit_hunks(old, new, &script, self.o.context, self.color, out)
     }
 }
 
@@ -792,6 +834,30 @@ struct Counts {
     binary: bool,
 }
 
+impl DiffPrinter<'_> {
+    /// The line diff for a pair: precomputed for the batch, or computed now.
+    fn script(&self, p: &FilePair, old: &[u8], new: &[u8]) -> std::sync::Arc<Vec<crate::xdiff::Change>> {
+        let key = (p.old.as_ref().map(|e| e.hash), p.new.as_ref().map(|e| e.hash));
+        if let (Some(a), Some(b)) = key {
+            if let Some(s) = self.scripts.lock().unwrap().get(&(a, b)) {
+                return s.clone();
+            }
+        }
+        std::sync::Arc::new(crate::xdiff::diff(old, new).2)
+    }
+
+    fn counts(&self, p: &FilePair, data: &HashMap<Hash, Bytes>) -> Counts {
+        let empty = Bytes::new();
+        let old = p.old.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
+        let new = p.new.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
+        if is_binary(old) || is_binary(new) || p.old.as_ref().zip(p.new.as_ref()).is_some_and(|(a, b)| a.hash == b.hash) {
+            return counts(p, data);
+        }
+        let script = self.script(p, old, new);
+        Counts { added: script.iter().map(|c| c.chg2 as u64).sum(), deleted: script.iter().map(|c| c.chg1 as u64).sum(), binary: false }
+    }
+}
+
 fn counts(p: &FilePair, data: &HashMap<Hash, Bytes>) -> Counts {
     let empty = Bytes::new();
     let old = p.old.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
@@ -832,8 +898,8 @@ fn func_name(line: &[u8]) -> Option<&[u8]> {
 /// Unified hunks exactly as xdl_emit_diff writes them: changes grouped when at most
 /// 2*ctx lines apart, trailing context bounded by both files, function names searched
 /// backwards from each hunk to the previous one.
-fn emit_hunks(old: &[u8], new: &[u8], ctx: usize, color: bool, out: &mut dyn Write) -> Result<()> {
-    let (la, lb, script) = crate::xdiff::diff(old, new);
+fn emit_hunks(old: &[u8], new: &[u8], script: &[crate::xdiff::Change], ctx: usize, color: bool, out: &mut dyn Write) -> Result<()> {
+    let (la, lb) = (crate::xdiff::records(old), crate::xdiff::records(new));
     let (c_frag, c_old, c_new, c_reset) = if color { ("\x1b[36m", "\x1b[31m", "\x1b[32m", "\x1b[m") } else { ("", "", "", "") };
     let emit = |out: &mut dyn Write, sign: &str, color: &str, line: &[u8]| -> Result<()> {
         out.write_all(color.as_bytes())?;

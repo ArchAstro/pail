@@ -331,3 +331,51 @@ fn content_cache_serves_bare_reads() {
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("removed 3 file(s)"), "{}", String::from_utf8_lossy(&out.stdout));
     assert!(!run(&["cat", "a.txt"]).status.success(), "pruned content must be refetched, and the packs are gone");
 }
+
+/// With the commit graph on, history reads print exactly what they print without it, and
+/// commits made after the graph was built are picked up.
+#[test]
+fn commit_graph_matches_uncached_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let bare = t.join("bare");
+    let bare_s = bare.to_str().unwrap();
+    pail(&t, &["init", bare_s]);
+    pail(&t, &["clone", bare_s, "w"]);
+    let w = t.join("w");
+    let commit = |i: usize| {
+        write(&w.join(format!("f{}.txt", i % 4)), &format!("v{i}\n"));
+        pail(&w, &["add", "-A"]);
+        pail(&w, &["commit", "-m", &format!("c{i}\n\nbody {i}")]);
+    };
+    for i in 0..6 {
+        commit(i);
+    }
+    let cache = t.join("meta");
+    let read = |cached: bool, args: &[&str]| -> String {
+        let mut full = vec!["--store", bare_s];
+        full.extend_from_slice(args);
+        let mut c = cmd(&t, &full);
+        if cached {
+            c.env("PAIL_CACHE", &cache);
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let cases: [&[&str]; 4] = [&["log"], &["log", "--oneline", "--name-status"], &["log", "-p", "-3", "HEAD~1"], &["log", "--format=%h %p %s", "--", "f1.txt"]];
+    for args in cases {
+        assert_eq!(read(true, args), read(false, args), "{args:?}");
+    }
+    let graphs: Vec<_> = std::fs::read_dir(cache.join("graph")).unwrap().flatten().collect();
+    assert!(graphs.len() == 1 && graphs[0].path().join("commits2.idx").exists(), "one graph, for this store");
+    // New commits after the graph exists.
+    commit(6);
+    commit(7);
+    for args in cases {
+        assert_eq!(read(true, args), read(false, args), "{args:?} after new commits");
+    }
+    // Abbreviated ids resolve through the graph.
+    let short = read(true, &["log", "-1", "--format=%h", "HEAD~3"]);
+    assert_eq!(read(true, &["log", "-1", "--format=%s", short.trim()]), "c4\n");
+}

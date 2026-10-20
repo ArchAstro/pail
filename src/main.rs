@@ -307,7 +307,7 @@ async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
             o.revs.push(w);
             continue;
         }
-        let exists = match ctx.head {
+        let exists = match ctx.head().await? {
             Some(h) => pail::snapshot::Snapshot::open(&ctx.repo, h).await?.stat(&w).await?.is_some(),
             None => false,
         };
@@ -604,7 +604,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Some(t) => ("HEAD".into(), t.to_string()),
                 None => ("HEAD".into(), String::new()),
             };
-            let h = if rev.is_empty() { ctx.head.context("empty history")? } else { ctx.resolve(&rev).await? };
+            let h = if rev.is_empty() { ctx.head_commit().await? } else { ctx.resolve(&rev).await? };
             let snap = pail::snapshot::Snapshot::open(&ctx.repo, h).await?;
             let dir = dir.trim_matches('/');
             let mut out = Output::open(cli.no_pager);
@@ -671,7 +671,7 @@ async fn run(cli: Cli) -> Result<()> {
                 tips.extend(ctx.refs().await?.into_iter().map(|(_, h)| h));
             }
             if tips.is_empty() {
-                tips.push(ctx.head.context("empty history")?);
+                tips.push(ctx.head_commit().await?);
             }
             // Snapshots of the tips, plus every version introduced along their history.
             let mut want: std::collections::HashMap<Hash, pail::manifest::Entry> = Default::default();
@@ -689,7 +689,7 @@ async fn run(cli: Cli) -> Result<()> {
                             break;
                         }
                         commits += 1;
-                        let c = ctx.commit(&h).await?;
+                        let c = ctx.repo.commit_obj(&h).await?;
                         let changes = match c.change_list() {
                             Some(cs) => cs,
                             None => {
@@ -857,7 +857,7 @@ async fn run(cli: Cli) -> Result<()> {
                 (None, Some((r, p))) => (r.to_string(), p.to_string()),
                 (None, None) => ("HEAD".into(), path),
             };
-            let h = if rev.is_empty() { ctx.head.context("empty history")? } else { ctx.resolve(&rev).await? };
+            let h = if rev.is_empty() { ctx.head_commit().await? } else { ctx.resolve(&rev).await? };
             let data = pail::snapshot::Snapshot::open(&ctx.repo, h).await?.read(&path).await?;
             use std::io::Write;
             std::io::stdout().write_all(&data)?;

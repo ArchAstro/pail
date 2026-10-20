@@ -39,10 +39,10 @@ pub const STORE_HEAD_KEY: &str = "HEAD";
 
 pub struct Ctx {
     pub repo: Repo,
-    /// The branch HEAD names.
-    pub branch: String,
-    /// The commit HEAD points at (None in an empty repository).
-    pub head: Option<Hash>,
+    /// The branch HEAD names (resolved on first use when bare).
+    branch: OnceCell<String>,
+    /// The commit HEAD points at; None in an empty repository (resolved on first use).
+    head: OnceCell<Option<Hash>>,
     /// Root of the working copy, None when bare.
     pub worktree: Option<PathBuf>,
     pub ids: Ids,
@@ -70,28 +70,85 @@ impl Ctx {
     pub async fn open(store: Option<String>, ids: Ids) -> Result<Ctx> {
         let store = store.or_else(|| std::env::var("PAIL_STORE").ok().filter(|s| !s.is_empty()));
         if let Some(s) = store {
+            // Nothing is read until a command needs HEAD: naming commits directly costs no
+            // round trips.
             let repo = Repo::open(&store_url(&s)?)?;
-            let branch = match repo.store.get_opt(STORE_HEAD_KEY).await? {
-                Some((d, _)) => serde_json::from_slice::<StoreHead>(&d)?.branch,
-                None => "main".to_string(),
-            };
-            let head = repo.read_ref(&branch).await?.map(|(h, _)| h);
-            return Ok(Ctx { repo, branch, head, worktree: None, ids, git_index: OnceCell::new() });
+            return Ok(Ctx { repo, branch: OnceCell::new(), head: OnceCell::new(), worktree: None, ids, git_index: OnceCell::new() });
         }
         let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
         let wt = Worktree::open(&cwd).context("not in a working copy (use --store <url> for a bare repository)")?;
         Ok(Ctx {
             repo: wt.repo,
-            branch: wt.head.branch,
-            head: wt.head.base,
+            branch: OnceCell::new_with(Some(wt.head.branch)),
+            head: OnceCell::new_with(Some(wt.head.base)),
             worktree: Some(wt.root),
             ids,
             git_index: OnceCell::new(),
         })
     }
 
+    /// Where the store's default branch is remembered (it rarely changes, so HEAD costs one
+    /// read instead of two).
+    fn head_memo(&self) -> Option<PathBuf> {
+        let dir = crate::repo::default_cache_dir()?;
+        Some(dir.join("heads").join(Hash::of(self.repo.store.url.as_bytes()).hex()))
+    }
+
+    async fn store_default_branch(&self) -> Result<String> {
+        let b = match self.repo.store.get_opt(STORE_HEAD_KEY).await? {
+            Some((d, _)) => serde_json::from_slice::<StoreHead>(&d)?.branch,
+            None => "main".to_string(),
+        };
+        if let Some(p) = self.head_memo() {
+            let _ = std::fs::create_dir_all(p.parent().unwrap());
+            let _ = std::fs::write(p, &b);
+        }
+        Ok(b)
+    }
+
+    /// The branch HEAD names.
+    pub async fn branch(&self) -> Result<&str> {
+        self.branch
+            .get_or_try_init(|| async {
+                if let Some(b) = self.head_memo().and_then(|p| std::fs::read_to_string(p).ok()).filter(|b| !b.is_empty()) {
+                    return Ok(b);
+                }
+                self.store_default_branch().await
+            })
+            .await
+            .map(String::as_str)
+    }
+
+    /// The commit HEAD points at (None in an empty repository).
+    pub async fn head(&self) -> Result<Option<Hash>> {
+        self.head
+            .get_or_try_init(|| async {
+                let b = self.branch().await?.to_string();
+                if let Some((h, _)) = self.repo.read_ref(&b).await? {
+                    return Ok(Some(h));
+                }
+                // The remembered default branch may have moved: ask the store once more.
+                let fresh = self.store_default_branch().await?;
+                if fresh != b {
+                    return Ok(self.repo.read_ref(&fresh).await?.map(|(h, _)| h));
+                }
+                Ok(None)
+            })
+            .await
+            .copied()
+    }
+
+    /// HEAD, or Git's error for an empty branch.
+    pub async fn head_commit(&self) -> Result<Hash> {
+        match self.head().await? {
+            Some(h) => Ok(h),
+            None => bail!("your current branch '{}' does not have any commits yet", self.branch().await?),
+        }
+    }
+
+    /// Commit metadata (no change list): from the commit graph when it knows the commit.
     pub async fn commit(&self, h: &Hash) -> Result<Arc<Commit>> {
-        self.repo.commit_obj(h).await
+        self.repo.commit_meta(h).await
     }
 
     /// Git ids of every mirrored commit reachable from a branch.
@@ -187,7 +244,14 @@ impl Ctx {
 
     async fn resolve_base(&self, base: &str) -> Result<Option<Hash>> {
         if base == "HEAD" || base == "@" || base.is_empty() {
-            return Ok(self.head);
+            return self.head().await;
+        }
+        // Ids the commit graph knows resolve locally, without asking the store about refs.
+        let hexlike = base.len() >= 4 && base.bytes().all(|b| b.is_ascii_hexdigit());
+        if hexlike {
+            if let Some(h) = self.graph_lookup(&base.to_ascii_lowercase())? {
+                return Ok(Some(h));
+            }
         }
         let name = base.strip_prefix("refs/heads/").unwrap_or(base);
         if crate::objects::validate_branch(name).is_ok() {
@@ -201,6 +265,26 @@ impl Ctx {
         let base = base.to_ascii_lowercase();
         if base.len() == 64 {
             return Ok(Some(Hash::from_hex(&base)?));
+        }
+        if self.repo.graph().is_some() {
+            // Bring every branch into the graph, then look again; pail ids it still doesn't
+            // know are listed from the store.
+            let tips: Vec<Hash> = self.repo.list_refs().await?.into_iter().map(|(_, h)| h).collect();
+            self.repo.ensure_graph(&tips).await?;
+            if let Some(h) = self.graph_lookup(&base)? {
+                return Ok(Some(h));
+            }
+            let mut found: Vec<Hash> = vec![];
+            if base.len() < 64 {
+                for (k, _) in self.repo.store.list(&format!("commits/{base}")).await? {
+                    found.push(Hash::from_hex(k.trim_start_matches("commits/"))?);
+                }
+            }
+            return match found.len() {
+                0 => Ok(None),
+                1 => Ok(Some(found[0])),
+                _ => bail!("short object ID {base} is ambiguous"),
+            };
         }
         let mut found: Vec<Hash> = vec![];
         if base.len() < 64 {
@@ -227,8 +311,38 @@ impl Ctx {
         }
     }
 
-    /// Git's default abbreviation: 7 characters, longer where needed to stay unique.
+    /// A unique commit for a hex prefix (pail or Git id) among those the graph holds.
+    fn graph_lookup(&self, hex: &str) -> Result<Option<Hash>> {
+        let Some(g) = self.repo.graph() else { return Ok(None) };
+        let v = g.view();
+        if hex.len() == 64 {
+            return Ok(Hash::from_hex(hex).ok().filter(|h| v.contains(h)));
+        }
+        let mut found = v.pail_prefix(hex);
+        if hex.len() <= 40 {
+            found.extend(v.git_prefix(hex));
+        }
+        found.sort();
+        found.dedup();
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(Some(found[0])),
+            _ => bail!("short object ID {hex} is ambiguous"),
+        }
+    }
+
+    /// Git's default abbreviation: 7 characters, longer where needed to stay unique among the
+    /// commits known locally (the commit graph), as Git does among its local objects.
     pub async fn default_abbrev(&self) -> Result<usize> {
+        if let Some(g) = self.repo.graph() {
+            let v = g.view();
+            if !v.is_empty() {
+                return Ok(match self.ids {
+                    Ids::Git => v.abbrev_git,
+                    Ids::Pail => v.abbrev_pail,
+                });
+            }
+        }
         let idx = self.git_index().await?;
         Ok(match self.ids {
             Ids::Git => Self::abbrev_len(idx.to_pail.keys().map(String::as_str), 7),

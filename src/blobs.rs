@@ -168,11 +168,17 @@ impl Blobs {
         Some(Blobs { dir })
     }
 
-    /// Cached content, if present. Touches the file so pruning keeps recently used content.
+    /// Cached content, if present. Marks it used (at most daily) so pruning keeps it.
     pub fn read(&self, h: &Hash) -> Option<bytes::Bytes> {
-        let p = self.path(h);
-        let data = std::fs::read(&p).ok()?;
-        let _ = std::fs::File::open(&p).and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now())));
+        use std::io::Read;
+        let mut f = std::fs::File::open(self.path(h)).ok()?;
+        let md = f.metadata().ok()?;
+        let mut data = Vec::with_capacity(md.len() as usize);
+        f.read_to_end(&mut data).ok()?;
+        let day = std::time::Duration::from_secs(86400);
+        if md.accessed().ok().and_then(|a| a.elapsed().ok()).is_none_or(|age| age > day) {
+            let _ = f.set_times(std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now()));
+        }
         Some(data.into())
     }
 

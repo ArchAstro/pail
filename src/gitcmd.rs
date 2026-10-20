@@ -210,7 +210,7 @@ pub async fn rev_parse(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Resul
             _ if a.starts_with('-') => return Err(fatal(format!("unknown option {a}"))),
             name if abbrev_ref => {
                 if name == "HEAD" || name == "@" {
-                    writeln!(out, "{}", ctx.branch)?;
+                    writeln!(out, "{}", ctx.branch().await?)?;
                 } else {
                     writeln!(out, "{name}")?;
                 }
@@ -260,7 +260,7 @@ pub async fn show(ctx: &Ctx, args: &[String], out: &mut dyn Write, tty: bool) ->
             Object::Commit { hash, commit } => {
                 // Merges show Git's combined diff, which pail's first-parent history lacks.
                 let merge = commit.meta.get("git.parents").is_some_and(|p| p.split_whitespace().count() > 1);
-                let all = match commit.change_list() {
+                let all = match ctx.repo.commit_obj(&hash).await?.change_list() {
                     Some(cs) => cs,
                     None => {
                         let from = ctx.repo.root_of(commit.parent).await?;

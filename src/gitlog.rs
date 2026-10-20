@@ -384,15 +384,15 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
     let mut negatives = vec![];
     for r in &o.revs {
         if let Some((a, b)) = r.split_once("...") {
-            let a = if a.is_empty() { ctx.head.context("HEAD has no commits")? } else { ctx.resolve(a).await? };
-            let b = if b.is_empty() { ctx.head.context("HEAD has no commits")? } else { ctx.resolve(b).await? };
+            let a = if a.is_empty() { ctx.head_commit().await? } else { ctx.resolve(a).await? };
+            let b = if b.is_empty() { ctx.head_commit().await? } else { ctx.resolve(b).await? };
             positives.extend([a, b]);
             if let Some(m) = ctx.repo.merge_base(a, b).await? {
                 negatives.push(m);
             }
         } else if let Some((a, b)) = r.split_once("..") {
-            let a = if a.is_empty() { ctx.head.context("HEAD has no commits")? } else { ctx.resolve(a).await? };
-            let b = if b.is_empty() { ctx.head.context("HEAD has no commits")? } else { ctx.resolve(b).await? };
+            let a = if a.is_empty() { ctx.head_commit().await? } else { ctx.resolve(a).await? };
+            let b = if b.is_empty() { ctx.head_commit().await? } else { ctx.resolve(b).await? };
             negatives.push(a);
             positives.push(b);
         } else if let Some(n) = r.strip_prefix('^') {
@@ -405,11 +405,15 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
         positives.extend(ctx.refs().await?.into_iter().map(|(_, h)| h));
     }
     if positives.is_empty() && o.revs.is_empty() && !o.all {
-        match ctx.head {
+        match ctx.head().await? {
             Some(h) => positives.push(h),
-            None => return Err(fatal(format!("your current branch '{}' does not have any commits yet", ctx.branch))),
+            None => return Err(fatal(format!("your current branch '{}' does not have any commits yet", ctx.branch().await?))),
         }
     }
+    // Walks read commit metadata from the local commit graph; bring these tips into it.
+    let mut tips = positives.clone();
+    tips.extend(&negatives);
+    ctx.repo.ensure_graph(&tips).await?;
     // Linear history: everything at or below the merge base with a negative is excluded.
     let mut stop: HashMap<Hash, u64> = HashMap::new();
     for p in &positives {
@@ -477,11 +481,20 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
             }
             batch.push((h, c));
         }
+        // A path filter alone reads changed paths from the commit graph; commits that don't
+        // touch the paths never load their change lists.
+        if !need_diff && !spec.is_empty() {
+            batch.retain(|(h, _)| ctx.repo.changed_paths(h).is_none_or(|ps| ps.iter().any(|p| spec.matches(p))));
+        }
         let diffs: Vec<Option<Vec<Change>>> = if wants_diff {
             use futures::StreamExt;
-            futures::stream::iter(batch.iter().map(|(_, c)| async move {
+            futures::stream::iter(batch.iter().map(|(h, c)| async move {
+                // Already matched on the graph's changed paths, and nothing prints the diff.
+                if !need_diff && ctx.repo.changed_paths(h).is_some() {
+                    return Ok(None);
+                }
                 // The commit's own change list when it has one; a manifest diff otherwise.
-                if let Some(cs) = c.change_list() {
+                if let Some(cs) = ctx.repo.commit_obj(h).await?.change_list() {
                     return Ok(Some(cs));
                 }
                 let from = ctx.repo.root_of(c.parent).await?;
@@ -501,7 +514,12 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
                     if !spec.is_empty() && !all.iter().any(|ch| spec.matches(&ch.path)) {
                         continue;
                     }
-                    Some(if o.full_diff { all } else { all.into_iter().filter(|ch| spec.matches(&ch.path)).collect() })
+                    if !need_diff {
+                        // Fetched only to filter by path: nothing prints it.
+                        None
+                    } else {
+                        Some(if o.full_diff { all } else { all.into_iter().filter(|ch| spec.matches(&ch.path)).collect() })
+                    }
                 }
                 None => None,
             };
@@ -646,16 +664,18 @@ impl<'a> Printer<'a> {
             let full = decorate == Decorate::Full;
             let name = |b: &str| if full { format!("refs/heads/{b}") } else { b.to_string() };
             let refs = ctx.refs().await?;
-            let head_branch_tip = refs.iter().find(|(b, _)| *b == ctx.branch).map(|(_, h)| *h);
-            if let Some(h) = ctx.head {
+            let branch = ctx.branch().await?.to_string();
+            let head = ctx.head().await?;
+            let head_branch_tip = refs.iter().find(|(b, _)| *b == branch).map(|(_, h)| *h);
+            if let Some(h) = head {
                 if head_branch_tip == Some(h) {
-                    decorations.entry(h).or_default().push((format!("HEAD -> {}", name(&ctx.branch)), true));
+                    decorations.entry(h).or_default().push((format!("HEAD -> {}", name(&branch)), true));
                 } else {
                     decorations.entry(h).or_default().push(("HEAD".into(), true));
                 }
             }
             for (b, h) in refs {
-                if b == ctx.branch && ctx.head == Some(h) {
+                if b == branch && head == Some(h) {
                     continue;
                 }
                 decorations.entry(h).or_default().push((name(&b), false));
