@@ -74,6 +74,51 @@ Measured on firstlanding (28,877 files, 459 MB; APFS):
 | same, but target cloned without mtime matching | 5.6 GB, 8 crates | 112s |
 | seeded from a real checkout: 140 `node_modules`/`_build`/`.next`, 5.3 GB apparent | 157 MB | 15s |
 
+## Reading history: Git's interface, any commit, bare or not
+
+Every read command runs against a working copy or straight against a store (a bare
+repository): `--store <url>`, `PAIL_STORE`, or a directory path. A bare store's HEAD is its
+default branch (set by `pail init`).
+
+```sh
+pail --store s3://bucket/repo log --oneline -20 -- services/rust
+pail --store s3://bucket/repo log -p --stat main~10..main
+pail --store ./repo.pail show HEAD~3 --name-status
+pail --store gs://bucket/repo ls-tree -r -l HEAD:src
+pail --store gs://bucket/repo cat-file -p HEAD:package.json
+printf 'HEAD:Cargo.toml\nHEAD:src\n' | pail --store … cat-file --batch
+pail --store … rev-parse --short=12 HEAD HEAD:src
+pail --store … ls -l HEAD:src  |  pail --store … cat HEAD~2:README.md
+```
+
+1. `log`, `show`, `cat-file`, `ls-tree`, `rev-parse` take Git's arguments and print Git's
+   output: revisions (`~`, `^`, `A..B`, `A...B`, `^A`), formats (`--oneline`, `--pretty=…`,
+   `--format` placeholders, `--date=…`), filters (`-n`, `--skip`, `--since/--until`,
+   `--author`, `--grep`, `--merges`, paths/globs), diffs (`--name-status`, `--raw`,
+   `--numstat`, `--stat`, `--shortstat`, `--summary`, `-p`, `-U<n>`, rename detection),
+   pager and colors on a terminal.
+2. Line diffs come from a port of Git's xdiff (Myers, indent heuristic), so patches and
+   stats are Git's, not merely similar. Git object ids (blobs, trees, commits) are computed
+   from pail data; `--ids=git` prints the Git commit ids of mirrored history.
+3. `snapshot::Snapshot` is the library API behind it: `stat`, `list_dir`, `walk`, `read`,
+   `read_range` for any commit, reading only the manifest pages and packs it needs.
+
+Proof: `scripts/gitlog-compat.sh` and `scripts/gitinspect-compat.sh` run each command with the
+same arguments through `git` and `pail` on mirrored history and compare bytes. On firstlanding
+(2,192 commits; a second window with 139 merges): 55/55 `log` cases, including `-p` over
+the whole history (45 MB of patches, identical), and 127/127 `show`/`cat-file`/`ls-tree`/
+`rev-parse` cases at four depths.
+
+Differences from Git:
+
+1. History is first-parent, so output matches `git log --first-parent`. `show` on a merge
+   prints no combined (`--cc`) diff.
+2. The default abbreviation is 7 characters (longer if needed to stay unique). Git sizes
+   its default from the local clone's object count, so pass `--abbrev=<n>` when the length
+   matters.
+3. Not yet: `--graph`, `--follow`, `-L`, `-S/-G`, `--word-diff`, notes, mailmap (`%aN` is
+   `%an`), `.gitattributes` diff drivers, `%w()`/`%<()` layout (accepted, not applied).
+
 ## pail-mirror: proving it on a real repository
 
 `pail-mirror` watches a GitHub branch, forwards each first-parent commit into pail, and

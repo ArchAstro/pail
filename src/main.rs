@@ -6,13 +6,30 @@ use clap::{Parser, Subcommand};
 use pail::hash::Hash;
 use pail::objects::now_date;
 use pail::repo::{CommitRequest, Delta, Repo};
+use pail::rev::{Ctx, Ids};
 use pail::worktree::{Checkout, Worktree, author, registered, seed_ignored, unregister};
 
 #[derive(Parser)]
 #[command(name = "pail", version, about = "Version control that lives in a bucket")]
 struct Cli {
+    /// Run against a store (bare repository) instead of the working copy: s3://, gs://,
+    /// file:// or a directory path. Also `PAIL_STORE`.
+    #[arg(long)]
+    store: Option<String>,
+    /// Commit ids to print: pail's, or the Git ids of mirrored commits.
+    #[arg(long, value_enum, default_value = "pail")]
+    ids: IdsArg,
+    /// Don't pipe output into a pager.
+    #[arg(long, short = 'P')]
+    no_pager: bool,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+enum IdsArg {
+    Pail,
+    Git,
 }
 
 #[derive(Subcommand)]
@@ -39,18 +56,53 @@ enum Cmd {
     Switch { branch: String, #[arg(short, long)] create: bool },
     /// Squash a branch's changes onto another branch.
     Land { branch: String, #[arg(long, default_value = "main")] onto: String, #[arg(short, long)] message: Option<String> },
-    /// Show history.
-    Log { #[arg(short = 'n', default_value_t = 20)] n: usize, branch: Option<String> },
+    /// Show history, with `git log`'s options and output.
+    #[command(disable_help_flag = true)]
+    Log {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Show commits (with patches), trees or file contents, as `git show`.
+    #[command(disable_help_flag = true)]
+    Show {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Object contents, type or size, as `git cat-file` (`--batch` reads names from stdin).
+    #[command(name = "cat-file", disable_help_flag = true)]
+    CatFile {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// List a tree with Git modes and object ids, as `git ls-tree`.
+    #[command(name = "ls-tree", disable_help_flag = true)]
+    LsTree {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Resolve revisions and object names to ids, as `git rev-parse`.
+    #[command(name = "rev-parse", disable_help_flag = true)]
+    RevParse {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
+        args: Vec<String>,
+    },
     /// Paths changed between two commits, or base→stage (`--staged`).
     Diff { from: Option<String>, to: Option<String>, #[arg(long)] staged: bool },
-    /// List files in a commit.
-    Ls { rev: Option<String> },
+    /// List a directory of a commit (`-r` for everything under it, `-l` for sizes).
+    Ls {
+        /// `<rev>`, `<rev>:<dir>` or a directory of HEAD.
+        target: Option<String>,
+        #[arg(short, long)]
+        recursive: bool,
+        #[arg(short, long)]
+        long: bool,
+    },
     /// Delete unreachable objects older than the grace period.
     Gc { store: Option<String>, #[arg(long, default_value_t = 168.0)] grace_hours: f64, #[arg(long)] dry_run: bool },
     /// Extra working copies that share file contents and build output copy-on-write.
     #[command(subcommand)]
     Worktree(WtCmd),
-    /// Print a file from a commit.
+    /// Print a file from a commit: `<path>` (HEAD) or `<rev>:<path>`.
     Cat { path: String, #[arg(long)] rev: Option<String> },
 }
 
@@ -116,18 +168,170 @@ fn fmt_bytes(n: u64) -> String {
 #[tokio::main]
 async fn main() {
     if let Err(e) = run(Cli::parse()).await {
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            if io.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+        }
+        if let Some(f) = e.downcast_ref::<pail::gitlog::Fatal>() {
+            eprintln!("fatal: {f}");
+            std::process::exit(128);
+        }
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
 }
 
+/// Where command output goes: a pager when stdout is a terminal (as Git does), else stdout.
+struct Output {
+    w: Box<dyn std::io::Write>,
+    pager: Option<std::process::Child>,
+    tty: bool,
+}
+
+impl Output {
+    fn open(no_pager: bool) -> Output {
+        use std::io::IsTerminal;
+        let tty = std::io::stdout().is_terminal();
+        let pager = ["PAIL_PAGER", "GIT_PAGER", "PAGER"].iter().find_map(|k| std::env::var(k).ok()).unwrap_or_else(|| "less".into());
+        if tty && !no_pager && !pager.is_empty() && pager != "cat" {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", &pager]).stdin(std::process::Stdio::piped());
+            if std::env::var_os("LESS").is_none() {
+                cmd.env("LESS", "FRX");
+            }
+            if std::env::var_os("LV").is_none() {
+                cmd.env("LV", "-c");
+            }
+            if let Ok(mut child) = cmd.spawn() {
+                let stdin = child.stdin.take().unwrap();
+                return Output { w: Box::new(std::io::BufWriter::new(stdin)), pager: Some(child), tty };
+            }
+        }
+        Output { w: Box::new(std::io::BufWriter::new(std::io::stdout())), pager: None, tty }
+    }
+
+    fn finish(mut self) -> Result<()> {
+        let flushed = self.w.flush();
+        drop(self.w);
+        if let Some(mut p) = self.pager.take() {
+            let _ = p.wait();
+        }
+        flushed.or_else(|e| if e.kind() == std::io::ErrorKind::BrokenPipe { Ok(()) } else { Err(e) })?;
+        Ok(())
+    }
+}
+
+/// Finish a command: a Git `fatal:` goes to stderr before buffered stdout is flushed, as
+/// Git's own output ordering has it.
+fn done(out: Output, r: Result<()>) -> Result<()> {
+    if let Err(e) = &r {
+        if let Some(f) = e.downcast_ref::<pail::gitlog::Fatal>() {
+            eprintln!("fatal: {f}");
+            let _ = out.finish();
+            std::process::exit(128);
+        }
+    }
+    let f = out.finish();
+    r?;
+    f
+}
+
+/// `git log`: split words into revisions and paths the way Git does, then walk and print.
+async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
+    use pail::gitlog::{Fatal, LogOpts, Pathspec, Printer, walk};
+    let mut o = LogOpts::parse(args)?;
+    let words = std::mem::take(&mut o.revs);
+    let mut paths = vec![];
+    for w in words {
+        if !paths.is_empty() {
+            paths.push(w);
+            continue;
+        }
+        let is_rev = w.contains("..") || w.starts_with('^') || ctx.try_resolve(&w).await.unwrap_or(None).is_some();
+        if is_rev {
+            o.revs.push(w);
+            continue;
+        }
+        let exists = match ctx.head {
+            Some(h) => pail::snapshot::Snapshot::open(&ctx.repo, h).await?.stat(&w).await?.is_some(),
+            None => false,
+        };
+        if !exists {
+            return Err(Fatal(format!(
+                "ambiguous argument '{w}': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'"
+            ))
+            .into());
+        }
+        paths.push(w);
+    }
+    paths.append(&mut o.paths);
+    // Pathspecs are relative to the current directory inside a working copy.
+    if let Some(root) = &ctx.worktree {
+        let rel = cwd()?.strip_prefix(root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        if !rel.is_empty() {
+            paths = paths.into_iter().map(|p| format!("{rel}/{p}")).collect();
+        }
+    }
+    o.paths = paths;
+    let spec = Pathspec::new(&o.paths)?;
+    let commits = walk(ctx, &o, &spec, o.diff.any_output()).await?;
+    let mut printer = Printer::new(ctx, &o, out.tty).await?;
+    // Contents for diffs are fetched 64 commits at a time in one batched read.
+    for chunk in commits.chunks(64) {
+        printer.diff.prefetch(chunk.iter().filter_map(|c| c.changes.as_deref())).await?;
+        for c in chunk {
+            printer.show(c, &mut *out.w).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<()> {
+    let ids = match cli.ids {
+        IdsArg::Pail => Ids::Pail,
+        IdsArg::Git => Ids::Git,
+    };
     match cli.cmd {
+        Cmd::Log { args } => {
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let mut out = Output::open(cli.no_pager);
+            let r = cmd_log(&ctx, &args, &mut out).await;
+            done(out, r)?;
+        }
+        Cmd::Show { args } => {
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let mut out = Output::open(cli.no_pager);
+            let r = pail::gitcmd::show(&ctx, &args, &mut *out.w, out.tty).await;
+            done(out, r)?;
+        }
+        Cmd::CatFile { args } => {
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let mut out = Output::open(true);
+            let r = pail::gitcmd::cat_file(&ctx, &args, &mut *out.w).await;
+            done(out, r)?;
+        }
+        Cmd::LsTree { args } => {
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let mut out = Output::open(true);
+            let r = pail::gitcmd::ls_tree(&ctx, &args, &mut *out.w).await;
+            done(out, r)?;
+        }
+        Cmd::RevParse { args } => {
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let mut out = Output::open(true);
+            let r = pail::gitcmd::rev_parse(&ctx, &args, &mut *out.w).await;
+            done(out, r)?;
+        }
         Cmd::Init { store, branch } => {
+            let store = pail::rev::store_url(&store)?;
             let repo = Repo::open(&store)?;
             if repo.read_ref(&branch).await?.is_some() {
                 bail!("{store} already has branch {branch}");
             }
+            // The default branch a bare read (`--store`) starts from.
+            let head = serde_json::to_vec(&pail::rev::StoreHead { branch: branch.clone() })?;
+            repo.store.put(pail::rev::STORE_HEAD_KEY, head.into()).await?;
             let who = author();
             let date = now_date();
             let out = repo
@@ -146,6 +350,7 @@ async fn run(cli: Cli) -> Result<()> {
             println!("initialized {store} ({branch} @ {})", out.commit.short());
         }
         Cmd::Clone { store, dir, branch } => {
+            let store = pail::rev::store_url(&store)?;
             let dir = dir.unwrap_or_else(|| {
                 PathBuf::from(store.trim_end_matches('/').rsplit('/').next().unwrap_or("repo"))
             });
@@ -300,17 +505,6 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             println!("landed {branch} onto {onto} @ {}", out.commit.short());
         }
-        Cmd::Log { n, branch } => {
-            let wt = Worktree::open(&cwd()?)?;
-            let start = match branch {
-                Some(b) => resolve_rev(&wt.repo, &b).await?,
-                None => wt.head.base.context("empty history")?,
-            };
-            for (h, c) in wt.repo.log(start, n).await? {
-                let git = c.meta.get("git.commit").map(|g| format!(" (git {})", &g[..10])).unwrap_or_default();
-                println!("{} {}{git}  {}", h.short(), c.author.split(" <").next().unwrap_or(""), c.subject());
-            }
-        }
         Cmd::Diff { from, to, staged } => {
             let wt = Worktree::open(&cwd()?)?;
             if staged {
@@ -347,16 +541,50 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("{code} {}", c.path);
             }
         }
-        Cmd::Ls { rev } => {
-            let wt = Worktree::open(&cwd()?)?;
-            let h = match rev {
-                Some(r) => resolve_rev(&wt.repo, &r).await?,
-                None => wt.head.base.context("empty history")?,
+        Cmd::Ls { target, recursive, long } => {
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let (rev, dir) = match target.as_deref() {
+                Some(t) if t.contains(':') => t.split_once(':').map(|(r, d)| (r.to_string(), d.to_string())).unwrap(),
+                Some(t) if ctx.try_resolve(t).await.unwrap_or(None).is_some() => (t.to_string(), String::new()),
+                Some(t) => ("HEAD".into(), t.to_string()),
+                None => ("HEAD".into(), String::new()),
             };
-            let root = wt.repo.root_of(Some(h)).await?;
-            for e in wt.repo.entries(root).await? {
-                println!("{:?}\t{}\t{}", e.kind, e.size, e.path);
+            let h = if rev.is_empty() { ctx.head.context("empty history")? } else { ctx.resolve(&rev).await? };
+            let snap = pail::snapshot::Snapshot::open(&ctx.repo, h).await?;
+            let dir = dir.trim_matches('/');
+            let mut out = Output::open(cli.no_pager);
+            let kind = |k: &pail::snapshot::NodeKind| match k {
+                pail::snapshot::NodeKind::File => "file",
+                pail::snapshot::NodeKind::Exec => "exec",
+                pail::snapshot::NodeKind::Symlink => "link",
+                pail::snapshot::NodeKind::Dir => "dir",
+            };
+            let r: Result<()> = async {
+                use std::io::Write;
+                if recursive {
+                    for e in snap.walk(dir).await? {
+                        if long {
+                            writeln!(out.w, "{:4} {:>12}  {}", kind(&e.kind.into()), e.size, e.path)?;
+                        } else {
+                            writeln!(out.w, "{}", e.path)?;
+                        }
+                    }
+                } else {
+                    for n in snap.list_dir(dir).await? {
+                        let slash = if n.kind == pail::snapshot::NodeKind::Dir { "/" } else { "" };
+                        if long {
+                            writeln!(out.w, "{:4} {:>12}  {}{slash}", kind(&n.kind), n.size, n.name())?;
+                        } else {
+                            writeln!(out.w, "{}{slash}", n.name())?;
+                        }
+                    }
+                }
+                Ok(())
             }
+            .await;
+            let f = out.finish();
+            r?;
+            f?;
         }
         Cmd::Gc { store, grace_hours, dry_run } => {
             let repo = match store {
@@ -462,16 +690,16 @@ async fn run(cli: Cli) -> Result<()> {
             println!("removed {}", root.display());
         }
         Cmd::Cat { path, rev } => {
-            let wt = Worktree::open(&cwd()?)?;
-            let h = match rev {
-                Some(r) => resolve_rev(&wt.repo, &r).await?,
-                None => wt.head.base.context("empty history")?,
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let (rev, path) = match (rev, path.split_once(':')) {
+                (Some(r), _) => (r, path),
+                (None, Some((r, p))) => (r.to_string(), p.to_string()),
+                (None, None) => ("HEAD".into(), path),
             };
-            let root = wt.repo.root_of(Some(h)).await?;
-            let e = wt.repo.get_entry(root, &path).await?.with_context(|| format!("{path} not in {}", h.short()))?;
-            let data = wt.repo.read_files(std::slice::from_ref(&e)).await?;
+            let h = if rev.is_empty() { ctx.head.context("empty history")? } else { ctx.resolve(&rev).await? };
+            let data = pail::snapshot::Snapshot::open(&ctx.repo, h).await?.read(&path).await?;
             use std::io::Write;
-            std::io::stdout().write_all(&data[0])?;
+            std::io::stdout().write_all(&data)?;
         }
     }
     Ok(())

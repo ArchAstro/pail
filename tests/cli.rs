@@ -88,7 +88,7 @@ fn end_to_end_workflow() {
     pail(&a, &["land", "feature", "--onto", "main"]);
     pail(&a, &["sync"]);
     assert_eq!(std::fs::read_to_string(a.join("feature.txt")).unwrap(), "f");
-    let log = pail(&a, &["log"]);
+    let log = pail(&a, &["log", "--oneline"]);
     assert!(log.lines().next().unwrap().contains("Land feature"), "{log}");
     let branches = pail(&a, &["branch"]);
     assert!(branches.contains("* main") && branches.contains("feature"), "{branches}");
@@ -237,4 +237,58 @@ fn worktrees_share_content_and_build_output() {
     assert!(!b.exists() && !c.exists());
     let list = pail(&a, &["worktree", "list"]);
     assert!(!list.contains(&c.display().to_string()), "{list}");
+}
+
+/// Read commands work on a bare store (a plain directory path) and inside a working copy,
+/// with Git's log/show/ls-tree/rev-parse interfaces.
+#[test]
+fn bare_store_inspection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let bare = t.join("bare.pail");
+    let bare_s = bare.to_str().unwrap();
+    pail(&t, &["init", bare_s, "--branch", "trunk"]);
+    pail(&t, &["clone", bare_s, "w", "--branch", "trunk"]);
+    let w = t.join("w");
+    write(&w.join("src/lib.rs"), "fn a() {}\n");
+    write(&w.join("README.md"), "hello\n");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "first\n\nbody line"]);
+    write(&w.join("src/lib.rs"), "fn a() {}\nfn b() {}\n");
+    write(&w.join("src/util/mod.rs"), "pub mod x;\n");
+    pail(&w, &["commit", "-a", "-m", "second"]);
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "third: util"]);
+
+    let bare_cmd = |args: &[&str]| -> String {
+        let mut full = vec!["--store", bare_s];
+        full.extend_from_slice(args);
+        pail(&t, &full)
+    };
+    // Bare HEAD is the store's default branch.
+    let subjects = bare_cmd(&["log", "--format=%s"]);
+    assert_eq!(subjects, "third: util\nsecond\nfirst\nInitial empty commit\n");
+    assert_eq!(pail(&w, &["log", "--format=%s", "-2"]), "third: util\nsecond\n");
+    let medium = bare_cmd(&["log", "-1", "--skip=2"]);
+    assert!(medium.starts_with("commit ") && medium.contains("Author: Tester <t@example.com>\nDate:   "), "{medium}");
+    assert!(medium.ends_with("\n\n    first\n    \n    body line\n"), "{medium:?}");
+    assert_eq!(bare_cmd(&["log", "--format=%s", "--", "src/util"]), "third: util\n");
+    let ns = bare_cmd(&["log", "--format=%s", "--name-status", "-1", "HEAD~1"]);
+    assert_eq!(ns, "second\n\nM\tsrc/lib.rs\n");
+    let patch = bare_cmd(&["show", "--format=%s", "HEAD~1"]);
+    assert!(patch.contains("@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n"), "{patch}");
+    // Git object ids computed from pail content.
+    assert_eq!(bare_cmd(&["rev-parse", "HEAD:README.md"]).trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
+    let tree = bare_cmd(&["ls-tree", "HEAD"]);
+    assert_eq!(tree.lines().count(), 2, "{tree}");
+    assert!(tree.starts_with("100644 blob ce013625030ba8dba906f756967f9e9ca394464a\tREADME.md\n040000 tree "), "{tree}");
+    assert_eq!(bare_cmd(&["cat-file", "-p", "HEAD:src/util/mod.rs"]), "pub mod x;\n");
+    assert_eq!(bare_cmd(&["cat-file", "-t", "HEAD:src"]), "tree\n");
+    // Filesystem-shaped listing and reads.
+    assert_eq!(bare_cmd(&["ls", "HEAD:src"]), "lib.rs\nutil/\n");
+    assert_eq!(bare_cmd(&["ls", "-r", "HEAD~2"]), "README.md\nsrc/lib.rs\n");
+    assert_eq!(bare_cmd(&["cat", "HEAD~2:src/lib.rs"]), "fn a() {}\n");
+    // Git-style failures.
+    let err = pail_fails(&t, &["--store", bare_s, "log", "nope"]);
+    assert!(err.starts_with("fatal: ambiguous argument 'nope'"), "{err}");
 }
