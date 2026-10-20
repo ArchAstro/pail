@@ -77,6 +77,7 @@ svg { width: 100%; height: 100%; display: block; user-select: none; }
 .col-label { font: 600 13px var(--sans); fill: var(--ink); }
 .col-what { font: 12px var(--sans); fill: var(--muted); }
 .col-rule { stroke: var(--rule); stroke-dasharray: 2 5; }
+#headbg { fill: var(--paper); opacity: 0.94; }
 .edge { fill: none; stroke-width: 1.4; opacity: 0.5; transition: opacity 120ms; }
 .edge.changed { stroke-dasharray: 4 4; }
 .edge.dim { opacity: 0.08; }
@@ -96,8 +97,9 @@ svg { width: 100%; height: 100%; display: block; user-select: none; }
 .node.more text { fill: var(--muted); }
 @media (prefers-reduced-motion: reduce) { .node, #world { transition: none !important; } }
 
-.tour { position: absolute; left: 16px; top: 16px; width: min(430px, calc(100% - 32px)); background: var(--sheet); border: 1px solid var(--rule); border-radius: 14px; box-shadow: 0 10px 30px -12px rgba(20, 30, 45, 0.25); padding: 18px 20px 16px; z-index: 3; }
+.tour { margin: -20px -20px 0; padding: 20px 20px 18px; background: var(--paper); border-bottom: 1px solid var(--rule); }
 .tour[hidden] { display: none; }
+.tour:not([hidden]) + #side { display: none; }
 .tour .step { font-size: 12.5px; color: var(--muted); font-weight: 500; }
 .tour h2 { font-size: 19px; line-height: 1.25; letter-spacing: -0.015em; margin: 4px 0 8px; }
 .tour .body { font-size: 14px; line-height: 1.6; }
@@ -118,7 +120,7 @@ pre.raw { margin: 0; max-height: 260px; overflow: auto; font: 11.5px/1.5 var(--m
 .legend .dash { width: 16px; height: 0; border-top: 2px dashed var(--commit); border-radius: 0; vertical-align: 3px; }
 
 /* Details for the selected object. */
-aside { border-left: 1px solid var(--rule); background: var(--sheet); overflow: auto; padding: 20px 20px 40px; }
+aside.right { border-left: 1px solid var(--rule); background: var(--sheet); overflow: auto; padding: 20px 20px 40px; }
 aside h2 { font-size: 19px; line-height: 1.25; margin: 6px 0 4px; letter-spacing: -0.015em; overflow-wrap: anywhere; }
 aside .kind { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; padding: 1px 9px 1px 8px; border-radius: 999px; }
 aside .kind::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -144,7 +146,7 @@ pre.preview { margin: 0; max-height: 360px; overflow: auto; font: 12px/1.55 var(
 @media (max-width: 900px) {
   .app { grid-template-columns: 1fr; grid-template-rows: auto 30vh minmax(0, 1fr) 36vh; }
   .logical { border-right: 0; border-bottom: 1px solid var(--rule); }
-  aside { border-left: 0; border-top: 1px solid var(--rule); }
+  aside.right { border-left: 0; border-top: 1px solid var(--rule); }
   .store, .legend { display: none; }
   .trace { flex-basis: 100%; }
   header { flex-wrap: wrap; }
@@ -168,14 +170,17 @@ pre.preview { margin: 0; max-height: 360px; overflow: auto; font: 12px/1.55 var(
     <div class="tree" id="tree"></div>
   </nav>
   <div class="plane" id="plane">
-    <svg id="svg" aria-label="Object graph"><g id="world"><g id="cols"></g><g id="edges"></g><g id="nodes"></g></g></svg>
+    <svg id="svg" aria-label="Object graph"><g id="world"><g id="rules"></g><g id="edges"></g><g id="nodes"></g></g><rect id="headbg" x="0" y="0" width="100%" height="62"/><g id="cols"></g></svg>
     <div class="hint" id="hint"></div>
-    <section class="tour" id="tour" hidden aria-live="polite"><div class="step" id="tour-step"></div><h2 id="tour-title"></h2><div class="body" id="tour-body"></div>
-      <div class="nav"><div class="dots" id="tour-dots"></div><button id="tour-close">Close</button><button id="tour-back">Back</button><button class="primary" id="tour-next">Next</button></div></section>
+
     <div class="hud"><button id="fit">Fit</button><button id="reset">Start over</button></div>
     <div class="legend"><span><i style="background:var(--ref)"></i>branch</span><span><i style="background:var(--commit)"></i>commit</span><span><i style="background:var(--page)"></i>page</span><span><i style="background:var(--file)"></i>file</span><span><i style="background:var(--pack)"></i>pack</span><span><i style="background:var(--chunk)"></i>chunk</span><span><i class="dash"></i>changed by</span></div>
   </div>
-  <aside id="side" aria-live="polite"></aside>
+  <aside class="right">
+    <section class="tour" id="tour" hidden aria-live="polite"><div class="step" id="tour-step"></div><h2 id="tour-title"></h2><div class="body" id="tour-body"></div>
+      <div class="nav"><div class="dots" id="tour-dots"></div><button id="tour-close">Close</button><button id="tour-back">Back</button><button class="primary" id="tour-next">Next</button></div></section>
+    <div id="side" aria-live="polite"></div>
+  </aside>
 </div>
 <script>
 const $ = (s) => document.querySelector(s);
@@ -341,7 +346,7 @@ function layout() {
   const linked = new Map();
   const link = (a, b) => { if (!linked.has(a)) linked.set(a, []); linked.get(a).push(b); };
   for (const e of G.edges.values()) { link(e.to, e.from); link(e.from, e.to); }
-  const top = 76;
+  const top = 72;
   for (const c of [...cols.keys()].sort((a, b) => a - b)) {
     const list = cols.get(c);
     const want = (n) => {
@@ -362,7 +367,11 @@ function layout() {
 // ------------------------------------------------------------------ drawing
 
 const view = { x: 0, y: 0, k: 1 };
-function applyView() { $("#world").setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`); }
+// Column headers pan sideways with the graph but stay pinned to the top.
+function applyView() {
+  $("#world").setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
+  $("#cols").setAttribute("transform", `translate(${view.x},0) scale(${view.k})`);
+}
 const color = (k) => `var(--${k === "more" ? "faint" : k})`;
 
 function draw() {
@@ -370,13 +379,15 @@ function draw() {
   const cols = $("#cols"), edges = $("#edges"), nodes = $("#nodes");
   const used = new Set([...G.nodes.values()].map(column));
   const maxY = Math.max(400, ...[...G.nodes.values()].map((n) => n.y + H)) + 40;
-  cols.innerHTML = [...used].sort((a, b) => a - b).map((c) => { const [name, what] = columnLabel(c); return `<text class="col-label" x="${xOf(c)}" y="38">${esc(name)}</text><text class="col-what" x="${xOf(c)}" y="54">${esc(what)}</text><line class="col-rule" x1="${xOf(c) - 16}" y1="24" x2="${xOf(c) - 16}" y2="${maxY}"/>`; }).join("");
+  const order = [...used].sort((a, b) => a - b);
+  cols.innerHTML = order.map((c) => { const [name, what] = columnLabel(c); return `<text class="col-label" x="${xOf(c)}" y="26">${esc(name)}</text><text class="col-what" x="${xOf(c)}" y="42">${esc(what)}</text>`; }).join("");
+  $("#rules").innerHTML = order.map((c) => `<line class="col-rule" x1="${xOf(c) - 16}" y1="0" x2="${xOf(c) - 16}" y2="${maxY}"/>`).join("");
   // Hover fades what isn't linked; a selection only lights up its own edges.
+  // Hover only strengthens a node's own edges; fading is reserved for an explicit spotlight
+  // (a folder, a trace, the tour), so moving the mouse never rearranges what is visible.
   const focus = G.hover || G.sel;
-  const fade = G.hover || (G.spot ? "spot" : null);
-  const near = new Set();
-  if (G.hover) { near.add(G.hover); for (const e of G.edges.values()) { if (e.from === G.hover) near.add(e.to); if (e.to === G.hover) near.add(e.from); } }
-  else if (G.spot) for (const id of G.spot) near.add(id);
+  const fade = G.spot ? "spot" : null;
+  const near = new Set(G.spot || []);
   edges.innerHTML = [...G.edges.values()].map((e) => {
     const a = G.nodes.get(e.from), b = G.nodes.get(e.to);
     if (!a || !b) return "";
@@ -391,7 +402,7 @@ function draw() {
       d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
     }
     const tone = e.kind === "changed" || e.kind === "parent" || e.kind === "ref" ? "commit" : b.kind;
-    const lit = G.hover ? e.from === G.hover || e.to === G.hover : G.spot ? G.spot.has(e.from) && G.spot.has(e.to) : focus && (e.from === focus || e.to === focus);
+    const lit = (G.hover && (e.from === G.hover || e.to === G.hover)) || (G.spot ? G.spot.has(e.from) && G.spot.has(e.to) : G.sel && (e.from === G.sel || e.to === G.sel));
     const cls = ["edge", e.kind === "changed" ? "changed" : "", lit ? "hot" : fade ? "dim" : ""].join(" ");
     return `<path class="${cls}" d="${d}" stroke="${color(tone)}"><title>${esc(e.label || e.kind)}</title></path>`;
   }).join("");
@@ -550,11 +561,33 @@ async function select(n) {
 
 // ------------------------------------------------------------------ actions
 
-async function activate(n) {
+// Show an object and what it just opened: pan (and if needed zoom out a little) to them.
+function reveal(n, before) {
+  const added = [...G.nodes.keys()].filter((id) => !before.has(id)).slice(0, 14);
+  const ids = [n.id, ...added];
+  const r = $("#plane").getBoundingClientRect();
+  const ns = ids.map((id) => G.nodes.get(id)).filter(Boolean);
+  const x0 = Math.min(...ns.map((m) => m.x)), x1 = Math.max(...ns.map((m) => m.x + W));
+  const y0 = Math.min(...ns.map((m) => m.y)), y1 = Math.max(...ns.map((m) => m.y + H));
+  const sx0 = x0 * view.k + view.x, sx1 = x1 * view.k + view.x, sy0 = y0 * view.k + view.y, sy1 = y1 * view.k + view.y;
+  if (sx0 >= 0 && sx1 <= r.width && sy0 >= 60 && sy1 <= r.height) return; // already in view
+  fitTo(ids);
+}
+
+function endTour() {
+  if ($("#tour").hidden) return;
+  $("#tour").hidden = true;
+  G.spot = null;
+}
+
+async function activate(n, fromUser = true) {
   if (n.kind === "more" && !n.owner) return;
+  if (fromUser) { endTour(); G.spot = null; }
+  const before = new Set(G.nodes.keys());
   if (n.kind === "more" || !n.expanded) {
     try { await expand(n); } catch (err) { hint(err.message); }
     draw();
+    reveal(n.kind === "more" ? G.nodes.get(n.owner) || n : n, before);
   }
   if (n.kind !== "more") select(n);
 }
@@ -655,6 +688,7 @@ function renderTree() {
 }
 
 async function onTreeClick(row) {
+  endTour();
   const path = row.dataset.path;
   L.cur = path;
   if (row.dataset.kind === "dir") {
@@ -717,6 +751,14 @@ async function showFolder(dir) {
 
 $("#tree").addEventListener("click", (e) => { const r = e.target.closest(".row"); if (r) onTreeClick(r); });
 $("#tree").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { const r = e.target.closest(".row"); if (r) { e.preventDefault(); onTreeClick(r); } } });
+
+function intro() {
+  $("#side").innerHTML = `<span class="kind k-ref">start here</span><h2>How this repository is stored</h2>
+    <p class="what">On the left, the files you know. In the middle, the objects in the store that hold them: commits, the pages of each commit's file tree, and the packs and chunks with the bytes.</p>
+    <p class="what">Click a folder on the left to see which objects hold it. Click any object in the middle to open it.</p>
+    <p style="margin-top:16px"><button class="primary" id="go-tour">Take the tour: 9 short steps</button></p>`;
+  $("#go-tour").onclick = () => showStep(0);
+}
 
 // ------------------------------------------------------------------ the tour
 
@@ -857,7 +899,7 @@ const STEPS = [
     title: "What this machine keeps",
     async run(c) {
       spot(); G.spot = null; draw();
-      const l = c.o.local;
+      const l = c.o.local ? await api("/api/local") : null;
       if (!l) return `<p>This view reads the store directly, so nothing is kept locally. A repository (<code>pail clone --bare</code>) keeps copies and indexes.</p>`;
       const part = (name) => l.parts.find((p) => p.name === name) || { files: 0, bytes: 0 };
       return `<p>Everything above lives in the store. This machine's repository, <code>${esc(l.dir)}</code>, keeps derived copies:</p>
@@ -889,10 +931,9 @@ async function showStep(i) {
 }
 
 function closeTour() {
-  $("#tour").hidden = true;
-  G.spot = null;
+  endTour();
   draw();
-  try { localStorage.setItem("pail-inspect-toured", "1"); } catch {}
+  if (!G.sel) intro();
 }
 
 $("#learn").onclick = () => showStep(0);
@@ -924,13 +965,13 @@ plane.addEventListener("wheel", (e) => {
   applyView();
 }, { passive: false });
 const nodeOf = (el) => G.nodes.get(el.closest?.(".node")?.dataset.id);
-$("#nodes").addEventListener("click", (e) => { const n = nodeOf(e.target); if (n) activate(n); });
+$("#nodes").addEventListener("click", (e) => { const n = nodeOf(e.target); if (n) activate(n, true); });
 $("#nodes").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { const n = nodeOf(e.target); if (n) { e.preventDefault(); activate(n); } } });
 $("#nodes").addEventListener("pointerover", (e) => { const n = nodeOf(e.target); if (n && G.hover !== n.id) { G.hover = n.id; draw(); } });
 $("#nodes").addEventListener("pointerleave", () => { G.hover = null; draw(); });
 $("#fit").onclick = fit;
 $("#reset").onclick = () => start();
-$("#trace").onsubmit = (e) => { e.preventDefault(); trace($("#path").value); };
+$("#trace").onsubmit = (e) => { e.preventDefault(); endTour(); trace($("#path").value); };
 
 (async () => {
   try {
@@ -938,10 +979,8 @@ $("#trace").onsubmit = (e) => { e.preventDefault(); trace($("#path").value); };
     G.rev = G.overview.default_branch;
     $("#store").textContent = G.overview.store;
     $("#side").innerHTML = `<p class="empty">Opening the default branch…</p>`;
-    await start();
-    let toured = false;
-    try { toured = !!localStorage.getItem("pail-inspect-toured"); } catch {}
-    if (!toured) showStep(0);
+    await start(false);
+    intro();
   } catch (e) {
     $("#side").innerHTML = `<p class="error">${esc(e.message)}</p>`;
   }

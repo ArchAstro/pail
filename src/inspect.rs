@@ -64,29 +64,7 @@ impl Inspector {
             let c = self.ctx.commit(&h).await?;
             refs.push(json!({"name": name, "commit": h.hex(), "subject": c.subject(), "date": c.committer_date, "files": c.files, "bytes": c.bytes}));
         }
-        let local = self.ctx.local.as_ref().map(|l| {
-            let size = |d: &str| -> (u64, u64) {
-                let mut n = 0;
-                let mut b = 0;
-                for e in ignore::WalkBuilder::new(l.dir.join(d)).standard_filters(false).build().flatten() {
-                    if let Ok(m) = e.metadata() {
-                        if m.is_file() {
-                            n += 1;
-                            b += m.len();
-                        }
-                    }
-                }
-                (n, b)
-            };
-            let parts: Vec<Value> = [("blobs", "file contents"), ("objects", "commits and pages"), ("graph", "commit graph"), ("index", "Git ids")]
-                .iter()
-                .map(|(d, what)| {
-                    let (n, b) = size(d);
-                    json!({"name": d, "what": what, "files": n, "bytes": b})
-                })
-                .collect();
-            json!({"dir": l.dir.display().to_string(), "bare": l.config.bare, "parts": parts})
-        });
+        let local = self.ctx.local.as_ref().map(|l| json!({"dir": l.dir.display().to_string(), "bare": l.config.bare}));
         Ok(json!({
             "store": self.ctx.repo.store.url,
             "default_branch": default,
@@ -94,6 +72,32 @@ impl Inspector {
             "refs": refs,
             "local": local,
         }))
+    }
+
+    /// What the local repository holds, by part (walks its files: only on request).
+    async fn local(&self) -> Result<Value> {
+        let l = self.ctx.local.as_ref().context("reading the store directly: nothing is kept locally")?;
+        let size = |d: &str| -> (u64, u64) {
+            let mut n = 0;
+            let mut b = 0;
+            for e in ignore::WalkBuilder::new(l.dir.join(d)).standard_filters(false).build().flatten() {
+                if let Ok(m) = e.metadata() {
+                    if m.is_file() {
+                        n += 1;
+                        b += m.len();
+                    }
+                }
+            }
+            (n, b)
+        };
+        let parts: Vec<Value> = [("blobs", "file contents"), ("objects", "commits and pages"), ("graph", "commit graph"), ("index", "Git ids")]
+            .iter()
+            .map(|(d, what)| {
+                let (n, b) = size(d);
+                json!({"name": d, "what": what, "files": n, "bytes": b})
+            })
+            .collect();
+        Ok(json!({"dir": l.dir.display().to_string(), "bare": l.config.bare, "parts": parts}))
     }
 
     async fn store_prefixes(&self) -> Result<Value> {
@@ -385,6 +389,7 @@ impl Inspector {
         match parts.as_slice() {
             ["overview"] => self.overview().await,
             ["store"] => self.store_prefixes().await,
+            ["local"] => self.local().await,
             ["raw"] => self.raw(q.get("key").context("key is required")?).await,
             ["log"] => self.log(rev, q.get("n").and_then(|n| n.parse().ok()).unwrap_or(50), q.get("skip").and_then(|n| n.parse().ok()).unwrap_or(0)).await,
             ["commit", r] => self.commit(r).await,
