@@ -156,6 +156,15 @@ enum Cmd {
     },
     /// Delete unreachable objects older than the grace period.
     Gc { store: Option<String>, #[arg(long, default_value_t = 168.0)] grace_hours: f64, #[arg(long)] dry_run: bool },
+    /// Browse the repository's physical data model in a browser: commits, manifest pages,
+    /// packs and chunks, and where every file's bytes are stored.
+    Inspect {
+        #[arg(long, default_value = "127.0.0.1:7777")]
+        addr: String,
+        /// Don't open a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Fill the local content cache, as `git fetch` fills a bare repository: every file of
     /// the given commits (default HEAD), or with --history every version along their history.
     Fetch {
@@ -419,6 +428,10 @@ async fn run(cli: Cli) -> Result<()> {
             let mut out = Output::open_with(cli.no_pager, Some(&ctx.config));
             let r = cmd_log(&ctx, &args, &mut out).await;
             done(out, r)?;
+        }
+        Cmd::Inspect { addr, no_open } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            pail::inspect::serve(ctx, &addr, !no_open).await?;
         }
         Cmd::Show { args } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;

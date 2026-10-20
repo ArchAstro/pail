@@ -251,6 +251,16 @@ impl Store {
     }
 
     /// List keys under a prefix with size and last-modified time (unix seconds).
+    /// An object's size, or None if it doesn't exist.
+    pub async fn size(&self, key: &str) -> Result<Option<u64>> {
+        let p = self.path(key);
+        match retry(|| self.inner.head(&p)).await {
+            Ok(m) => Ok(Some(m.size)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn list_meta(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
         let p = self.path(prefix.trim_end_matches('/'));
         let strip = if self.prefix.is_empty() { 0 } else { self.prefix.len() + 1 };

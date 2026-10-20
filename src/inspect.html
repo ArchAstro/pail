@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pail inspect</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spline+Sans:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --paper: #eef1f4; --grid: #dfe4ea; --sheet: #ffffff; --ink: #1b2430; --muted: #627083; --faint: #98a3b1; --rule: #d9dfe6; --wash: #e6eaef;
+  --commit: #4a55c7; --commit-soft: #e6e8fa;
+  --page: #14897c; --page-soft: #dcf0ed;
+  --file: #3c4757; --file-soft: #eceff3;
+  --pack: #c4861b; --pack-soft: #f8ecd6;
+  --chunk: #8d4fa6; --chunk-soft: #efe2f4;
+  --ref: #1b2430; --ref-soft: #e3e7ec;
+  --bad: #b8402f;
+  --sans: "Spline Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "Spline Sans Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #11161c; --grid: #1b222b; --sheet: #182029; --ink: #e5e9ee; --muted: #93a0b0; --faint: #66727f; --rule: #2a333e; --wash: #222a34;
+    --commit: #8f97f0; --commit-soft: #262c52;
+    --page: #4cc1b2; --page-soft: #163a37;
+    --file: #c8d0da; --file-soft: #232b35;
+    --pack: #e2a640; --pack-soft: #3a2d15;
+    --chunk: #c08ad6; --chunk-soft: #33233d;
+    --ref: #e5e9ee; --ref-soft: #2a323c;
+    --bad: #f08a76;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body { background: var(--paper); color: var(--ink); font: 14px/1.5 var(--sans); }
+:focus-visible { outline: 2px solid var(--commit); outline-offset: 2px; border-radius: 4px; }
+.mono { font-family: var(--mono); font-size: 0.88em; letter-spacing: -0.01em; }
+.muted { color: var(--muted); }
+
+.app { display: grid; grid-template-columns: minmax(0, 1fr) 380px; grid-template-rows: auto minmax(0, 1fr); height: 100vh; }
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 18px; padding: 12px 18px; border-bottom: 1px solid var(--rule); background: var(--paper); z-index: 2; }
+.brand { font-weight: 700; font-size: 17px; letter-spacing: -0.02em; white-space: nowrap; }
+.brand span { font-weight: 400; color: var(--muted); }
+.store { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30vw; }
+.trace { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: 0 1 460px; }
+.trace input { flex: 1; min-width: 0; font: 13px var(--mono); padding: 7px 11px; border-radius: 8px; border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); }
+button { font: 500 13px var(--sans); padding: 7px 12px; border-radius: 8px; border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); cursor: pointer; white-space: nowrap; }
+button:hover { border-color: var(--faint); }
+button.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+/* The graph plane. */
+.plane { position: relative; overflow: hidden; cursor: grab; background-image: radial-gradient(var(--grid) 1px, transparent 1px); background-size: 22px 22px; }
+.plane.dragging { cursor: grabbing; }
+svg { width: 100%; height: 100%; display: block; user-select: none; }
+.col-label { font: 600 12px var(--sans); fill: var(--muted); }
+.col-rule { stroke: var(--rule); stroke-dasharray: 2 5; }
+.edge { fill: none; stroke-width: 1.4; opacity: 0.5; transition: opacity 120ms; }
+.edge.changed { stroke-dasharray: 4 4; }
+.edge.dim { opacity: 0.08; }
+.edge.hot { opacity: 1; stroke-width: 2.2; }
+.node { cursor: pointer; transition: transform 320ms cubic-bezier(.2,.8,.2,1), opacity 200ms; }
+.node rect.body { fill: var(--sheet); stroke: var(--rule); stroke-width: 1; }
+.node text { font: 12.5px var(--sans); fill: var(--ink); }
+.node text.id { font: 11.5px var(--mono); fill: var(--muted); }
+.node text.sub { font: 11.5px var(--sans); fill: var(--muted); }
+.node.dim { opacity: 0.25; }
+.node:hover rect.body { stroke: var(--faint); }
+.node.sel rect.body { stroke: var(--ink); stroke-width: 2; }
+.node .badge { font: 600 12px var(--sans); fill: var(--muted); }
+.node.more rect.body { fill: transparent; stroke-dasharray: 4 3; }
+.node rect.share { fill: var(--page); }
+.node text.share { font: 600 10.5px var(--sans); fill: var(--sheet); }
+.node.more text { fill: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .node, #world { transition: none !important; } }
+
+.hud { position: absolute; left: 14px; bottom: 14px; display: flex; gap: 6px; }
+.hint { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); background: var(--ink); color: var(--paper); padding: 7px 12px; border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 200ms; }
+.hint.on { opacity: 0.92; }
+.legend { position: absolute; right: 14px; bottom: 14px; display: flex; gap: 12px; font-size: 12px; color: var(--muted); background: var(--paper); padding: 6px 10px; border-radius: 8px; border: 1px solid var(--rule); }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend .dash { width: 16px; height: 0; border-top: 2px dashed var(--commit); border-radius: 0; vertical-align: 3px; }
+
+/* Details for the selected object. */
+aside { border-left: 1px solid var(--rule); background: var(--sheet); overflow: auto; padding: 20px 20px 40px; }
+aside h2 { font-size: 19px; line-height: 1.25; margin: 6px 0 4px; letter-spacing: -0.015em; overflow-wrap: anywhere; }
+aside .kind { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; padding: 1px 9px 1px 8px; border-radius: 999px; }
+aside .kind::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.k-commit { color: var(--commit); background: var(--commit-soft); } .k-page { color: var(--page); background: var(--page-soft); }
+.k-file { color: var(--file); background: var(--file-soft); } .k-pack { color: var(--pack); background: var(--pack-soft); }
+.k-chunk { color: var(--chunk); background: var(--chunk-soft); } .k-ref { color: var(--ref); background: var(--ref-soft); }
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; margin: 16px 0; font-size: 13px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.what { color: var(--muted); font-size: 13.5px; margin: 8px 0 0; }
+aside h3 { font-size: 13.5px; margin: 22px 0 8px; }
+.refs { display: flex; flex-direction: column; gap: 4px; }
+.refs button { text-align: left; display: flex; justify-content: space-between; gap: 10px; font-weight: 400; min-width: 0; }
+.refs button span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.refs button span:last-child { color: var(--muted); font-size: 12px; flex: none; }
+pre.preview { margin: 0; max-height: 360px; overflow: auto; font: 12px/1.55 var(--mono); background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; padding: 12px 14px; white-space: pre; }
+.bytebar { position: relative; height: 26px; border-radius: 6px; background: var(--wash); overflow: hidden; margin-top: 6px; }
+.bytebar span { position: absolute; top: 0; bottom: 0; background: var(--pack); min-width: 3px; }
+.empty { color: var(--muted); font-size: 13.5px; }
+.error { color: var(--bad); }
+
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) 42vh; }
+  aside { border-left: 0; border-top: 1px solid var(--rule); }
+  .store, .legend { display: none; }
+  .trace { flex-basis: 100%; }
+  header { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">pail <span>inspect</span></div>
+    <div class="store mono" id="store"></div>
+    <form class="trace" id="trace">
+      <input id="path" placeholder="Trace a file, e.g. services/rust/archdev/Cargo.toml" aria-label="File path to trace" autocomplete="off" spellcheck="false">
+      <button class="primary" type="submit">Trace</button>
+    </form>
+  </header>
+  <div class="plane" id="plane">
+    <svg id="svg" aria-label="Object graph"><g id="world"><g id="cols"></g><g id="edges"></g><g id="nodes"></g></g></svg>
+    <div class="hint" id="hint"></div>
+    <div class="hud"><button id="fit">Fit</button><button id="reset">Start over</button></div>
+    <div class="legend"><span><i style="background:var(--ref)"></i>branch</span><span><i style="background:var(--commit)"></i>commit</span><span><i style="background:var(--page)"></i>page</span><span><i style="background:var(--file)"></i>file</span><span><i style="background:var(--pack)"></i>pack</span><span><i style="background:var(--chunk)"></i>chunk</span><span><i class="dash"></i>changed by</span></div>
+  </div>
+  <aside id="side" aria-live="polite"></aside>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const short = (h) => (h || "").slice(0, 10);
+const bytes = (n) => n == null ? "–" : n >= 1e9 ? (n / 1e9).toFixed(2) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : n >= 1e3 ? (n / 1e3).toFixed(1) + " KB" : n + " B";
+const num = (n) => (n ?? 0).toLocaleString();
+const PLURALS = { entry: "entries", child: "children" };
+const plural = (n, w) => `${num(n)} ${n === 1 ? w : PLURALS[w] || w + "s"}`;
+const when = (raw) => raw ? new Date(+raw.split(" ")[0] * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
+const clip = (s, n) => (s = String(s ?? "")).length > n ? s.slice(0, n - 1) + "…" : s;
+const NS = "http://www.w3.org/2000/svg";
+const BATCH = 30;
+
+async function api(path) {
+  const r = await fetch(path);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// ------------------------------------------------------------------ the graph model
+
+const G = { nodes: new Map(), edges: new Map(), sel: null, hover: null, maxLevel: 1, rev: null, overview: null, seq: 0 };
+const W = 216, H = 50, COLW = 268, GAP = 14;
+
+// Columns, left to right, follow how objects reference each other.
+function column(n) {
+  if (n.kind === "ref") return 0;
+  if (n.kind === "commit") return 1;
+  if (n.kind === "page") return 2 + (G.maxLevel - n.level);
+  if (n.kind === "file" || (n.kind === "more" && n.parentKind === "page")) return 3 + G.maxLevel;
+  if (n.kind === "more" && n.parentKind === "pack") return 3 + G.maxLevel;
+  return 4 + G.maxLevel;
+}
+function columnLabel(i) {
+  if (i === 0) return "Branches";
+  if (i === 1) return "Commits";
+  if (i < 2 + G.maxLevel) return `Manifest pages, level ${G.maxLevel - (i - 2)}`;
+  if (i === 2 + G.maxLevel) return "Leaf pages";
+  if (i === 3 + G.maxLevel) return "Files";
+  return "Packs and chunks";
+}
+
+function addNode(id, n) {
+  if (!G.nodes.has(id)) G.nodes.set(id, { id, x: 0, y: null, expanded: false, seq: G.seq++, ...n });
+  else { const old = G.nodes.get(id); for (const [k, v] of Object.entries(n)) if (v !== undefined && v !== "" && !(k === "title" && old.data)) old[k] = v; }
+  if (n.kind === "page" && n.level > G.maxLevel) G.maxLevel = n.level;
+  return G.nodes.get(id);
+}
+function addEdge(from, to, kind, label) {
+  const id = from + ">" + to + ":" + kind;
+  if (!G.edges.has(id)) G.edges.set(id, { id, from, to, kind, label });
+}
+
+const fileId = (e) => "file:" + e.hash + ":" + e.path;
+function addEntry(e) {
+  const name = e.path.split("/").pop();
+  const how = e.loc.type === "inline" ? "inline" : e.loc.type === "chunks" ? plural(e.loc.chunks.length, "chunk") : "packed";
+  return addNode(fileId(e), { kind: "file", title: name, sub: `${bytes(e.size)}, ${how}`, hash: e.hash, entry: e });
+}
+const addCommit = (hash) => addNode("commit:" + hash, { kind: "commit", hash, title: "Commit" });
+
+// Expanding a node adds the objects it references.
+async function expand(n, opts = {}) {
+  if (n.kind === "ref") {
+    addEdge(n.id, addCommit(n.commit).id, "ref", "points to");
+  } else if (n.kind === "commit") {
+    const c = await api("/api/commit/" + n.hash);
+    n.data = c;
+    n.title = clip(c.message.split("\n")[0], 30);
+    n.sub = when(c.committer_date);
+    const root = addNode("page:" + c.root, { kind: "page", hash: c.root, level: c.root_level, title: "Root page", sub: `level ${c.root_level}` });
+    addEdge(n.id, root.id, "root", "root page");
+    if (c.parent) addEdge(n.id, addCommit(c.parent).id, "parent", "parent");
+    // The change list comes from the commit object itself, not from comparing manifests.
+    if (opts.changes !== false) for (const ch of (c.changes || []).slice(0, 12)) if (ch.new) addEdge(n.id, addEntry(ch.new).id, "changed", "changed");
+  } else if (n.kind === "page") {
+    const p = await api("/api/page/" + n.hash);
+    n.data = p;
+    if (p.kind === "node") {
+      if (n.title !== "Root page") n.title = `Page, level ${p.level}`;
+      n.sub = `${plural(p.children.length, "child")}, ${bytes(p.stored)}`;
+      let prev = null;
+      for (const ch of p.children) {
+        const last = ch.key.split("/").slice(-1)[0];
+        const c = addNode("page:" + ch.hash, { kind: "page", hash: ch.hash, level: p.level - 1, title: p.level - 1 === 0 ? "Leaf page" : `Page, level ${p.level - 1}`, sub: `${plural(ch.files, "file")}, to ${clip(last, 16)}`, range: [prev, ch.key] });
+        addEdge(n.id, c.id, "child", "child");
+        prev = ch.key;
+      }
+    } else {
+      n.title = "Leaf page";
+      n.sub = `${plural(p.entries.length, "entry")}, ${bytes(p.stored)}`;
+      const shown = n.shown || 0;
+      const next = p.entries.slice(shown, shown + BATCH);
+      for (const e of next) addEdge(n.id, addEntry(e).id, "entry", "entry");
+      n.shown = shown + next.length;
+      setMore(n, p.entries.length - n.shown, "entries");
+    }
+  } else if (n.kind === "file") {
+    const loc = n.entry.loc;
+    if (loc.type === "pack") addEdge(n.id, addNode("pack:" + loc.pack, { kind: "pack", hash: loc.pack, title: "Pack" }).id, "bytes", `bytes ${num(loc.off)}–${num(loc.off + loc.len)}`);
+    if (loc.type === "chunks") loc.chunks.forEach((c, i) => addEdge(n.id, addNode("chunk:" + c.hash, { kind: "chunk", hash: c.hash, title: "Chunk", sub: bytes(c.len) }).id, "chunk", `piece ${i + 1}`));
+  } else if (n.kind === "pack") {
+    const p = n.data || await api(`/api/pack/${n.hash}${G.rev ? "?rev=" + encodeURIComponent(G.rev) : ""}`);
+    n.data = p;
+    n.sub = `${bytes(p.size)}, ${plural(p.blobs.length, "file")}`;
+    // A pack's files, from the file side (file → pack), a batch at a time.
+    const users = p.blobs.filter((b) => b.paths.length);
+    const shown = n.shown || 0;
+    for (const b of users.slice(shown, shown + BATCH)) {
+      const e = { path: b.paths[0], hash: b.hash, size: b.raw, loc: { type: "pack", pack: p.hash, off: b.off, len: b.len } };
+      addEdge(addEntry(e).id, n.id, "bytes", `bytes ${num(b.off)}–${num(b.off + b.len)}`);
+    }
+    n.shown = Math.min(users.length, shown + BATCH);
+    setMore(n, users.length - n.shown, "files");
+  } else if (n.kind === "more") {
+    await expand(G.nodes.get(n.owner));
+    return;
+  }
+  n.expanded = true;
+}
+
+function setMore(owner, remaining, what) {
+  const id = "more:" + owner.id;
+  if (remaining <= 0) {
+    G.nodes.delete(id);
+    for (const [k, e] of [...G.edges]) if (e.from === id || e.to === id) G.edges.delete(k);
+    return;
+  }
+  const m = addNode(id, { kind: "more", owner: owner.id, parentKind: owner.kind, title: `${num(remaining)} more ${what}`, sub: `show the next ${Math.min(BATCH, remaining)}` });
+  if (owner.kind === "pack") addEdge(m.id, owner.id, "bytes", "more");
+  else addEdge(owner.id, m.id, "entry", "more");
+}
+
+// ------------------------------------------------------------------ layout
+
+// Columns are ordered by where the objects referencing them sit (barycenters), so edges run
+// as straight as they can; nodes then stack without overlapping.
+function layout() {
+  const cols = new Map();
+  for (const n of G.nodes.values()) {
+    const c = column(n);
+    n.x = 40 + c * COLW;
+    if (!cols.has(c)) cols.set(c, []);
+    cols.get(c).push(n);
+  }
+  const linked = new Map();
+  const link = (a, b) => { if (!linked.has(a)) linked.set(a, []); linked.get(a).push(b); };
+  for (const e of G.edges.values()) { link(e.to, e.from); link(e.from, e.to); }
+  const top = 70;
+  for (const c of [...cols.keys()].sort((a, b) => a - b)) {
+    const list = cols.get(c);
+    const want = (n) => {
+      const ys = (linked.get(n.id) || []).map((id) => G.nodes.get(id)).filter((m) => m && column(m) < c && m.y != null).map((m) => m.y);
+      return ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : null;
+    };
+    if (c === 1) list.sort((a, b) => (b.data?.generation ?? -1) - (a.data?.generation ?? -1) || a.seq - b.seq);
+    else list.sort((a, b) => (want(a) ?? 1e12) - (want(b) ?? 1e12) || a.seq - b.seq);
+    let y = top;
+    for (const n of list) {
+      const w = want(n);
+      n.y = c === 1 || w == null ? y : Math.max(y, w);
+      y = n.y + H + GAP;
+    }
+  }
+}
+
+// ------------------------------------------------------------------ drawing
+
+const view = { x: 0, y: 0, k: 1 };
+function applyView() { $("#world").setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`); }
+const color = (k) => `var(--${k === "more" ? "faint" : k})`;
+
+function draw() {
+  layout();
+  const cols = $("#cols"), edges = $("#edges"), nodes = $("#nodes");
+  const used = new Set([...G.nodes.values()].map(column));
+  const maxY = Math.max(400, ...[...G.nodes.values()].map((n) => n.y + H)) + 40;
+  cols.innerHTML = [...used].sort((a, b) => a - b).map((c) => `<text class="col-label" x="${40 + c * COLW}" y="46">${esc(columnLabel(c))}</text><line class="col-rule" x1="${40 + c * COLW - 18}" y1="30" x2="${40 + c * COLW - 18}" y2="${maxY}"/>`).join("");
+  // Hover fades what isn't linked; a selection only lights up its own edges.
+  const focus = G.hover || G.sel;
+  const fade = G.hover;
+  const near = new Set();
+  if (focus) { near.add(focus); for (const e of G.edges.values()) { if (e.from === focus) near.add(e.to); if (e.to === focus) near.add(e.from); } }
+  edges.innerHTML = [...G.edges.values()].map((e) => {
+    const a = G.nodes.get(e.from), b = G.nodes.get(e.to);
+    if (!a || !b) return "";
+    const same = column(a) === column(b);
+    let d;
+    if (same) { // parent links run down the commit column
+      const x = a.x + W / 2, y1 = a.y + H, y2 = b.y;
+      d = `M${x},${y1} C${x},${y1 + 18} ${x},${y2 - 18} ${x},${y2}`;
+    } else {
+      const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2, dx = Math.max(40, (x2 - x1) / 2);
+      d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+    }
+    const tone = e.kind === "changed" || e.kind === "parent" || e.kind === "ref" ? "commit" : b.kind;
+    const cls = ["edge", e.kind === "changed" ? "changed" : "", focus && (e.from === focus || e.to === focus) ? "hot" : fade ? "dim" : ""].join(" ");
+    return `<path class="${cls}" d="${d}" stroke="${color(tone)}"><title>${esc(e.label || e.kind)}</title></path>`;
+  }).join("");
+  // Objects referenced from more than one place: the structural sharing the hashes give.
+  const indeg = new Map();
+  for (const e of G.edges.values()) if (e.kind === "child" || e.kind === "root" || e.kind === "entry") indeg.set(e.to, (indeg.get(e.to) || 0) + 1);
+  // Nodes stay the same elements across redraws, so their moves animate.
+  const seen = new Set();
+  for (const n of G.nodes.values()) {
+    seen.add(n.id);
+    let g = nodes.querySelector(`[data-id="${CSS.escape(n.id)}"]`);
+    if (!g) {
+      g = document.createElementNS(NS, "g");
+      g.dataset.id = n.id;
+      g.setAttribute("tabindex", "0");
+      g.setAttribute("role", "button");
+      g.style.transform = `translate(${n.x}px, ${n.y - 8}px)`;
+      g.style.opacity = "0";
+      nodes.appendChild(g);
+      requestAnimationFrame(() => requestAnimationFrame(() => (g.style.opacity = "")));
+    }
+    g.setAttribute("class", ["node", n.kind === "more" ? "more" : "", G.sel === n.id ? "sel" : "", fade && !near.has(n.id) ? "dim" : ""].join(" "));
+    g.setAttribute("aria-label", `${n.kind} ${n.title}`);
+    const expandable = n.kind !== "more" && n.kind !== "chunk" && !n.expanded;
+    const line2 = n.hash ? `<text class="id" x="14" y="38">${esc(short(n.hash))}</text>${n.sub ? `<text class="sub" x="96" y="38">${esc(clip(n.sub, 19))}</text>` : ""}` : `<text class="sub" x="14" y="38">${esc(clip(n.sub, 32))}</text>`;
+    g.innerHTML = `<rect class="body" width="${W}" height="${H}" rx="9"/><rect width="4" height="${H - 16}" x="0" y="8" rx="2" fill="${color(n.kind)}"/>
+      <text x="14" y="20">${esc(clip(n.title, 27))}</text>${line2}${expandable ? `<text class="badge" x="${W - 18}" y="21">+</text>` : ""}
+      ${(indeg.get(n.id) || 0) > 1 ? `<rect class="share" x="${W - 84}" y="-9" width="72" height="18" rx="9"/><text class="share" x="${W - 48}" y="4" text-anchor="middle">shared by ${indeg.get(n.id)}</text>` : ""}`;
+    g.style.transform = `translate(${n.x}px, ${n.y}px)`;
+  }
+  for (const g of [...nodes.children]) if (!seen.has(g.dataset.id)) g.remove();
+}
+
+function fit() {
+  const ns = [...G.nodes.values()];
+  if (!ns.length) return;
+  const x0 = Math.min(...ns.map((n) => n.x)) - 30, x1 = Math.max(...ns.map((n) => n.x + W)) + 30;
+  const y1 = Math.max(...ns.map((n) => n.y + H)) + 30;
+  const r = $("#plane").getBoundingClientRect();
+  // Readable first: never below 85%; a big graph is panned rather than shrunk to dust.
+  view.k = Math.max(0.85, Math.min(1, r.width / (x1 - x0), r.height / (y1 - 20)));
+  view.x = Math.max(0, (r.width - (x1 - x0) * view.k) / 2) - x0 * view.k;
+  view.y = 0;
+  applyView();
+}
+
+function centerOn(n) {
+  const r = $("#plane").getBoundingClientRect();
+  view.x = r.width / 2 - (n.x + W / 2) * view.k;
+  view.y = r.height / 2 - (n.y + H / 2) * view.k;
+  const w = $("#world");
+  w.style.transition = "transform 360ms cubic-bezier(.2,.8,.2,1)";
+  applyView();
+  setTimeout(() => (w.style.transition = ""), 400);
+}
+
+let hintTimer;
+function hint(text) {
+  const h = $("#hint");
+  h.textContent = text; h.classList.add("on");
+  clearTimeout(hintTimer); hintTimer = setTimeout(() => h.classList.remove("on"), 2800);
+}
+
+// ------------------------------------------------------------------ details
+
+async function select(n) {
+  G.sel = n.id;
+  draw();
+  const side = $("#side");
+  const head = (k, label, title) => `<span class="kind k-${k}">${label}</span><h2>${title}</h2>`;
+  try {
+    if (n.kind === "ref") {
+      side.innerHTML = head("ref", "branch", esc(n.title)) + `<p class="what">The only kind of object that changes: a small file in the store, <span class="mono">refs/${esc(n.title)}</span>, holding one commit id. It moves by compare-and-swap.</p>
+        <dl class="facts"><dt>Points to</dt><dd class="mono">${short(n.commit)}</dd>${n.title === G.overview.default_branch ? "<dt>Default</dt><dd>yes, named by the store's HEAD</dd>" : ""}</dl>`;
+    } else if (n.kind === "commit") {
+      const c = n.data || await api("/api/commit/" + n.hash);
+      n.data = c;
+      side.innerHTML = head("commit", "commit", esc(c.message.split("\n")[0])) + `<p class="what">Immutable and named by the hash of its bytes. It names its parent, one manifest root that is the whole snapshot, and the files it changed.</p>
+        <dl class="facts"><dt>Object</dt><dd class="mono">commits/${short(c.id)}…</dd><dt>Size</dt><dd>${bytes(c.object_bytes)}</dd><dt>Author</dt><dd>${esc(c.author)}</dd><dt>Date</dt><dd>${when(c.author_date)}</dd>
+        <dt>Snapshot</dt><dd>${plural(c.files, "file")}, ${bytes(c.bytes)}</dd><dt>Depth</dt><dd>${num(c.generation)} commits</dd><dt>Changed</dt><dd>${c.has_change_list ? plural(c.changes.length, "file") : "not recorded"}</dd></dl>
+        ${c.changes?.length ? `<h3>Changed files</h3><div class="refs">${c.changes.slice(0, 40).map((ch, i) => `<button data-change="${i}"><span class="mono">${esc(clip(ch.path, 42))}</span><span>${ch.new ? (ch.old ? "modified" : "added") : "deleted"}</span></button>`).join("")}</div>` : ""}`;
+      side.querySelectorAll("[data-change]").forEach((b) => b.onclick = () => { const ch = c.changes[+b.dataset.change]; if (ch.new) trace(ch.new.path, c.id); });
+    } else if (n.kind === "page") {
+      const p = n.data || await api("/api/page/" + n.hash);
+      n.data = p;
+      side.innerHTML = head("page", "manifest page", p.kind === "node" ? `Page, level ${p.level}` : "Leaf page") + `<p class="what">${p.kind === "node" ? "Part of the manifest tree. Each child covers a range of paths; pages split where the paths say so, so an unchanged range keeps its page and every commit that has it points at the same object." : "The bottom of the manifest: one entry per file, in path order, each naming the file's content hash and where its bytes are."}</p>
+        <dl class="facts"><dt>Object</dt><dd class="mono">pages/${short(p.hash)}…</dd><dt>Stored</dt><dd>${bytes(p.stored)}</dd><dt>${p.kind === "node" ? "Children" : "Entries"}</dt><dd>${num((p.children || p.entries).length)}</dd>
+        ${n.range ? `<dt>Paths</dt><dd class="mono">${esc(n.range[0] ?? "the start")} to ${esc(n.range[1])}</dd>` : ""}</dl>`;
+    } else if (n.kind === "file") {
+      const e = n.entry;
+      side.innerHTML = head("file", "file", `<span class="mono">${esc(e.path)}</span>`) + `<p class="what">${e.loc.type === "inline" ? "Small enough (64 bytes or less) to live inside its leaf page entry, so reading it costs no extra request." : e.loc.type === "chunks" ? "Large files are cut into content-defined chunks. Each chunk is its own object, stored once however many files contain it." : "Small files are compressed one by one and packed together; this file is one byte range of its pack, read with a single range request."}</p>
+        <dl class="facts"><dt>Size</dt><dd>${bytes(e.size)}</dd><dt>Content hash</dt><dd class="mono">${short(e.hash)}…</dd>${e.loc.type === "pack" ? `<dt>Stored at</dt><dd>bytes ${num(e.loc.off)}–${num(e.loc.off + e.loc.len)} of its pack (${bytes(e.loc.len)})</dd>` : ""}</dl><div id="pv" class="empty">Reading…</div>`;
+      try {
+        const f = await api(`/api/file?path=${encodeURIComponent(e.path)}${G.rev ? "&rev=" + encodeURIComponent(G.rev) : ""}`);
+        if (G.sel !== n.id) return;
+        const bar = f.pack ? `<h3>Its bytes within the pack</h3><div class="bytebar"><span style="left:${(e.loc.off / f.pack.size) * 100}%;width:${(e.loc.len / f.pack.size) * 100}%"></span></div><p class="empty">${plural(f.pack.blobs.length, "file")} share this ${bytes(f.pack.size)} pack.</p>` : "";
+        $("#pv").outerHTML = `<dl class="facts" style="margin-top:0"><dt>Git blob</dt><dd class="mono">${short(f.git_blob)}</dd><dt>Local copy</dt><dd>${f.cached == null ? "read from the store" : f.cached ? "kept in this repository" : "not kept yet"}</dd></dl>${bar}${f.text ? `<h3>Contents${f.truncated ? ", first 6 KB" : ""}</h3><pre class="preview">${esc(f.preview)}</pre>` : `<p class="empty">Binary content.</p>`}`;
+      } catch { const pv = $("#pv"); if (pv) pv.textContent = "This version isn't in the selected branch's tip."; }
+    } else if (n.kind === "pack") {
+      const p = n.data || await api(`/api/pack/${n.hash}${G.rev ? "?rev=" + encodeURIComponent(G.rev) : ""}`);
+      n.data = p;
+      const raw = p.blobs.reduce((a, b) => a + b.raw, 0);
+      side.innerHTML = head("pack", "pack", "Pack " + short(p.hash)) + `<p class="what">Files compressed one by one and written back to back in path order, followed by an index. Any one file is a single range read.</p>
+        <dl class="facts"><dt>Object</dt><dd class="mono">packs/${short(p.hash)}….pack</dd><dt>Size</dt><dd>${bytes(p.size)}</dd><dt>Holds</dt><dd>${plural(p.blobs.length, "file")}, ${bytes(raw)} uncompressed</dd><dt>In this snapshot</dt><dd>${num(p.blobs.filter((b) => b.paths.length).length)} of them; the rest are versions other commits use</dd><dt>Index</dt><dd>${bytes(p.footer_bytes)}</dd></dl>
+        <h3>Byte map</h3><div class="bytebar">${p.blobs.slice(0, 4000).map((b, i) => `<span style="left:${(b.off / p.size) * 100}%;width:${(b.len / p.size) * 100}%;opacity:${i % 2 ? 0.6 : 1}"></span>`).join("")}</div>`;
+    } else if (n.kind === "chunk") {
+      side.innerHTML = head("chunk", "chunk", "Chunk " + short(n.hash)) + `<p class="what">A piece of a large file. Boundaries follow the content, so an edit changes only the chunks it touches.</p><dl class="facts"><dt>Object</dt><dd class="mono">chunks/${short(n.hash)}…</dd><dt>Size</dt><dd>${esc(n.sub)}</dd></dl>`;
+    }
+    const out = [...G.edges.values()].filter((e) => e.from === n.id || e.to === n.id);
+    if (out.length && n.kind !== "more") {
+      side.insertAdjacentHTML("beforeend", `<h3>Linked objects</h3><div class="refs">${out.slice(0, 60).map((e) => { const t = G.nodes.get(e.from === n.id ? e.to : e.from); return t ? `<button data-go="${esc(t.id)}"><span>${esc(clip(t.title, 32))}</span><span>${esc(e.from === n.id ? e.label || e.kind : "from " + t.kind)}</span></button>` : ""; }).join("")}</div>`);
+      side.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => { const t = G.nodes.get(b.dataset.go); select(t); centerOn(t); });
+    }
+  } catch (err) {
+    side.insertAdjacentHTML("beforeend", `<p class="error">${esc(err.message)}</p>`);
+  }
+}
+
+// ------------------------------------------------------------------ actions
+
+async function activate(n) {
+  if (n.kind === "more" || !n.expanded) {
+    try { await expand(n); } catch (err) { hint(err.message); }
+    draw();
+  }
+  if (n.kind !== "more") select(n);
+}
+
+// Expand the whole chain from a commit down to one file's bytes.
+async function trace(path, rev) {
+  path = path.trim().replace(/^\/+/, "");
+  if (!path) return;
+  let f;
+  try { f = await api(`/api/file?path=${encodeURIComponent(path)}${rev || G.rev ? "&rev=" + encodeURIComponent(rev || G.rev) : ""}`); }
+  catch (err) { hint(err.message); return; }
+  const c = addCommit(f.commit);
+  if (!c.expanded) await expand(c, { changes: false });
+  let prev = c;
+  for (const s of f.spine) {
+    const p = addNode("page:" + s.hash, { kind: "page", hash: s.hash, level: s.level, title: s.level === 0 ? "Leaf page" : `Page, level ${s.level}`, sub: plural(s.children, s.level === 0 ? "entry" : "child") });
+    addEdge(prev.id, p.id, prev.kind === "commit" ? "root" : s.level === 0 && prev.kind === "page" ? "child" : "child", "child");
+    prev = p;
+  }
+  const fn = addEntry(f.entry);
+  addEdge(prev.id, fn.id, "entry", "entry");
+  if (!fn.expanded) await expand(fn);
+  draw();
+  select(fn);
+  centerOn(fn);
+  hint(`${plural(f.spine.length, "page")} lead from the commit to ${path.split("/").pop()}`);
+}
+
+async function start() {
+  G.nodes.clear(); G.edges.clear(); G.sel = null; G.maxLevel = 1;
+  $("#nodes").innerHTML = "";
+  const o = G.overview;
+  for (const r of o.refs) {
+    const n = addNode("ref:" + r.name, { kind: "ref", title: r.name, sub: r.name === o.default_branch ? "default branch" : "branch", commit: r.commit });
+    await expand(n);
+  }
+  // Open the default branch's tip and root so the shape shows at once.
+  const def = G.nodes.get("ref:" + o.default_branch) || [...G.nodes.values()][0];
+  const tip = def && G.nodes.get("commit:" + def.commit);
+  if (tip) { await expand(tip); const root = G.nodes.get("page:" + tip.data.root); if (root) await expand(root); }
+  draw();
+  fit();
+  if (tip) select(tip);
+}
+
+// ------------------------------------------------------------------ wiring
+
+const plane = $("#plane");
+let drag = null;
+plane.addEventListener("pointerdown", (e) => { if (e.target.closest(".node, .hud, .legend")) return; drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y }; plane.classList.add("dragging"); plane.setPointerCapture(e.pointerId); });
+plane.addEventListener("pointermove", (e) => { if (!drag) return; view.x = drag.vx + e.clientX - drag.x; view.y = drag.vy + e.clientY - drag.y; applyView(); });
+plane.addEventListener("pointerup", () => { drag = null; plane.classList.remove("dragging"); });
+plane.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = plane.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  if (e.ctrlKey || e.metaKey) {
+    const k = Math.min(2.5, Math.max(0.12, view.k * Math.exp(-e.deltaY * 0.01)));
+    view.x = mx - (mx - view.x) * (k / view.k); view.y = my - (my - view.y) * (k / view.k); view.k = k;
+  } else { view.x -= e.deltaX; view.y -= e.deltaY; }
+  applyView();
+}, { passive: false });
+const nodeOf = (el) => G.nodes.get(el.closest?.(".node")?.dataset.id);
+$("#nodes").addEventListener("click", (e) => { const n = nodeOf(e.target); if (n) activate(n); });
+$("#nodes").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { const n = nodeOf(e.target); if (n) { e.preventDefault(); activate(n); } } });
+$("#nodes").addEventListener("pointerover", (e) => { const n = nodeOf(e.target); if (n && G.hover !== n.id) { G.hover = n.id; draw(); } });
+$("#nodes").addEventListener("pointerleave", () => { G.hover = null; draw(); });
+$("#fit").onclick = fit;
+$("#reset").onclick = start;
+$("#trace").onsubmit = (e) => { e.preventDefault(); trace($("#path").value); };
+
+(async () => {
+  try {
+    G.overview = await api("/api/overview");
+    G.rev = G.overview.default_branch;
+    $("#store").textContent = G.overview.store;
+    $("#side").innerHTML = `<p class="empty">Opening the default branch…</p>`;
+    await start();
+  } catch (e) {
+    $("#side").innerHTML = `<p class="error">${esc(e.message)}</p>`;
+  }
+})();
+</script>
+</body>
+</html>

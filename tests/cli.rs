@@ -565,3 +565,53 @@ fn config_identity_and_default_branch() {
     assert!(ok(&w, &["config", "--unset", "log.date"]).is_empty());
     assert!(!run(&w, &["config", "log.date"]).status.success());
 }
+
+/// `pail inspect` serves the object graph's API: overview, commits, pages, files with the
+/// physical path to their bytes, and packs.
+#[test]
+fn inspect_serves_the_object_graph() {
+    use std::io::{Read, Write};
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = t.join("store");
+    let s = store.to_str().unwrap();
+    pail(&t, &["init", s]);
+    pail(&t, &["clone", s, "w"]);
+    let w = t.join("w");
+    write(&w.join("src/lib.rs"), &"fn a() {}\n".repeat(30));
+    write(&w.join("tiny"), "x");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "files"]);
+    let port = 20000 + (std::process::id() % 20000) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let mut child = cmd(&w, &["inspect", "--no-open", "--addr", &addr]).spawn().unwrap();
+    let get = |path: &str| -> serde_json::Value {
+        for _ in 0..100 {
+            if let Ok(mut c) = std::net::TcpStream::connect(&addr) {
+                write!(c, "GET {path} HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+                let mut body = String::new();
+                c.read_to_string(&mut body).unwrap();
+                let json = body.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                return serde_json::from_str(&json).unwrap_or(serde_json::Value::String(body));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("inspect did not start");
+    };
+    let o = get("/api/overview");
+    assert_eq!(o["default_branch"], "main");
+    let tip = o["refs"][0]["commit"].as_str().unwrap().to_string();
+    let c = get(&format!("/api/commit/{tip}"));
+    assert_eq!(c["changes"].as_array().unwrap().len(), 2);
+    let f = get("/api/file?path=src/lib.rs");
+    assert_eq!(f["entry"]["loc"]["type"], "pack");
+    assert_eq!(f["spine"].as_array().unwrap().last().unwrap()["level"], 0, "the descent ends at a leaf page");
+    assert!(f["preview"].as_str().unwrap().starts_with("fn a()"));
+    let pack = f["entry"]["loc"]["pack"].as_str().unwrap();
+    let p = get(&format!("/api/pack/{pack}"));
+    assert!(p["blobs"].as_array().unwrap().iter().any(|b| b["paths"][0] == "src/lib.rs"));
+    assert_eq!(get("/api/file?path=tiny")["entry"]["loc"]["type"], "inline");
+    let page = get(&format!("/api/page/{}", c["root"].as_str().unwrap()));
+    assert!(page["entries"].is_array() || page["children"].is_array());
+    child.kill().unwrap();
+}

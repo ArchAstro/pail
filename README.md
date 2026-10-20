@@ -137,6 +137,21 @@ ref) and `advance_ref` (one CAS from the tip the caller saw). `commit` is one of
 S3 settings come from the usual `AWS_*` variables (`AWS_ENDPOINT`, `AWS_ALLOW_HTTP` for
 emulators). GCS settings come from `GOOGLE_*`.
 
+## Inspecting the physical model
+
+```sh
+pail inspect                       # in a working copy or bare repository; opens a browser
+pail --store s3://bucket/repo inspect --addr 127.0.0.1:7777 --no-open
+```
+
+An object graph of the store, drawn in columns by how objects reference each other:
+branches → commits (parent chain) → manifest pages by level → leaf pages → files → packs and
+chunks. Click an object to expand what it references; big fan-outs open 30 at a time.
+Objects are drawn once, so pages that several commits share show up as one node with a
+"shared by N" tag. Dashed edges are a commit's change list. "Trace" expands the whole chain
+from a commit down to one file's byte range in its pack. The side panel shows each object's
+key, size and role, a pack's byte map, and file contents.
+
 ## Worktrees: many checkouts, one copy on disk
 
 ```

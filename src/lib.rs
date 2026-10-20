@@ -12,6 +12,7 @@ pub mod gitobj;
 pub mod gitsrc;
 pub mod graph;
 pub mod hash;
+pub mod inspect;
 pub mod local;
 pub mod manifest;
 pub mod objects;
