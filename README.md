@@ -309,6 +309,43 @@ pail-mirror verify --git-dir … --store … --state-dir ./state   # re-prove th
 The dashboard at `--serve` shows sync state, per-commit import and proof times, upload
 costs, and deep-check results. `state/mirror.jsonl` holds one record per commit.
 
+## Benchmarks: pail-bench
+
+`pail-bench` imports a real snapshot (firstlanding: 28.9k files, 460 MB) once, then runs
+each scenario on its own branch and counts time, requests and bytes uploaded. Git runs the same edits in
+working copies pushing to a bare remote (concurrent writers retry with `pull --rebase`).
+
+```sh
+pail-bench --git-dir ~/.cache/pail-mirror/firstlanding.git --store s3://pail/bench-1 \
+  --work /tmp/bench [--only small,wide,writers,hot,stacks,bigfile,reads,wc] [--no-git] [--out r.json]
+```
+
+Results (2026-10-20, M-series laptop under load; pail on the local S3 emulator, Git local):
+
+| Scenario | pail (S3) | Git (local bare remote) |
+|---|---|---|
+| Small commit, library, p50 | 27 ms | n/a |
+| Small commit, CLI working copy (add + commit + publish), p50 | 340 ms | 2,587 ms (add 906, commit 203, push 1,465) |
+| Edit 2,000 files, one commit | 0.25 s, 53 PUTs | 4.2 s |
+| Add 5,000 files | 0.27 s | 5.7 s |
+| Delete 3,200-file dir / rename 2,100-file dir | 0.04 s / 0.05 s | 1.1 s / 0.8 s |
+| 1 / 4 / 16 writers, one branch (commits/s) | 37 / 11 / 7 | 1.6 / 0.6 / 0.1 |
+| 16 writers: attempts per commit, p95 | 5.1, 12 s | 11.4 pushes, 596 s |
+| Land 40 stacks while main moves, p50 | 118 ms | n/a |
+| 8 stacks landing at once, p50 | 2.2 s (4.25 attempts) | n/a |
+| Change 1 MB of a 256 MB file | 3.8 MB uploaded | n/a |
+| `log` 240 commits / `log -- path` | 20 ms / 30 ms | n/a |
+| Clone a working copy (29k files) | 22 s | 9.8 s (`--shared`) |
+
+What the numbers say:
+
+1. Writes are cheap and proportional to the change: a few pages per commit, content reused on rename.
+2. One branch is one CAS slot. Every commit to it wins a CAS round trip, so contention, not
+   bandwidth, is the ceiling (16 writers: 5 attempts per commit, each rewriting its pages).
+   Batching writers into one CAS (a group commit, the merge queue in the spec) is the fix.
+3. A clone writes each file twice (into the shared content cache, then a CoW clone into the
+   worktree). That is the price of worktrees costing ~0 extra disk.
+
 ## Tests
 
 ```sh
