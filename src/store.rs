@@ -150,22 +150,30 @@ impl Store {
                 Err(e) => Err(e.into()),
             };
         }
-        match self.inner.get_opts(&self.path(key), GetOptions::default()).await {
-            Ok(r) => {
-                let v = Version { etag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
-                let b = r.bytes().await?;
-                self.stats.bytes_down.fetch_add(b.len() as u64, Ordering::Relaxed);
-                Ok(Some((b, v)))
+        let path = self.path(key);
+        let got = retry(|| async {
+            match self.inner.get_opts(&path, GetOptions::default()).await {
+                Ok(r) => {
+                    let v = Version { etag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
+                    Ok(Some((r.bytes().await?, v)))
+                }
+                Err(object_store::Error::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e),
             }
-            Err(object_store::Error::NotFound { .. }) => Ok(None),
-            Err(e) => Err(e.into()),
+        })
+        .await
+        .with_context(|| format!("get {key}"))?;
+        if let Some((b, _)) = &got {
+            self.stats.bytes_down.fetch_add(b.len() as u64, Ordering::Relaxed);
         }
+        Ok(got)
     }
 
     /// Fetch several byte ranges of one object; adjacent ranges are coalesced into one request.
     pub async fn get_ranges(&self, key: &str, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
-        let out = self.inner.get_ranges(&self.path(key), ranges).await.with_context(|| format!("range read {key}"))?;
+        let path = self.path(key);
+        let out = retry(|| self.inner.get_ranges(&path, ranges)).await.with_context(|| format!("range read {key}"))?;
         let n: usize = out.iter().map(|b| b.len()).sum();
         self.stats.bytes_down.fetch_add(n as u64, Ordering::Relaxed);
         Ok(out)
@@ -176,21 +184,29 @@ impl Store {
     pub async fn put_new(&self, key: &str, data: Bytes) -> Result<bool> {
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
-        let opts = PutOptions { mode: PutMode::Create, ..Default::default() };
-        match self.inner.put_opts(&self.path(key), PutPayload::from(data), opts).await {
-            Ok(_) => Ok(true),
-            Err(object_store::Error::AlreadyExists { .. }) => Ok(false),
-            // Some S3 implementations answer a lost If-None-Match race with 412.
-            Err(object_store::Error::Precondition { .. }) => Ok(false),
-            Err(e) => Err(e).with_context(|| format!("put {key}")),
-        }
+        let path = self.path(key);
+        // Safe to retry: content-addressed, so a retried create that finds the object
+        // already written (by our earlier attempt) is a success.
+        retry(|| async {
+            let opts = PutOptions { mode: PutMode::Create, ..Default::default() };
+            match self.inner.put_opts(&path, PutPayload::from(data.clone()), opts).await {
+                Ok(_) => Ok(true),
+                Err(object_store::Error::AlreadyExists { .. }) => Ok(false),
+                // Some S3 implementations answer a lost If-None-Match race with 412.
+                Err(object_store::Error::Precondition { .. }) => Ok(false),
+                Err(e) => Err(e),
+            }
+        })
+        .await
+        .with_context(|| format!("put {key}"))
     }
 
     /// Unconditional write (used for best-effort side records like intents and reflogs).
     pub async fn put(&self, key: &str, data: Bytes) -> Result<()> {
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
-        self.inner.put(&self.path(key), PutPayload::from(data)).await?;
+        let path = self.path(key);
+        retry(|| self.inner.put(&path, PutPayload::from(data.clone()))).await?;
         Ok(())
     }
 
@@ -235,7 +251,7 @@ impl Store {
     pub async fn list_meta(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
         let p = self.path(prefix.trim_end_matches('/'));
         let strip = if self.prefix.is_empty() { 0 } else { self.prefix.len() + 1 };
-        let items: Vec<_> = match self.inner.list(Some(&p)).try_collect().await {
+        let items: Vec<_> = match retry(|| self.inner.list(Some(&p)).try_collect()).await {
             Ok(v) => v,
             Err(object_store::Error::NotFound { .. }) => vec![],
             Err(e) => return Err(e.into()),
@@ -283,4 +299,30 @@ fn local_cas(root: &FsPath, key: &str, data: &[u8], expected: Option<&Version>) 
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, &path)?;
     Ok(Cas::Ok(local_version(data)))
+}
+
+/// Retry transient failures of idempotent operations (connection resets, 5xx, throttling).
+/// Definitive answers (not found, already exists, precondition failed) are returned at once.
+async fn retry<T, F, Fut>(mut op: F) -> object_store::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = object_store::Result<T>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e @ object_store::Error::NotFound { .. })
+            | Err(e @ object_store::Error::AlreadyExists { .. })
+            | Err(e @ object_store::Error::Precondition { .. })
+            | Err(e @ object_store::Error::NotModified { .. })
+            | Err(e @ object_store::Error::NotImplemented { .. }) => return Err(e),
+            Err(e) if attempt >= 6 => return Err(e),
+            Err(_) => {
+                attempt += 1;
+                let ms = (100u64 << attempt).min(5_000);
+                tokio::time::sleep(std::time::Duration::from_millis(ms / 2 + rand::random::<u64>() % (ms / 2))).await;
+            }
+        }
+    }
 }
