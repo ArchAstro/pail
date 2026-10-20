@@ -74,12 +74,21 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open `file:///abs/dir`, `s3://bucket/prefix` or `gs://bucket/prefix`.
+    /// Open `file:///abs/dir`, `s3://bucket/prefix`, `gs://bucket/prefix` or a pail proxy at
+    /// `https://host/repo`, with credentials from the user's config (see `creds`).
+    pub fn open(url: &str) -> Result<Store> {
+        Store::open_in(url, None)
+    }
+
+    /// [`Store::open`] with a local repository's config layered over the user's.
     ///
     /// S3 honours the standard `AWS_*` env vars (`AWS_ENDPOINT`, `AWS_ALLOW_HTTP`, ...).
     /// GCS honours `GOOGLE_*` env vars; `PAIL_GCS_TOKEN` supplies an OAuth token (e.g. from
     /// `gcloud auth print-access-token`); `PAIL_GCS_BASE_URL` points it at an emulator.
-    pub fn open(url: &str) -> Result<Store> {
+    pub fn open_in(url: &str, repo_dir: Option<&FsPath>) -> Result<Store> {
+        let cfg = crate::config::Config::load(repo_dir);
+        let choice = crate::creds::choose(url, &cfg)?;
+        let helper = crate::creds::Source::new(&choice.provider, url);
         let parsed = url::Url::parse(url).with_context(|| format!("invalid store url {url}"))?;
         let prefix = parsed.path().trim_matches('/').to_string();
         let stats = Arc::new(Stats::default());
@@ -98,10 +107,13 @@ impl Store {
             }
             "s3" => {
                 let bucket = parsed.host_str().ok_or_else(|| anyhow!("missing bucket"))?;
-                let s3 = AmazonS3Builder::from_env()
+                let mut b = AmazonS3Builder::from_env()
                     .with_bucket_name(bucket)
-                    .with_conditional_put(S3ConditionalPut::ETagMatch)
-                    .build()?;
+                    .with_conditional_put(S3ConditionalPut::ETagMatch);
+                if let Some(src) = helper {
+                    b = b.with_credentials(Arc::new(crate::creds::AwsProvider(src)));
+                }
+                let s3 = b.build()?;
                 Ok(Store { inner: Arc::new(s3), prefix, local_root: None, url: url.to_string(), stats })
             }
             "gs" => {
@@ -109,6 +121,8 @@ impl Store {
                 let mut b = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
                 if let Ok(base) = std::env::var("PAIL_GCS_BASE_URL") {
                     b = b.with_base_url(&base).with_bearer_token("emulator");
+                } else if let Some(src) = helper {
+                    b = b.with_credentials(Arc::new(crate::creds::GcsProvider(src)));
                 } else if let Ok(token) = std::env::var("PAIL_GCS_TOKEN") {
                     // e.g. `PAIL_GCS_TOKEN=$(gcloud auth print-access-token)`
                     b = b.with_bearer_token(token);
@@ -121,7 +135,13 @@ impl Store {
                     stats,
                 })
             }
-            s => bail!("unsupported store scheme {s}:// (use file://, s3:// or gs://)"),
+            "https" | "http" => {
+                // A pail proxy: the whole URL is the repository; keys are relative to it.
+                let auth = helper.map(|src| Arc::new(crate::creds::BearerProvider(src)));
+                let http = crate::httpstore::HttpStore::new(url, auth)?;
+                Ok(Store { inner: Arc::new(http), prefix: String::new(), local_root: None, url: url.to_string(), stats })
+            }
+            s => bail!("unsupported store scheme {s}:// (use file://, s3://, gs:// or https://)"),
         }
     }
 
@@ -179,6 +199,29 @@ impl Store {
         let n: usize = out.iter().map(|b| b.len()).sum();
         self.stats.bytes_down.fetch_add(n as u64, Ordering::Relaxed);
         Ok(out)
+    }
+
+    /// One byte range of an object with the object's total size, or None if it doesn't exist.
+    pub async fn read_range(&self, key: &str, range: Range<u64>) -> Result<Option<(Bytes, u64)>> {
+        self.stats.gets.fetch_add(1, Ordering::Relaxed);
+        let path = self.path(key);
+        let got = retry(|| async {
+            let opts = GetOptions { range: Some(range.clone().into()), ..Default::default() };
+            match self.inner.get_opts(&path, opts).await {
+                Ok(r) => {
+                    let size = r.meta.size;
+                    Ok(Some((r.bytes().await?, size)))
+                }
+                Err(object_store::Error::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+        .await
+        .with_context(|| format!("range read {key}"))?;
+        if let Some((b, _)) = &got {
+            self.stats.bytes_down.fetch_add(b.len() as u64, Ordering::Relaxed);
+        }
+        Ok(got)
     }
 
     /// Write an immutable object. Returns false if it already existed (which is fine:
@@ -330,7 +373,9 @@ where
             | Err(e @ object_store::Error::AlreadyExists { .. })
             | Err(e @ object_store::Error::Precondition { .. })
             | Err(e @ object_store::Error::NotModified { .. })
-            | Err(e @ object_store::Error::NotImplemented { .. }) => return Err(e),
+            | Err(e @ object_store::Error::NotImplemented { .. })
+            | Err(e @ object_store::Error::Unauthenticated { .. })
+            | Err(e @ object_store::Error::PermissionDenied { .. }) => return Err(e),
             Err(e) if attempt >= 6 => return Err(e),
             Err(_) => {
                 attempt += 1;

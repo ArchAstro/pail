@@ -2,6 +2,7 @@
 
 pub mod blobs;
 pub mod config;
+pub mod creds;
 pub mod enc;
 pub mod gc;
 pub mod gitcmd;
@@ -13,6 +14,7 @@ pub mod gitsrc;
 pub mod graph;
 pub mod hash;
 pub mod hooks;
+pub mod httpstore;
 pub mod inspect;
 pub mod local;
 pub mod manifest;
@@ -20,6 +22,7 @@ pub mod objects;
 pub mod pack;
 pub mod repo;
 pub mod rev;
+pub mod serve;
 pub mod snapshot;
 pub mod store;
 pub mod worktree;

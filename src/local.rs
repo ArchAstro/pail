@@ -83,7 +83,7 @@ impl LocalRepo {
 
     /// A store client whose caches and indexes live in this repository.
     pub fn repo(&self) -> Result<Repo> {
-        Ok(Repo::with_local(Store::open(&self.config.store)?, &self.dir))
+        Ok(Repo::with_local(Store::open_in(&self.config.store, Some(&self.dir))?, &self.dir))
     }
 
     pub fn is_repo(dir: &Path) -> bool {

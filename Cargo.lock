@@ -1242,6 +1242,7 @@ name = "pail"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "bytes",
  "chrono",
@@ -1258,6 +1259,7 @@ dependencies = [
  "object_store",
  "rand 0.9.5",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha1_smol",

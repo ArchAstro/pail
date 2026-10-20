@@ -96,6 +96,13 @@ so output is not paged.
 - `--no-verify`/`-n` skips the refusing hooks. Use it only when the user explicitly asks.
 - `PAIL_TRACE_HOOKS=<file>` appends one JSON line per hook run.
 
+## Access
+
+If a command fails with 401/403 or "credential provider … failed", run `pail auth status` to
+see which provider the store uses and whether it can read. Providers are installed
+extensions (`pail auth list`). Installing one or changing `pail auth use` changes how the
+user authenticates: ask before doing either.
+
 ## Exit codes
 
 | Code | Meaning | What to do |

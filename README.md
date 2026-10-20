@@ -319,6 +319,49 @@ pail-mirror verify --git-dir … --store … --state-dir ./state   # re-prove th
 The dashboard at `--serve` shows sync state, per-commit import and proof times, upload
 costs, and deep-check results. `state/mirror.jsonl` holds one record per commit.
 
+## Auth: credential providers are extensions
+
+Most people have no bucket credentials. Pail asks an installed **credential provider** for
+short-lived, delegated ones; pail itself only knows the protocol. Without a provider it uses
+the cloud SDK's chain (gcloud ADC, `GOOGLE_*`, `AWS_*`).
+
+```
+                         ┌ pail-credential-gcloud           your gcloud login
+pail ─▶ provider for ────┼ pail-credential-gcs-downscoped   gcloud, narrowed to one repo (CAB)
+        this store URL   ├ pail-credential-archdev          ArchAstro mints a scoped token
+        (config)         └ pail-credential-<yours>          any SSO / broker / vault
+   │
+   ├─ gs://, s3://  ─▶ token or keys, straight to the bucket (no server)
+   └─ https://host  ─▶ bearer token to `pail serve`, a stateless proxy holding the bucket
+                       credentials and asking --auth-command per (token, repo, read|write)
+```
+
+```sh
+pail auth list                               # installed providers, bundled ones
+pail auth install gcs-downscoped             # bundled; or a path: ./pail-credential-acme
+pail auth use gcs-downscoped --for gs://acme-vcs --global
+pail auth status                             # provider, expiry, and a read of the store
+pail auth logout                             # forget cached credentials
+```
+
+1. **Extension:** an executable `pail-credential-<name>` in `$PAIL_EXTENSIONS_DIR`, else
+   `~/.local/share/pail/extensions` (where `pail auth install` puts it), else `$PATH`.
+   `get` reads `{"protocol":"pail-credential/1","store":…,"scheme":…}` on stdin and prints
+   `{"token":…,"expires_at":…}` (GCS, https), `{"aws":{…},"expires_at":…}` (S3) or a bare
+   token. `describe` (optional) prints one line for `pail auth list`.
+2. **Choice:** `[credential "<url-prefix>"] provider = <name>`, most specific prefix first, then
+   `[credential]`; `helper = <cmd>` runs an uninstalled command. `PAIL_CREDENTIAL_PROVIDER` /
+   `PAIL_CREDENTIAL_HELPER` override.
+3. **Cache:** until a minute before `expires_at`, 0600 in `~/.cache/pail/credentials`.
+4. **Scope is the provider's job.** `gcs-downscoped` shows how: it exchanges the user's token at
+   Google STS for one bound by a Credential Access Boundary to `gs://<bucket>/<repo>/`. On a
+   real bucket, pail works fully with it, and the same token gets 403 writing or listing
+   outside the prefix.
+5. **Proxy:** `pail serve --store gs://acme-vcs --auth-command <cmd>` serves
+   `https://host/<repo>` (GET/HEAD/PUT with If-Match/If-None-Match, DELETE, list). The CAS
+   contract tests pass through it. The auth command gets `PAIL_AUTH_TOKEN`, `PAIL_AUTH_REPO`
+   and `PAIL_AUTH_OP` and allows with exit 0; answers are cached a minute.
+
 ## Hooks
 
 Executables pail runs at fixed points, like Git's, but shaped by pail's model: a commit is

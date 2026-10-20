@@ -304,6 +304,25 @@ enum Cmd {
         #[arg(long, add = ArgValueCandidates::new(complete::branches))]
         rev: Option<String>,
     },
+    /// Which credential a store uses, and whether it works.
+    #[command(subcommand, arg_required_else_help = true, after_long_help = cli_help::AUTH)]
+    Auth(AuthCmd),
+    /// Serve a store over https:// to people without bucket credentials (a stateless proxy).
+    #[command(after_long_help = cli_help::SERVE)]
+    Serve {
+        /// The store to serve; repositories are paths under it (gs://bucket → https://host/<repo>).
+        #[arg(long)]
+        store: String,
+        /// Address to listen on.
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        addr: String,
+        /// Command that authorizes each request (PAIL_AUTH_TOKEN, PAIL_AUTH_REPO, PAIL_AUTH_OP).
+        #[arg(long)]
+        auth_command: Option<String>,
+        /// Allow requests without checking tokens (trusted networks and tests only).
+        #[arg(long, conflicts_with = "auth_command")]
+        allow_anonymous: bool,
+    },
     /// Print a shell completion script that completes branch names live.
     #[command(after_long_help = cli_help::COMPLETION)]
     Completion {
@@ -316,6 +335,45 @@ enum Cmd {
         /// The command (and subcommand), e.g. `land` or `worktree add`.
         command: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum AuthCmd {
+    /// Installed credential providers (pail-credential-* extensions) and bundled ones.
+    List,
+    /// Install a provider: a bundled one by name (gcloud, gcs-downscoped) or an executable.
+    Install {
+        /// A bundled provider's name, or a path to an executable (pail-credential-<name>).
+        source: String,
+        /// Install under this name (default: from the file name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Replace an installed provider of the same name.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Uninstall a provider from pail's extensions directory.
+    Remove { name: String },
+    /// Use a provider for a store: writes credential.<url>.provider.
+    Use {
+        /// The provider's name (`ambient` for the cloud SDK's own chain).
+        #[arg(add = ArgValueCandidates::new(complete::providers))]
+        provider: String,
+        /// Store URL or prefix it applies to (default: this repository's store; with
+        /// --global and no --for, every store).
+        #[arg(long = "for")]
+        url: Option<String>,
+        /// Write the user's config instead of this repository's.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Show the provider for a store (default: this repository's), fetch a credential and
+    /// check that it can read the store.
+    Status {
+        store: Option<String>,
+    },
+    /// Forget cached credentials.
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -581,6 +639,33 @@ async fn run(cli: Cli) -> Result<()> {
     }
     match cmd {
         Cmd::Completion { shell } => complete::registration(&shell)?,
+        Cmd::Auth(AuthCmd::Logout) => println!("forgot {} cached credential(s)", pail::creds::clear_cache()?),
+        Cmd::Auth(AuthCmd::List) => {
+            let installed = pail::creds::installed();
+            for (name, exe) in &installed {
+                let what = pail::creds::description(exe).unwrap_or_default();
+                println!("{name:16} {what}\n{:16} {}", "", exe.display());
+            }
+            if installed.is_empty() {
+                println!("no credential providers installed (the ambient cloud SDK chain is used)");
+            }
+            let bundled: Vec<&str> = pail::creds::BUNDLED.iter().map(|(n, _)| *n).filter(|n| !installed.iter().any(|(i, _)| i == n)).collect();
+            if !bundled.is_empty() {
+                println!("\nbundled, not installed: {}   (pail auth install <name>)", bundled.join(", "));
+            }
+        }
+        Cmd::Auth(AuthCmd::Install { source, name, force }) => auth_install(&source, name, force)?,
+        Cmd::Auth(AuthCmd::Remove { name }) => {
+            let dir = pail::creds::extensions_dir().context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
+            let p = dir.join(format!("{}{name}", pail::creds::PREFIX));
+            std::fs::remove_file(&p).with_context(|| format!("{} is not installed in {}", name, dir.display()))?;
+            println!("removed {}", p.display());
+        }
+        Cmd::Auth(AuthCmd::Use { provider, url, global }) => auth_use(&provider, url, global)?,
+        Cmd::Auth(AuthCmd::Status { store }) => auth_status(store).await?,
+        Cmd::Serve { store, addr, auth_command, allow_anonymous } => {
+            pail::serve::serve(&pail::rev::store_url(&store)?, &addr, auth_command, allow_anonymous).await?
+        }
         Cmd::Help { command } => print_help(&command)?,
         Cmd::Log { args } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
@@ -1293,6 +1378,102 @@ fn print_help(command: &[String]) -> Result<()> {
         cur = cur.find_subcommand_mut(name).with_context(|| format!("no command `{}`", command.join(" ")))?;
     }
     cur.print_long_help()?;
+    Ok(())
+}
+
+
+async fn auth_status(store: Option<String>) -> Result<()> {
+    let (url, dir) = match store {
+        Some(s) => (pail::rev::store_url(&s)?, None),
+        None => match pail::local::discover(&cwd()?)? {
+            pail::local::Found::Worktree(_, l) | pail::local::Found::Bare(l) => (l.config.store.clone(), Some(l.dir)),
+        },
+    };
+    let cfg = Config::load(dir.as_deref());
+    let choice = pail::creds::choose(&url, &cfg)?;
+    println!("store     {url}");
+    match &choice.provider {
+        pail::creds::Provider::Ambient => println!("provider  {}   [{}]", choice.provider.describe(), choice.source),
+        p => {
+            println!("provider  {}   [{}]", p.describe(), choice.source);
+            let src = pail::creds::Source::new(p, &url).expect("not ambient");
+            let c = tokio::task::spawn_blocking(move || src.get()).await??;
+            let kind = if c.aws.is_some() { "aws keys" } else { "bearer token" };
+            let left = c.expires_at.saturating_sub(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs());
+            println!("credential {kind}, expires in {}m", left / 60);
+        }
+    }
+    let s = pail::store::Store::open_in(&url, dir.as_deref())?;
+    let t = std::time::Instant::now();
+    match s.list("refs/").await {
+        Ok(refs) => println!("access    ok: read {} branch(es) in {} ms", refs.len(), t.elapsed().as_millis()),
+        Err(e) => {
+            println!("access    failed: {e:#}");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+
+fn auth_install(source: &str, name: Option<String>, force: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = pail::creds::extensions_dir().context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
+    let (name, body) = match pail::creds::BUNDLED.iter().find(|(n, _)| *n == source) {
+        Some((n, body)) => (name.unwrap_or_else(|| n.to_string()), body.as_bytes().to_vec()),
+        None => {
+            let p = std::path::Path::new(source);
+            let body = std::fs::read(p).with_context(|| {
+                let bundled: Vec<&str> = pail::creds::BUNDLED.iter().map(|(n, _)| *n).collect();
+                format!("`{source}` is neither a file nor a bundled provider ({})", bundled.join(", "))
+            })?;
+            let file = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+            let n = name.unwrap_or_else(|| file.strip_prefix(pail::creds::PREFIX).unwrap_or(&file).to_string());
+            (n, body)
+        }
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("provider names are letters, digits, - and _ (got {name:?}); pass --name");
+    }
+    std::fs::create_dir_all(&dir)?;
+    let dest = dir.join(format!("{}{name}", pail::creds::PREFIX));
+    if dest.exists() && !force {
+        bail!("{name} is already installed at {} (--force replaces it)", dest.display());
+    }
+    std::fs::write(&dest, body)?;
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+    println!("installed {name} at {}", dest.display());
+    if let Some(d) = pail::creds::description(&dest) {
+        println!("  {d}");
+    }
+    println!("use it: pail auth use {name} [--for <store-url>] [--global]");
+    Ok(())
+}
+
+fn auth_use(provider: &str, url: Option<String>, global: bool) -> Result<()> {
+    if provider != "ambient" && pail::creds::find_extension(provider).is_none() {
+        bail!("credential provider `{provider}` is not installed (pail auth list; pail auth install {provider})");
+    }
+    let local = pail::local::discover(&cwd()?).ok().map(|f| match f {
+        pail::local::Found::Worktree(_, l) | pail::local::Found::Bare(l) => l,
+    });
+    let url = match (url, &local) {
+        (Some(u), _) => Some(pail::rev::store_url(&u)?),
+        (None, Some(l)) if !global => Some(l.config.store.clone()),
+        (None, _) if global => None,
+        (None, None) => bail!("not in a pail repository: pass --for <store-url> (or --global)"),
+        _ => unreachable!(),
+    };
+    let key = match &url {
+        Some(u) => format!("credential.{}.provider", u.trim_end_matches('/')),
+        None => "credential.provider".to_string(),
+    };
+    let mut cfg = Config::load(local.as_ref().map(|l| l.dir.as_path()));
+    let scope = if global || local.is_none() { Scope::Global } else { Scope::Local };
+    let f = cfg.file_mut(scope)?;
+    f.set(&key, provider)?;
+    f.save()?;
+    println!("{key} = {provider}   ({})", if matches!(scope, Scope::Global) { "user config" } else { "repository config" });
     Ok(())
 }
 

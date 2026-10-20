@@ -42,6 +42,11 @@ Working copies and caches
   fetch [<revs>]            Fill the local content cache (as `git fetch` for a bare repo)
   cache stats|prune         Inspect or trim the local content cache
 
+Access
+  auth list|install|use     Credential providers (extensions) for stores you can't reach directly
+  auth status|logout        Which provider a store uses, and whether it works
+  serve --store <url>       Run a proxy so people without bucket credentials can use https://
+
 Repository
   config [<key> [<value>]]  Options, as `git config` (user.name, core.hooksPath, …)
   gc                        Delete unreachable objects past a grace period
@@ -220,3 +225,41 @@ store) and config keys complete, besides commands and options.
   fish   pail completion fish > ~/.config/fish/completions/pail.fish
   elvish pail completion elvish >> ~/.config/elvish/rc.elv
   powershell  pail completion powershell >> $PROFILE";
+
+pub const AUTH: &str = "\
+Most people have no bucket credentials, so pail asks a credential provider for short-lived,
+delegated ones. Providers are extensions you install: executables named
+pail-credential-<name> (in ~/.local/share/pail/extensions or on PATH) that speak the
+pail-credential/1 protocol. Without one, pail uses the cloud SDK's chain (ambient).
+
+  pail auth list                           # installed and bundled providers
+  pail auth install gcloud                 # bundled: your gcloud login
+  pail auth install gcs-downscoped         # bundled: gcloud, narrowed to one repository
+  pail auth install ./pail-credential-acme # anything you or your company ships
+  pail auth use acme --for gs://acme-vcs   # [credential \"gs://acme-vcs\"] provider = acme
+  pail auth use gcloud --global            # every store without a closer match
+  pail auth status                         # which provider, and can it read the store?
+  pail auth logout                         # forget cached credentials
+
+Writing a provider: `<exe> get` reads a JSON request on stdin and prints a credential.
+  stdin   {\"protocol\":\"pail-credential/1\",\"store\":\"gs://acme-vcs/app\",\"scheme\":\"gs\"}
+  stdout  {\"token\":\"…\",\"expires_at\":<unix secs>}             GCS and https:// proxies
+          {\"aws\":{\"access_key_id\":…,\"secret_access_key\":…,\"session_token\":…},\"expires_at\":…}
+          or a bare token line
+`<exe> describe` optionally prints one line for `pail auth list`. Credentials are cached
+(0600, ~/.cache/pail/credentials) until a minute before they expire.
+An uninstalled command works too: credential.<url>.helper = <cmd> (run as `<cmd> get`).
+PAIL_CREDENTIAL_PROVIDER=<name> or PAIL_CREDENTIAL_HELPER=<cmd> override config.";
+
+pub const SERVE: &str = "\
+A stateless proxy: it holds the bucket credentials, and clients use https://<host>/<repo>
+with a bearer token from their credential helper. Run any number of instances (Cloud Run,
+Lambda behind a URL, a VM); nothing is kept between requests.
+
+Each request is authorized by --auth-command with PAIL_AUTH_TOKEN, PAIL_AUTH_REPO and
+PAIL_AUTH_OP (read|write) in its environment: exit 0 allows. Answers are cached a minute.
+
+Examples:
+  pail serve --store gs://acme-vcs --addr 0.0.0.0:8080 --auth-command 'acme-sso verify'
+  pail serve --store file:///srv/pail --addr 127.0.0.1:8787 --allow-anonymous
+  pail clone https://vcs.acme.dev/app      # a client, with credential.helper set for it";

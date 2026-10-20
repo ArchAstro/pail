@@ -6,6 +6,7 @@ description = "A simple, serverless version control system stored in S3/GCS"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1.92"
 blake3 = "1.8"
 bytes = "1"
 chrono = "0.4"
@@ -22,6 +23,7 @@ memmap2 = "0.9.11"
 object_store = { version = "0.14", features = ["aws", "gcp"] }
 rand = "0.9"
 regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha1_smol = "1"

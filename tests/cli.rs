@@ -833,3 +833,95 @@ fn help_skill_completion_and_exit_codes() {
     assert_eq!(out.status.code(), Some(4));
     assert!(String::from_utf8_lossy(&out.stderr).contains("pail sync"));
 }
+
+/// Kills the child on drop.
+struct Child(std::process::Child);
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// People without bucket credentials: a `pail serve` proxy in front of the store, a credential
+/// helper handing the client a bearer token, and an auth command deciding per repository and
+/// operation. Writes and reads go through; a read-only token cannot publish; unknown tokens
+/// cannot read; the helper's answer is cached until it expires.
+#[test]
+fn proxy_store_with_a_credential_helper() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let auth = t.join("auth.sh");
+    write(&auth, "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN:$PAIL_AUTH_REPO:$PAIL_AUTH_OP\" in\n  tok-alice:team/app:*) echo alice;;\n  tok-bob:team/app:read) echo bob;;\n  *) exit 1;;\nesac\n");
+    let calls = t.join("helper-calls");
+    // The company's provider, shipped as an extension: `describe`, and `get` answering with
+    // the token the user holds (TOK stands in for their login).
+    let helper = t.join("pail-credential-acme");
+    write(&helper, &format!("#!/bin/sh\n[ \"$1\" = describe ] && {{ echo acme sso; exit 0; }}\nread req\necho \"$req\" >> {}\necho \"{{\\\"token\\\":\\\"$TOK\\\",\\\"expires_at\\\":4102444800}}\"\n", calls.display()));
+    for f in [&auth, &helper] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _server = Child(
+        cmd(&t, &["serve", "--store", &format!("file://{}", t.join("bucket").display()), "--addr", &format!("127.0.0.1:{port}"), "--auth-command", &auth.to_string_lossy()])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{port}");
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let store = format!("{base}/team/app");
+    let ext = t.join("extensions");
+    let as_user = |dir: &Path, token: &str, args: &[&str]| {
+        let mut c = cmd(dir, args);
+        c.env("TOK", token).env("XDG_CACHE_HOME", t.join(format!("cache-{token}"))).env("PAIL_EXTENSIONS_DIR", &ext);
+        c.output().unwrap()
+    };
+    let ok = |o: std::process::Output| {
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).to_string()
+    };
+
+    // Install the provider and point the proxy's URL at it.
+    let out = ok(as_user(&t, "tok-alice", &["auth", "install", &helper.to_string_lossy()]));
+    assert!(out.contains("installed acme") && out.contains("acme sso"), "{out}");
+    assert!(ok(as_user(&t, "tok-alice", &["auth", "list"])).contains("acme             acme sso"));
+    ok(as_user(&t, "tok-alice", &["auth", "use", "acme", "--for", &base, "--global"]));
+    ok(as_user(&t, "tok-alice", &["init", &store]));
+    ok(as_user(&t, "tok-alice", &["clone", &store, "a"]));
+    let a = t.join("a");
+    write(&a.join("src/lib.rs"), "fn main() {}");
+    ok(as_user(&a, "tok-alice", &["add", "-A"]));
+    ok(as_user(&a, "tok-alice", &["commit", "-m", "through the proxy"]));
+    assert!(t.join("bucket/team/app/refs/main").is_file(), "objects land in the backing store");
+    let status = ok(as_user(&a, "tok-alice", &["auth", "status"]));
+    assert!(status.contains("access    ok"), "{status}");
+
+    // Read-only: clone and log work, publishing does not.
+    ok(as_user(&t, "tok-bob", &["clone", &store, "b"]));
+    let b = t.join("b");
+    assert!(ok(as_user(&b, "tok-bob", &["log", "--oneline"])).contains("through the proxy"));
+    write(&b.join("x.txt"), "x");
+    ok(as_user(&b, "tok-bob", &["add", "-A"]));
+    let out = as_user(&b, "tok-bob", &["commit", "-m", "nope"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("403"), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // Unknown token: nothing.
+    let out = as_user(&t, "tok-eve", &["clone", &store, "e"]);
+    assert!(!out.status.success());
+
+    // The helper got the pail-credential/1 request, and its answer was reused from the cache.
+    let reqs = std::fs::read_to_string(&calls).unwrap();
+    assert!(reqs.contains(r#""protocol":"pail-credential/1""#) && reqs.contains(&store), "{reqs}");
+    let alice_calls = reqs.lines().count();
+    ok(as_user(&a, "tok-alice", &["log", "-1"]));
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), alice_calls, "cached");
+    assert!(ok(as_user(&a, "tok-alice", &["auth", "logout"])).contains("forgot"));
+}

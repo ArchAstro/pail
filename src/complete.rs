@@ -67,3 +67,13 @@ pub fn config_keys() -> Vec<CompletionCandidate> {
     }
     out
 }
+
+/// Installed credential providers, plus `ambient`.
+pub fn providers() -> Vec<CompletionCandidate> {
+    std::iter::once(CompletionCandidate::new("ambient").help(Some("the cloud SDK's own credential chain".into())))
+        .chain(pail::creds::installed().into_iter().map(|(n, exe)| {
+            let help = pail::creds::description(&exe).unwrap_or_default();
+            CompletionCandidate::new(n).help(Some(help.into()))
+        }))
+        .collect()
+}
