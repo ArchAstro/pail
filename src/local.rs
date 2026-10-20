@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! <repo>/                     name.pail/ when bare, <worktree>/.pail/ otherwise
-//!   config.json               {"store": "s3://bucket/repo", "bare": true}
+//!   config                    Git-format config: core.store, core.bare, user.*, … (local layer)
 //!   HEAD                      the store's default branch, remembered
 //!   objects/commits|pages/    verified copies of immutable store objects
 //!   blobs/<hh>/<blake3>       file contents: read cache and the source worktrees clone from
@@ -52,15 +52,25 @@ impl LocalRepo {
     pub fn create(dir: &Path, store: &str, bare: bool) -> Result<LocalRepo> {
         std::fs::create_dir_all(dir)?;
         let dir = std::fs::canonicalize(dir)?;
-        let config = RepoConfig { store: store.to_string(), bare };
-        write_json(&dir.join("config.json"), &config)?;
-        Ok(LocalRepo { dir, config })
+        let mut f = crate::config::File::load(&dir.join("config"));
+        f.set("core.store", store)?;
+        f.set("core.bare", if bare { "true" } else { "false" })?;
+        f.save()?;
+        Ok(LocalRepo { dir, config: RepoConfig { store: store.to_string(), bare } })
     }
 
     pub fn open(dir: &Path) -> Result<LocalRepo> {
-        let p = dir.join("config.json");
+        let canon = std::fs::canonicalize(dir).with_context(|| format!("{} is not a pail repository", dir.display()))?;
+        let f = crate::config::File::load(&canon.join("config"));
+        let get = |k: &str| f.entries().into_iter().rev().find(|(key, _)| key == k).map(|(_, v)| v);
+        if let Some(store) = get("core.store") {
+            let bare = get("core.bare").is_some_and(|b| b == "true");
+            return Ok(LocalRepo { dir: canon, config: RepoConfig { store, bare } });
+        }
+        // Repositories made before the Git-format config.
+        let p = canon.join("config.json");
         let config: RepoConfig = serde_json::from_slice(&std::fs::read(&p).with_context(|| format!("{} is not a pail repository", dir.display()))?)?;
-        Ok(LocalRepo { dir: std::fs::canonicalize(dir)?, config })
+        Ok(LocalRepo { dir: canon, config })
     }
 
     /// The repository behind a working copy's `.pail/`: itself, or the one its `repo` names.
@@ -77,7 +87,8 @@ impl LocalRepo {
     }
 
     pub fn is_repo(dir: &Path) -> bool {
-        dir.join("config.json").is_file()
+        let f = crate::config::File::load(&dir.join("config"));
+        f.entries().iter().any(|(k, _)| k == "core.store") || dir.join("config.json").is_file()
     }
 
     // ---------- attached working copies ----------

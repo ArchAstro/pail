@@ -11,7 +11,7 @@ OUT=${OUT:-$(mktemp -d)}; mkdir -p "$OUT"
 REPO=${REPO:-$OUT/repo.pail}
 [[ -d $REPO ]] || "$PAIL" clone --bare "$STORE" "$REPO" >/dev/null
 export GIT_PAGER=cat PAGER=cat COLUMNS=80 TZ=${TZ:-America/Los_Angeles}
-unset GIT_CONFIG_GLOBAL; export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+unset GIT_CONFIG_GLOBAL; export GIT_CONFIG_NOSYSTEM=1 PAIL_CONFIG_GLOBAL=/dev/null GIT_CONFIG_GLOBAL=/dev/null
 tip=$("$PAIL" --repo "$REPO" --ids git log -1 --format=%H main)
 root=$("$PAIL" --repo "$REPO" --ids git log --reverse --format=%H main | head -1)
 range="$root..$tip"

@@ -48,6 +48,10 @@ pub struct Ctx {
     pub worktree: Option<PathBuf>,
     /// The local repository (None when reading a store directly).
     pub local: Option<crate::local::LocalRepo>,
+    /// Global config plus the repository's own.
+    pub config: crate::config::Config,
+    /// The store's default branch (its `HEAD`).
+    default_branch: OnceCell<String>,
     pub ids: Ids,
     git_index: OnceCell<GitIndex>,
 }
@@ -78,7 +82,9 @@ impl Ctx {
             branch: OnceCell::new(),
             head: OnceCell::new(),
             worktree: None,
+            config: crate::config::Config::load(local.as_ref().map(|l| l.dir.as_path())),
             local,
+            default_branch: OnceCell::new(),
             ids,
             git_index: OnceCell::new(),
         };
@@ -99,7 +105,9 @@ impl Ctx {
                     branch: OnceCell::new_with(Some(wt.head.branch)),
                     head: OnceCell::new_with(Some(wt.head.base)),
                     worktree: Some(wt.root),
+                    config: crate::config::Config::load(Some(&wt.local.dir)),
                     local: Some(wt.local),
+                    default_branch: OnceCell::new(),
                     ids,
                     git_index: OnceCell::new(),
                 })
@@ -116,7 +124,8 @@ impl Ctx {
     async fn store_default_branch(&self) -> Result<String> {
         let b = match self.repo.store.get_opt(STORE_HEAD_KEY).await? {
             Some((d, _)) => serde_json::from_slice::<StoreHead>(&d)?.branch,
-            None => "main".to_string(),
+            // Stores made before HEAD existed: the configured default.
+            None => self.config.default_branch(),
         };
         if let Some(p) = self.head_memo() {
             let _ = std::fs::create_dir_all(p.parent().unwrap());
@@ -125,17 +134,37 @@ impl Ctx {
         Ok(b)
     }
 
-    /// The branch HEAD names.
+    /// The branch HEAD names: a working copy's branch, else the store's default branch.
     pub async fn branch(&self) -> Result<&str> {
-        self.branch
+        self.branch.get_or_try_init(|| async { self.default_branch().await.map(str::to_string) }).await.map(String::as_str)
+    }
+
+    /// The store's default branch (`HEAD` in the store; remembered by a local repository):
+    /// what `clone` checks out and `land` lands onto unless told otherwise.
+    pub async fn default_branch(&self) -> Result<&str> {
+        self.default_branch
             .get_or_try_init(|| async {
                 if let Some(b) = self.head_memo().and_then(|p| std::fs::read_to_string(p).ok()).filter(|b| !b.is_empty()) {
-                    return Ok(b);
+                    return Ok(b.trim().to_string());
                 }
                 self.store_default_branch().await
             })
             .await
             .map(String::as_str)
+    }
+
+    /// Make `branch` the store's default branch.
+    pub async fn set_default_branch(&self, branch: &str) -> Result<()> {
+        crate::objects::validate_branch(branch)?;
+        if self.repo.read_ref(branch).await?.is_none() {
+            bail!("branch {branch} not found");
+        }
+        let head = serde_json::to_vec(&StoreHead { branch: branch.to_string() })?;
+        self.repo.store.put(STORE_HEAD_KEY, head.into()).await?;
+        if let Some(p) = self.head_memo() {
+            let _ = std::fs::write(p, branch);
+        }
+        Ok(())
     }
 
     /// The commit HEAD points at (None in an empty repository).

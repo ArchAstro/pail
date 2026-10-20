@@ -433,24 +433,6 @@ pub fn find_root(start: &Path) -> Result<PathBuf> {
     }
 }
 
-pub fn author() -> String {
-    if let Ok(a) = std::env::var("PAIL_AUTHOR") {
-        return a;
-    }
-    let git = |k: &str| {
-        std::process::Command::new("git")
-            .args(["config", "--get", k])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    };
-    match (git("user.name"), git("user.email")) {
-        (Some(n), Some(e)) => format!("{n} <{e}>"),
-        _ => format!("{} <unknown>", std::env::var("USER").unwrap_or_else(|_| "unknown".into())),
-    }
-}
-
 impl Worktree {
     pub fn open(start: &Path) -> Result<Worktree> {
         let root = find_root(start)?;
@@ -744,7 +726,8 @@ impl Worktree {
         for e in self.repo.write_files(&inputs, &reuse).await? {
             delta.insert(e.path.clone(), Some(e));
         }
-        let who = author();
+        let cfg = crate::config::Config::load(Some(&self.local.dir));
+        let who = cfg.identity("author")?;
         let date = now_date();
         let out = self
             .repo
@@ -752,9 +735,9 @@ impl Worktree {
                 branch: self.head.branch.clone(),
                 base: self.head.base,
                 delta,
-                author: who.clone(),
+                author: who,
                 author_date: date.clone(),
-                committer: who,
+                committer: cfg.identity("committer")?,
                 committer_date: date,
                 message: message.to_string(),
                 meta: BTreeMap::new(),

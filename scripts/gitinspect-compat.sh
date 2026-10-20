@@ -9,7 +9,7 @@ PAIL=${PAIL:-$(dirname "$0")/../target/release/pail}
 OUT=${OUT:-$(mktemp -d)}; mkdir -p "$OUT"
 REPO=${REPO:-$OUT/repo.pail}
 [[ -d $REPO ]] || "$PAIL" clone --bare "$STORE" "$REPO" >/dev/null
-export GIT_PAGER=cat PAGER=cat COLUMNS=80 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_PAGER=cat PAGER=cat COLUMNS=80 GIT_CONFIG_NOSYSTEM=1 PAIL_CONFIG_GLOBAL=/dev/null GIT_CONFIG_GLOBAL=/dev/null
 P() { "$PAIL" --repo "$REPO" --ids git "$@"; }
 G() { git --git-dir="$GIT_DIR" "$@"; }
 pass=0; fail=0

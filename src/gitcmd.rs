@@ -247,7 +247,7 @@ pub async fn rev_parse(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Resul
 /// `git show [<log options>] [<object>...]`: commits with their patch, trees as listings,
 /// blobs as their bytes.
 pub async fn show(ctx: &Ctx, args: &[String], out: &mut dyn Write, tty: bool) -> Result<()> {
-    let mut o = LogOpts::parse(args)?;
+    let mut o = LogOpts::parse_with(args, &ctx.config)?;
     if !o.diff.any_output() && !o.diff.no_patch {
         o.diff.patch = true;
     }

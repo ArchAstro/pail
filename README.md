@@ -50,7 +50,7 @@ key-derived boundaries, so identical subtrees share pages across commits and dif
 ```
 name.pail/                 bare: pail clone --bare <store> name.pail
 work/.pail/                or the first working copy's .pail/
-├─ config.json             {"store": "s3://bucket/repo", "bare": true}
+├─ config                  Git-format config: core.store, core.bare, plus any local options
 ├─ HEAD                    the store's default branch, remembered
 ├─ objects/{commits,pages} verified copies of store objects
 ├─ blobs/<hh>/<blake3>     file contents: read cache and the source checkouts clone from
@@ -68,6 +68,30 @@ work/.pail/                a working copy's own state, next to (or instead of) t
 Everything in it is derived from immutable store objects and verified on read, so it never
 goes stale and any part can be deleted. Reading a store with `--store <url>` keeps nothing.
 
+## Configuration
+
+Git's format and layering: `~/.config/pail/config` (global; `PAIL_CONFIG_GLOBAL` moves it),
+then the repository's `config` (local).
+
+```sh
+pail config --global user.name "Ada Lovelace"
+pail config --global user.email ada@example.com
+pail config --global init.defaultBranch trunk
+pail config user.name "Ada (work)"               # this repository only
+pail config --list --show-scope | pail config --unset log.date
+```
+
+| key | used for |
+|---|---|
+| `user.name`, `user.email` | author and committer (required, as in Git; `PAIL_AUTHOR_NAME`/`_EMAIL`, `PAIL_COMMITTER_*` override) |
+| `init.defaultBranch` | the first branch of `pail init` (else `main`) |
+| `core.pager`, `color.ui`, `core.abbrev` | output (`PAIL_PAGER` overrides the pager) |
+| `log.date`, `log.decorate`, `diff.renames` | `log`/`show` defaults; flags override |
+
+No branch name is assumed: the store's `HEAD` names its default branch (set by `init`,
+changed with `pail branch --default <name>`). `clone` checks it out and `land` lands onto it
+unless `--branch`/`--onto` say otherwise.
+
 ## CLI
 
 ```sh
@@ -76,7 +100,7 @@ pail clone s3://bucket/repo work && cd work       # working copy; its .pail/ is 
 echo hi > a.txt && pail add -A && pail commit -m "first"
 pail status | pail diff [--staged] | pail log | pail ls | pail cat <path>
 pail switch -c feature … pail commit -a -m wip
-pail land feature --onto main && pail sync
+pail land feature && pail sync                    # onto the default branch
 pail clone --bare s3://bucket/repo repo.pail      # repository without a working copy
 pail --repo repo.pail log --oneline               # or cd repo.pail; or PAIL_DIR
 ```
@@ -91,8 +115,8 @@ Commit as often as you like on a branch, then land the whole stack on main:
 ```sh
 pail switch -c feature
 pail commit -a -m "step 1" … pail commit -a -m "step 2" … pail commit -a -m "step 3"
-pail land feature --stack            # every commit, in order, onto main
-pail land feature                    # or: one squashed commit
+pail land feature --stack            # every commit, in order, onto the default branch
+pail land feature                    # or: one squashed commit (--onto <branch> to choose)
 ```
 
 1. Main untouched since the stack started: main fast-forwards to the stack (same commits).

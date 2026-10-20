@@ -1,6 +1,12 @@
 use std::path::Path;
 use std::process::Command;
 
+/// A global config file private to this test process (never the user's).
+fn global_config() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path().join("config")
+}
+
 fn cmd(dir: &Path, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_pail"));
     c.args(args)
@@ -8,7 +14,8 @@ fn cmd(dir: &Path, args: &[&str]) -> Command {
         .env("PAIL_AUTHOR", "Tester <t@example.com>")
         .env_remove("PAIL_CLONE")
         .env_remove("PAIL_STORE")
-        .env_remove("PAIL_DIR");
+        .env_remove("PAIL_DIR")
+        .env("PAIL_CONFIG_GLOBAL", global_config());
     c
 }
 
@@ -497,4 +504,64 @@ fn stacked_commits_land_on_main() {
     assert!(err.contains("conflict") && err.contains("x.txt"), "{err}");
     assert_eq!(read(&["log", "--format=%H", "-1", "main"]), main_before, "nothing landed");
     assert!(!read(&["ls", "-r", "main"]).contains("h.txt"), "not even the commits before the conflicting one");
+}
+
+/// Git-style config: identity from config (required), local over global, and the default
+/// branch from `init.defaultBranch` / the store's HEAD instead of an assumed `main`.
+#[test]
+fn config_identity_and_default_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let global = t.join("global-config");
+    let run = |dir: &Path, args: &[&str]| -> std::process::Output {
+        cmd(dir, args).env_remove("PAIL_AUTHOR").env("PAIL_CONFIG_GLOBAL", &global).output().unwrap()
+    };
+    let ok = |dir: &Path, args: &[&str]| -> String {
+        let o = run(dir, args);
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    let store = t.join("store");
+    let s = store.to_str().unwrap();
+    // No identity: refuse, as Git does.
+    let o = run(&t, &["init", s]);
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("Please tell me who you are"));
+    ok(&t, &["config", "--global", "user.name", "Ada Lovelace"]);
+    ok(&t, &["config", "--global", "user.email", "ada@example.com"]);
+    ok(&t, &["config", "--global", "init.defaultBranch", "trunk"]);
+    assert_eq!(ok(&t, &["config", "user.name"]), "Ada Lovelace\n");
+    assert!(std::fs::read_to_string(&global).unwrap().contains("[user]"), "Git-format file");
+
+    // init.defaultBranch names the first branch; clone checks out the store's default.
+    let out = ok(&t, &["init", s]);
+    assert!(out.contains("(trunk @"), "{out}");
+    ok(&t, &["clone", s, "w"]);
+    let w = t.join("w");
+    assert!(ok(&w, &["status"]).starts_with("on trunk"));
+    assert_eq!(ok(&w, &["branch", "--default"]), "trunk\n");
+    // Local identity overrides global; commits carry it.
+    ok(&w, &["config", "user.name", "Grace Hopper"]);
+    assert!(ok(&w, &["config", "--list", "--show-scope"]).contains("local\tuser.name=Grace Hopper"));
+    write(&w.join("a.txt"), "a\n");
+    ok(&w, &["add", "-A"]);
+    ok(&w, &["commit", "-m", "a"]);
+    assert_eq!(ok(&w, &["log", "-1", "--format=%an <%ae>|%cn"]), "Grace Hopper <ada@example.com>|Grace Hopper\n");
+    // land defaults onto the store's default branch.
+    ok(&w, &["switch", "-c", "feature"]);
+    write(&w.join("b.txt"), "b\n");
+    ok(&w, &["add", "-A"]);
+    ok(&w, &["commit", "-m", "b"]);
+    let out = ok(&w, &["land", "feature", "--stack"]);
+    assert!(out.contains("onto trunk"), "{out}");
+    // A new default branch is what later clones check out.
+    ok(&w, &["branch", "--default", "feature"]);
+    ok(&t, &["clone", s, "w2"]);
+    assert!(ok(&t.join("w2"), &["status"]).starts_with("on feature"));
+    // log options from config, overridden by flags.
+    ok(&w, &["config", "log.date", "short"]);
+    let d = ok(&w, &["log", "-1", "--format=%ad"]);
+    assert!(d.trim().len() == 10 && d.contains('-'), "{d}");
+    assert!(ok(&w, &["log", "-1", "--format=%ad", "--date=unix"]).trim().parse::<u64>().is_ok());
+    assert!(ok(&w, &["config", "--unset", "log.date"]).is_empty());
+    assert!(!run(&w, &["config", "log.date"]).status.success());
 }

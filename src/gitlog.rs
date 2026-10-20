@@ -154,7 +154,41 @@ impl LogOpts {
     /// Parse Git `log` arguments. Non-option words are revisions until `--`; the caller
     /// moves words that don't resolve into `paths`, as Git does.
     pub fn parse(args: &[String]) -> Result<LogOpts> {
+        LogOpts::parse_with(args, &crate::config::Config::default())
+    }
+
+    /// Parse with defaults from config (`log.date`, `log.decorate`, `color.ui`,
+    /// `core.abbrev`, `diff.renames`); arguments override them, as in Git.
+    pub fn parse_with(args: &[String], cfg: &crate::config::Config) -> Result<LogOpts> {
         let mut o = LogOpts::default();
+        if let Some(d) = cfg.get("log.date") {
+            o.date = parse_date_mode(&d).map_err(|e| fatal(e.to_string()))?;
+        }
+        if let Some(d) = cfg.get("log.decorate") {
+            o.decorate = match d.as_str() {
+                "short" | "true" | "yes" | "1" => Some(Decorate::Short),
+                "full" => Some(Decorate::Full),
+                "no" | "false" | "0" => Some(Decorate::No),
+                _ => None,
+            };
+        }
+        if let Some(c) = cfg.get("color.ui") {
+            o.color = match c.as_str() {
+                "always" => Some(true),
+                "never" | "false" => Some(false),
+                _ => None,
+            };
+        }
+        if let Some(a) = cfg.get("core.abbrev") {
+            o.abbrev = match a.as_str() {
+                "auto" => None,
+                "no" => Some(40),
+                n => Some(n.parse::<usize>().map_err(|_| fatal(format!("bad core.abbrev {n}")))?.clamp(4, 64)),
+            };
+        }
+        if let Some(r) = cfg.get_bool("diff.renames") {
+            o.diff.renames = r;
+        }
         let mut i = 0;
         // `--opt=value` or `--opt value`.
         let take = |i: &mut usize, a: &str, name: &str| -> Result<Option<String>> {

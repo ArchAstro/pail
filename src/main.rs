@@ -8,7 +8,8 @@ use pail::objects::now_date;
 use pail::repo::{CommitRequest, Delta, Repo};
 use pail::rev::{Ctx, Ids};
 use pail::local::LocalRepo;
-use pail::worktree::{Checkout, Worktree, author, seed_ignored};
+use pail::config::{Config, Scope};
+use pail::worktree::{Checkout, Worktree, seed_ignored};
 
 #[derive(Parser)]
 #[command(name = "pail", version, about = "Version control that lives in a bucket")]
@@ -40,13 +41,19 @@ enum IdsArg {
 #[derive(Subcommand)]
 enum Cmd {
     /// Create a repository in a store (s3://, gs://, file://) with an empty `main`.
-    Init { store: String, #[arg(long, default_value = "main")] branch: String },
+    Init {
+        store: String,
+        /// The default branch (else `init.defaultBranch`, else `main`).
+        #[arg(long)]
+        branch: Option<String>,
+    },
     /// Check out a branch into a new directory.
     Clone {
         store: String,
         dir: Option<PathBuf>,
-        #[arg(short, long, default_value = "main")]
-        branch: String,
+        /// Branch to check out (default: the store's default branch).
+        #[arg(short, long)]
+        branch: Option<String>,
         /// Create a bare repository (no working copy): local caches and indexes for reading
         /// the store, and a home for linked worktrees.
         #[arg(long)]
@@ -65,15 +72,41 @@ enum Cmd {
     /// Bring the working copy up to date with its branch.
     Sync,
     /// List branches, or create one at the current base.
-    Branch { name: Option<String>, #[arg(short, long)] delete: bool },
+    Branch {
+        name: Option<String>,
+        #[arg(short, long)]
+        delete: bool,
+        /// Show the store's default branch, or with a name make it the default.
+        #[arg(long)]
+        default: bool,
+    },
+    /// Get and set options, as `git config` (`user.name`, `user.email`, `init.defaultBranch`,
+    /// `core.pager`, `color.ui`, `log.date`, …): the repository's file, or `--global`.
+    Config {
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        local: bool,
+        #[arg(short = 'l', long)]
+        list: bool,
+        #[arg(long)]
+        get: bool,
+        #[arg(long)]
+        unset: bool,
+        #[arg(long)]
+        show_scope: bool,
+        key: Option<String>,
+        value: Option<String>,
+    },
     /// Switch to another branch (`-c` creates it at the current base).
     Switch { branch: String, #[arg(short, long)] create: bool },
     /// Land a branch onto another (default main): squashed into one commit, or with --stack
     /// every commit in order (fast-forward, or replayed on the new head), atomically.
     Land {
         branch: String,
-        #[arg(long, default_value = "main")]
-        onto: String,
+        /// Branch to land onto (default: the store's default branch).
+        #[arg(long)]
+        onto: Option<String>,
         #[arg(short, long)]
         message: Option<String>,
         /// Land each commit of the branch, not one squashed commit.
@@ -269,9 +302,18 @@ struct Output {
 
 impl Output {
     fn open(no_pager: bool) -> Output {
+        Output::open_with(no_pager, None)
+    }
+
+    /// Pager: `PAIL_PAGER`, then `core.pager`, then `PAGER`, then `less`.
+    fn open_with(no_pager: bool, cfg: Option<&Config>) -> Output {
         use std::io::IsTerminal;
         let tty = std::io::stdout().is_terminal();
-        let pager = ["PAIL_PAGER", "GIT_PAGER", "PAGER"].iter().find_map(|k| std::env::var(k).ok()).unwrap_or_else(|| "less".into());
+        let pager = std::env::var("PAIL_PAGER")
+            .ok()
+            .or_else(|| cfg.and_then(|c| c.get("core.pager")))
+            .or_else(|| std::env::var("PAGER").ok())
+            .unwrap_or_else(|| "less".into());
         if tty && !no_pager && !pager.is_empty() && pager != "cat" {
             let mut cmd = std::process::Command::new("sh");
             cmd.args(["-c", &pager]).stdin(std::process::Stdio::piped());
@@ -318,7 +360,7 @@ fn done(out: Output, r: Result<()>) -> Result<()> {
 /// `git log`: split words into revisions and paths the way Git does, then walk and print.
 async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
     use pail::gitlog::{Fatal, LogOpts, Pathspec, Printer, walk};
-    let mut o = LogOpts::parse(args)?;
+    let mut o = LogOpts::parse_with(args, &ctx.config)?;
     let words = std::mem::take(&mut o.revs);
     let mut paths = vec![];
     for w in words {
@@ -374,13 +416,13 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Log { args } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
-            let mut out = Output::open(cli.no_pager);
+            let mut out = Output::open_with(cli.no_pager, Some(&ctx.config));
             let r = cmd_log(&ctx, &args, &mut out).await;
             done(out, r)?;
         }
         Cmd::Show { args } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
-            let mut out = Output::open(cli.no_pager);
+            let mut out = Output::open_with(cli.no_pager, Some(&ctx.config));
             let r = pail::gitcmd::show(&ctx, &args, &mut *out.w, out.tty).await;
             done(out, r)?;
         }
@@ -403,6 +445,9 @@ async fn run(cli: Cli) -> Result<()> {
             done(out, r)?;
         }
         Cmd::Init { store, branch } => {
+            let cfg = Config::load(None);
+            let branch = branch.unwrap_or_else(|| cfg.default_branch());
+            pail::objects::validate_branch(&branch)?;
             let store = pail::rev::store_url(&store)?;
             let repo = Repo::remote(&store)?;
             if repo.read_ref(&branch).await?.is_some() {
@@ -411,16 +456,17 @@ async fn run(cli: Cli) -> Result<()> {
             // The default branch a bare read (`--store`) starts from.
             let head = serde_json::to_vec(&pail::rev::StoreHead { branch: branch.clone() })?;
             repo.store.put(pail::rev::STORE_HEAD_KEY, head.into()).await?;
-            let who = author();
+            let who = cfg.identity("author")?;
+            let committer = cfg.identity("committer")?;
             let date = now_date();
             let out = repo
                 .commit(CommitRequest {
                     branch: branch.clone(),
                     base: None,
                     delta: Delta::new(),
-                    author: who.clone(),
+                    author: who,
                     author_date: date.clone(),
-                    committer: who,
+                    committer,
                     committer_date: date,
                     message: "Initial empty commit".into(),
                     meta: BTreeMap::new(),
@@ -430,6 +476,12 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Clone { store, dir, branch, bare } => {
             let store = pail::rev::store_url(&store)?;
+            // The store's default branch unless one is named.
+            let default = match Repo::remote(&store)?.store.get_opt(pail::rev::STORE_HEAD_KEY).await? {
+                Some((d, _)) => serde_json::from_slice::<pail::rev::StoreHead>(&d)?.branch,
+                None => Config::load(None).default_branch(),
+            };
+            let branch = branch.unwrap_or_else(|| default.clone());
             let name = store.trim_end_matches('/').rsplit('/').next().unwrap_or("repo").to_string();
             if bare {
                 let dir = dir.unwrap_or_else(|| PathBuf::from(format!("{name}.pail")));
@@ -437,6 +489,7 @@ async fn run(cli: Cli) -> Result<()> {
                     bail!("{} exists and is not empty", dir.display());
                 }
                 let local = LocalRepo::create(&dir, &store, true)?;
+                std::fs::write(local.dir.join("HEAD"), &default)?;
                 let repo = local.repo()?;
                 let tip = repo.read_ref(&branch).await?;
                 println!(
@@ -450,6 +503,7 @@ async fn run(cli: Cli) -> Result<()> {
             let t = std::time::Instant::now();
             let mut co = Checkout::default();
             let wt = Worktree::clone(&store, None, &dir, &branch, None, &mut co).await?;
+            std::fs::write(wt.local.dir.join("HEAD"), &default)?;
             let c = wt.repo.commit_obj(&wt.head.base.unwrap()).await?;
             let (gets, _, down, _) = wt.repo.store.stats.snapshot();
             println!(
@@ -523,29 +577,92 @@ async fn run(cli: Cli) -> Result<()> {
             let n = wt.sync().await?;
             println!("{} @ {} ({n} path(s) updated)", wt.head.branch, wt.head.base.unwrap().short());
         }
-        Cmd::Branch { name, delete } => {
-            let here = Worktree::open(&cwd()?).ok();
-            match (name, here) {
-                (Some(n), _) if delete => {
-                    let wt_repo = match Worktree::open(&cwd()?) {
-                        Ok(w) => w.repo,
-                        Err(e) => return Err(e),
-                    };
-                    wt_repo.delete_branch(&n).await?;
+        Cmd::Branch { name, delete: _, default: true } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            match name {
+                Some(n) => {
+                    ctx.set_default_branch(&n).await?;
+                    println!("default branch is now {n}");
+                }
+                None => println!("{}", ctx.default_branch().await?),
+            }
+        }
+        Cmd::Branch { name, delete, default: false } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            match name {
+                Some(n) if delete => {
+                    if ctx.default_branch().await? == n {
+                        bail!("{n} is the default branch; make another the default first");
+                    }
+                    ctx.repo.delete_branch(&n).await?;
                     println!("deleted {n}");
                 }
-                (Some(n), Some(wt)) => {
-                    let base = wt.head.base.context("nothing to branch from")?;
-                    wt.repo.create_branch(&n, base).await?;
+                Some(n) => {
+                    let base = ctx.head().await?.context("nothing to branch from")?;
+                    ctx.repo.create_branch(&n, base).await?;
                     println!("created {n} @ {}", base.short());
                 }
-                (None, Some(wt)) => {
-                    for (b, h) in wt.repo.list_refs().await? {
-                        let mark = if b == wt.head.branch { "*" } else { " " };
+                None => {
+                    let current = ctx.branch().await?.to_string();
+                    for (b, h) in ctx.repo.list_refs().await? {
+                        let mark = if b == current { "*" } else { " " };
                         println!("{mark} {b:30} {}", h.short());
                     }
                 }
-                _ => bail!("run inside a working copy"),
+            }
+        }
+        Cmd::Config { global, local, list, get, unset, show_scope, key, value } => {
+            let start = match cli.repo.clone().or_else(|| std::env::var_os("PAIL_DIR").map(PathBuf::from)) {
+                Some(d) => std::fs::canonicalize(d)?,
+                None => cwd()?,
+            };
+            let repo_dir = pail::local::discover(&start).ok().map(|f| match f {
+                pail::local::Found::Worktree(_, r) | pail::local::Found::Bare(r) => r.dir,
+            });
+            let mut cfg = Config::load(repo_dir.as_deref());
+            let scope_name = |s: Scope| if s == Scope::Global { "global" } else { "local" };
+            if list {
+                for (sc, k, v) in cfg.list() {
+                    if (global && sc != Scope::Global) || (local && sc != Scope::Local) {
+                        continue;
+                    }
+                    if show_scope {
+                        println!("{}\t{k}={v}", scope_name(sc));
+                    } else {
+                        println!("{k}={v}");
+                    }
+                }
+                return Ok(());
+            }
+            let key = key.context("usage: pail config [--global|--local] <key> [<value>]")?;
+            let scope = if global { Scope::Global } else { Scope::Local };
+            if unset {
+                let f = cfg.file_mut(scope)?;
+                if !f.unset(&key)? {
+                    std::process::exit(5);
+                }
+                f.save()?;
+                return Ok(());
+            }
+            match value {
+                Some(v) if !get => {
+                    let f = cfg.file_mut(scope)?;
+                    f.set(&key, &v)?;
+                    f.save()?;
+                }
+                _ => {
+                    let v = if global {
+                        Config { global: cfg.global.clone(), local: None }.get(&key)
+                    } else if local {
+                        Config { global: Default::default(), local: cfg.local.clone() }.get(&key)
+                    } else {
+                        cfg.get(&key)
+                    };
+                    match v {
+                        Some(v) => println!("{v}"),
+                        None => std::process::exit(1),
+                    }
+                }
             }
         }
         Cmd::Switch { branch, create } => {
@@ -559,7 +676,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Land { branch, onto, stack: true, .. } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
-            let out = ctx.repo.land_stack(&branch, &onto, &author(), &now_date()).await?;
+            let onto = match onto {
+                Some(o) => o,
+                None => ctx.default_branch().await?.to_string(),
+            };
+            let out = ctx.repo.land_stack(&branch, &onto, &ctx.config.identity("committer")?, &now_date()).await?;
             if out.landed.is_empty() {
                 println!("{branch} has nothing to land");
                 return Ok(());
@@ -576,6 +697,10 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Land { branch, onto, message, stack: false } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let onto = match onto {
+                Some(o) => o,
+                None => ctx.default_branch().await?.to_string(),
+            };
             let repo = &ctx.repo;
             let (src, _) = repo.read_ref(&branch).await?.with_context(|| format!("no branch {branch}"))?;
             let (dst, _) = repo.read_ref(&onto).await?.with_context(|| format!("no branch {onto}"))?;
@@ -598,7 +723,8 @@ async fn run(cli: Cli) -> Result<()> {
                 v
             };
             let msg = message.unwrap_or_else(|| format!("Land {branch}\n\n{}", subjects.join("\n")));
-            let who = author();
+            let who = ctx.config.identity("author")?;
+            let committer = ctx.config.identity("committer")?;
             let date = now_date();
             let out = repo
                 .commit(CommitRequest {
@@ -607,7 +733,7 @@ async fn run(cli: Cli) -> Result<()> {
                     delta,
                     author: who.clone(),
                     author_date: date.clone(),
-                    committer: who,
+                    committer,
                     committer_date: date,
                     message: msg,
                     meta: BTreeMap::from([("landed.from".into(), branch.clone())]),
