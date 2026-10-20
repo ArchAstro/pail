@@ -88,6 +88,8 @@ svg { width: 100%; height: 100%; display: block; user-select: none; }
 .node text.id { font: 11.5px var(--mono); fill: var(--muted); }
 .node text.sub { font: 11.5px var(--sans); fill: var(--muted); }
 .node.dim { opacity: 0.25; }
+.node.held { transition: none; cursor: grabbing; }
+.node.held rect.body { stroke: var(--ink); filter: drop-shadow(0 6px 10px rgba(20, 30, 45, 0.18)); }
 .node:hover rect.body { stroke: var(--faint); }
 .node.sel rect.body { stroke: var(--ink); stroke-width: 2; }
 .node .badge { font: 600 12px var(--sans); fill: var(--muted); }
@@ -338,6 +340,7 @@ function layout() {
   const cols = new Map();
   SLOTS = new Map([...new Set([...G.nodes.values()].map(column))].sort((a, b) => a - b).map((c, i) => [c, i]));
   for (const n of G.nodes.values()) {
+    if (n.pinned) continue; // moved by hand: stays where it was put
     const c = column(n);
     n.x = xOf(c);
     if (!cols.has(c)) cols.set(c, []);
@@ -382,12 +385,20 @@ function draw() {
   const order = [...used].sort((a, b) => a - b);
   cols.innerHTML = order.map((c) => { const [name, what] = columnLabel(c); return `<text class="col-label" x="${xOf(c)}" y="26">${esc(name)}</text><text class="col-what" x="${xOf(c)}" y="42">${esc(what)}</text>`; }).join("");
   $("#rules").innerHTML = order.map((c) => `<line class="col-rule" x1="${xOf(c) - 16}" y1="0" x2="${xOf(c) - 16}" y2="${maxY}"/>`).join("");
-  // Hover fades what isn't linked; a selection only lights up its own edges.
   // Hover only strengthens a node's own edges; fading is reserved for an explicit spotlight
   // (a folder, a trace, the tour), so moving the mouse never rearranges what is visible.
   const focus = G.hover || G.sel;
   const fade = G.spot ? "spot" : null;
   const near = new Set(G.spot || []);
+  drawEdges();
+  // Nodes stay the same elements across redraws, so their moves animate.
+  drawNodes(nodes, focus, fade, near);
+}
+
+function drawEdges() {
+  const edges = $("#edges");
+  const focus = G.hover || G.sel;
+  const fade = G.spot ? "spot" : null;
   edges.innerHTML = [...G.edges.values()].map((e) => {
     const a = G.nodes.get(e.from), b = G.nodes.get(e.to);
     if (!a || !b) return "";
@@ -406,6 +417,9 @@ function draw() {
     const cls = ["edge", e.kind === "changed" ? "changed" : "", lit ? "hot" : fade ? "dim" : ""].join(" ");
     return `<path class="${cls}" d="${d}" stroke="${color(tone)}"><title>${esc(e.label || e.kind)}</title></path>`;
   }).join("");
+}
+
+function drawNodes(nodes, focus, fade, near) {
   // Objects referenced from more than one place: the structural sharing the hashes give.
   const indeg = new Map();
   for (const e of G.edges.values()) if (e.kind === "child" || e.kind === "root" || e.kind === "entry") indeg.set(e.to, (indeg.get(e.to) || 0) + 1);
@@ -965,7 +979,35 @@ plane.addEventListener("wheel", (e) => {
   applyView();
 }, { passive: false });
 const nodeOf = (el) => G.nodes.get(el.closest?.(".node")?.dataset.id);
-$("#nodes").addEventListener("click", (e) => { const n = nodeOf(e.target); if (n) activate(n, true); });
+// Press on a node: drag it if the pointer moves, open it if it doesn't.
+let held = null;
+$("#nodes").addEventListener("pointerdown", (e) => {
+  const n = nodeOf(e.target);
+  if (!n || e.button !== 0) return;
+  e.stopPropagation();
+  held = { n, sx: e.clientX, sy: e.clientY, x: n.x, y: n.y, moved: false, g: e.target.closest(".node") };
+  held.g.setPointerCapture(e.pointerId);
+});
+$("#nodes").addEventListener("pointermove", (e) => {
+  if (!held) return;
+  const dx = (e.clientX - held.sx) / view.k, dy = (e.clientY - held.sy) / view.k;
+  if (!held.moved && Math.hypot(e.clientX - held.sx, e.clientY - held.sy) < 4) return;
+  if (!held.moved) { held.moved = true; held.g.classList.add("held"); held.g.parentNode.appendChild(held.g); } // on top while dragged
+  held.n.pinned = true;
+  held.n.x = held.x + dx;
+  held.n.y = held.y + dy;
+  held.g.style.transform = `translate(${held.n.x}px, ${held.n.y}px)`;
+  drawEdges();
+});
+$("#nodes").addEventListener("pointerup", (e) => {
+  if (!held) return;
+  const h = held;
+  held = null;
+  h.g.classList.remove("held");
+  if (!h.moved) activate(h.n, true);
+  else if (!G.movedOnce) { G.movedOnce = true; hint("Double-click a moved object to put it back"); }
+});
+$("#nodes").addEventListener("dblclick", (e) => { const n = nodeOf(e.target); if (n?.pinned) { n.pinned = false; draw(); } });
 $("#nodes").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { const n = nodeOf(e.target); if (n) { e.preventDefault(); activate(n); } } });
 $("#nodes").addEventListener("pointerover", (e) => { const n = nodeOf(e.target); if (n && G.hover !== n.id) { G.hover = n.id; draw(); } });
 $("#nodes").addEventListener("pointerleave", () => { G.hover = null; draw(); });
