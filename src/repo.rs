@@ -72,6 +72,37 @@ pub struct CommitRequest {
     pub meta: BTreeMap<String, String>,
 }
 
+/// The descriptive fields of a commit.
+#[derive(Debug, Clone)]
+pub struct CommitFields {
+    pub author: String,
+    pub author_date: String,
+    pub committer: String,
+    pub committer_date: String,
+    pub message: String,
+    pub meta: BTreeMap<String, String>,
+}
+
+/// A commit stored by `write_commit` (not yet on any branch).
+#[derive(Debug, Clone)]
+pub struct Written {
+    pub commit: Hash,
+    pub pages: usize,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LandOutcome {
+    /// `onto`'s new tip.
+    pub tip: Hash,
+    /// The commits now on `onto`, oldest first.
+    pub landed: Vec<Hash>,
+    /// The stack's own commits were reused (nothing rewritten).
+    pub fast_forward: bool,
+    pub attempts: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitOutcome {
     pub commit: Hash,
@@ -653,6 +684,159 @@ impl Repo {
 
     // ---------- commit protocol ----------
 
+    /// Build and store a commit applying `delta` to `parent`, without moving any ref. The
+    /// commit records its change list against `parent`. Immutable and idempotent: an
+    /// unreferenced result is garbage for `gc`.
+    pub async fn write_commit(&self, parent: Option<Hash>, delta: &Delta, f: &CommitFields) -> Result<Written> {
+        let parent_root = self.root_of(parent).await?;
+        let tree = self.apply_delta(parent_root, delta).await?;
+        // The exact change against `parent`: paths whose kind or content differ (no-op edits
+        // drop out).
+        let mut changes = BTreeMap::new();
+        for (path, new) in delta {
+            let old = self.get_entry(parent_root, path).await?;
+            let same = match (&old, new) {
+                (Some(a), Some(b)) => a.same_content(b),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                changes.insert(
+                    path.clone(),
+                    crate::objects::FileChange {
+                        old: old.as_ref().map(|e| crate::objects::FileState::of(e, false)),
+                        new: new.as_ref().map(|e| crate::objects::FileState::of(e, true)),
+                    },
+                );
+            }
+        }
+        let pages = self.upload_pages(&tree.pages).await?;
+        let generation = match parent {
+            Some(p) => self.commit_meta(&p).await?.generation + 1,
+            None => 0,
+        };
+        let commit = Commit {
+            parent,
+            root: tree.root,
+            generation,
+            files: tree.files,
+            bytes: tree.bytes,
+            author: f.author.clone(),
+            author_date: f.author_date.clone(),
+            committer: f.committer.clone(),
+            committer_date: f.committer_date.clone(),
+            message: f.message.clone(),
+            meta: f.meta.clone(),
+            changes: Some(crate::objects::Changes::new(&changes)),
+        };
+        let (ch, data) = commit.encode();
+        self.store.put_new(&commit_key(&ch), data.clone()).await?;
+        self.cache_write("commits", &ch, &data);
+        Ok(Written { commit: ch, pages, files: tree.files, bytes: tree.bytes })
+    }
+
+    /// Move `branch` from `expected` (None: create) to `commit` in one compare-and-swap.
+    /// Conflict means someone else moved it first.
+    pub async fn advance_ref(&self, branch: &str, expected: Option<&Version>, commit: Hash) -> Result<Cas> {
+        let body = Bytes::from(serde_json::to_vec(&RefValue { commit })?);
+        self.store.cas(&ref_key(branch), body, expected).await
+    }
+
+    /// A delta that reproduces commit `h` on another parent: its change list (new sides), or
+    /// its manifest diff for commits written before change lists.
+    pub async fn delta_of(&self, h: &Hash) -> Result<Delta> {
+        let c = self.commit_obj(h).await?;
+        let changes = match c.change_list() {
+            Some(cs) => cs,
+            None => self.diff(self.root_of(c.parent).await?, c.root).await?,
+        };
+        Ok(changes.into_iter().map(|c| (c.path, c.new)).collect())
+    }
+
+    /// Land every commit of `branch` that `onto` lacks, in order, as one atomic update of
+    /// `onto`: a fast-forward when `onto` hasn't moved since the stack was based on it,
+    /// otherwise each commit is replayed on the new head (author, dates and message kept;
+    /// committer is the lander) and `onto` moves once to the last one. A stack commit that
+    /// touches a path `onto` changed meanwhile is a conflict and nothing moves.
+    pub async fn land_stack(&self, branch: &str, onto: &str, committer: &str, date: &str) -> Result<LandOutcome> {
+        validate_branch(onto)?;
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let (tip, _) = self.read_ref(branch).await?.with_context(|| format!("no branch {branch}"))?;
+            let (onto_tip, version) = self.read_ref(onto).await?.with_context(|| format!("no branch {onto}"))?;
+            let base = self.merge_base(tip, onto_tip).await?.context("branches share no history")?;
+            let mut stack = vec![];
+            let mut cur = Some(tip);
+            while let Some(h) = cur.filter(|h| *h != base) {
+                stack.push(h);
+                cur = self.commit_meta(&h).await?.parent;
+            }
+            stack.reverse();
+            if stack.is_empty() {
+                return Ok(LandOutcome { tip: onto_tip, landed: vec![], fast_forward: true, attempts });
+            }
+            let (new_tip, landed, ff) = if base == onto_tip {
+                (tip, stack.clone(), true)
+            } else {
+                // Paths `onto` changed since the stack's base must not be touched by the stack.
+                let theirs: std::collections::BTreeSet<String> =
+                    self.diff(self.root_of(Some(base)).await?, self.root_of(Some(onto_tip)).await?).await?.into_iter().map(|c| c.path).collect();
+                let mut deltas = vec![];
+                let mut overlap = std::collections::BTreeSet::new();
+                for h in &stack {
+                    let d = self.delta_of(h).await?;
+                    overlap.extend(d.keys().filter(|p| theirs.contains(*p)).cloned());
+                    deltas.push(d);
+                }
+                if !overlap.is_empty() {
+                    return Err(ConflictError { branch: onto.to_string(), paths: overlap.into_iter().collect() }.into());
+                }
+                let mut parent = onto_tip;
+                let mut landed = vec![];
+                for (h, d) in stack.iter().zip(&deltas) {
+                    let c = self.commit_meta(h).await?;
+                    let mut meta = c.meta.clone();
+                    meta.insert("landed.from".into(), branch.to_string());
+                    meta.insert("rewritten.from".into(), h.hex());
+                    let fields = CommitFields {
+                        author: c.author.clone(),
+                        author_date: c.author_date.clone(),
+                        committer: committer.to_string(),
+                        committer_date: date.to_string(),
+                        message: c.message.clone(),
+                        meta,
+                    };
+                    parent = self.write_commit(Some(parent), d, &fields).await?.commit;
+                    landed.push(parent);
+                }
+                (parent, landed, false)
+            };
+            match self.advance_ref(onto, Some(&version), new_tip).await {
+                Ok(Cas::Ok(_)) => {
+                    // The branch now names what landed (its old tip stays in the reflog).
+                    if !ff {
+                        self.force_ref(branch, new_tip).await?;
+                    }
+                    return Ok(LandOutcome { tip: new_tip, landed, fast_forward: ff, attempts });
+                }
+                Ok(Cas::Conflict) | Err(_) => {
+                    if let Some((now, _)) = self.read_ref(onto).await? {
+                        if now == new_tip {
+                            return Ok(LandOutcome { tip: new_tip, landed, fast_forward: ff, attempts });
+                        }
+                    }
+                }
+            }
+            if started.elapsed() >= COMMIT_DEADLINE {
+                bail!("gave up landing after {attempts} attempts: {onto} is too contended");
+            }
+            let cap = (50u64 << attempts.min(6)).min(2000);
+            tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % cap + 10)).await;
+        }
+    }
+
     /// Commit a delta to a branch: upload immutable objects, then compare-and-swap the ref.
     /// If the branch moved, the delta is replayed on the new head when no path overlaps.
     pub async fn commit(&self, req: CommitRequest) -> Result<CommitOutcome> {
@@ -681,49 +865,17 @@ impl Repo {
                     return Err(ConflictError { branch: req.branch.clone(), paths: overlap }.into());
                 }
             }
-            let tree = self.apply_delta(head_root, &req.delta).await?;
-            // The exact change against the parent this commit lands on: paths whose kind or
-            // content differ (no-op edits drop out).
-            let mut changes = BTreeMap::new();
-            for (path, new) in &req.delta {
-                let old = self.get_entry(head_root, path).await?;
-                let same = match (&old, new) {
-                    (Some(a), Some(b)) => a.same_content(b),
-                    (None, None) => true,
-                    _ => false,
-                };
-                if !same {
-                    changes.insert(
-                        path.clone(),
-                        crate::objects::FileChange {
-                            old: old.as_ref().map(|e| crate::objects::FileState::of(e, false)),
-                            new: new.as_ref().map(|e| crate::objects::FileState::of(e, true)),
-                        },
-                    );
-                }
-            }
-            pages_written += self.upload_pages(&tree.pages).await?;
-            let generation = match parent {
-                Some(p) => self.commit_obj(&p).await?.generation + 1,
-                None => 0,
-            };
-            let commit = Commit {
-                parent,
-                root: tree.root,
-                generation,
-                files: tree.files,
-                bytes: tree.bytes,
+            let fields = CommitFields {
                 author: req.author.clone(),
                 author_date: req.author_date.clone(),
                 committer: req.committer.clone(),
                 committer_date: req.committer_date.clone(),
                 message: req.message.clone(),
                 meta: req.meta.clone(),
-                changes: Some(crate::objects::Changes::new(&changes)),
             };
-            let (ch, data) = commit.encode();
-            self.store.put_new(&commit_key(&ch), data.clone()).await?;
-            self.cache_write("commits", &ch, &data);
+            let tree = self.write_commit(parent, &req.delta, &fields).await?;
+            pages_written += tree.pages;
+            let ch = tree.commit;
             let body = Bytes::from(serde_json::to_vec(&RefValue { commit: ch })?);
             match self.store.cas(&ref_key(&req.branch), body, expected.as_ref()).await {
                 Ok(Cas::Ok(version)) => {

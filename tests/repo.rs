@@ -246,3 +246,58 @@ async fn change_lists_match_manifest_diffs() {
     }
     assert_eq!(checked, 10);
 }
+
+/// Landing a stack races other writers on main: it retries until it lands in one piece, in
+/// order and contiguous, and nobody's commit is lost.
+#[tokio::test]
+async fn stack_lands_atomically_under_contention() {
+    let (_d, repo) = temp_repo();
+    let repo = Arc::new(repo);
+    let d0 = put_files(&repo, &[("base.txt", "b")]).await;
+    let c0 = repo.commit(req("main", None, d0, "base")).await.unwrap().commit;
+    repo.create_branch("stack", c0).await.unwrap();
+    let mut tip = c0;
+    for i in 0..5 {
+        let d = put_files(&repo, &[(&format!("s/{i}.txt"), &format!("stack {i}"))]).await;
+        tip = repo.commit(req("stack", Some(tip), d, &format!("s{i}"))).await.unwrap().commit;
+    }
+    // Writers on main and the lander, all at once.
+    let mut tasks = vec![];
+    for i in 0..8 {
+        let repo = repo.clone();
+        tasks.push(tokio::spawn(async move {
+            let d = put_files(&repo, &[(&format!("w/{i}.txt"), &format!("writer {i}"))]).await;
+            repo.commit(req("main", Some(c0), d, &format!("w{i}"))).await.unwrap();
+        }));
+    }
+    let lander = {
+        let repo = repo.clone();
+        tokio::spawn(async move { repo.land_stack("stack", "main", "Lander <l@x>", "1 +0000").await.unwrap() })
+    };
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let out = lander.await.unwrap();
+    assert_eq!(out.landed.len(), 5);
+    // Walk main: 8 writers + 5 stack commits + base, the stack contiguous and in order.
+    let (head, _) = repo.read_ref("main").await.unwrap().unwrap();
+    let mut subjects = vec![];
+    let mut cur = Some(head);
+    while let Some(h) = cur {
+        let c = repo.commit_obj(&h).await.unwrap();
+        let listed = c.change_list().unwrap();
+        let actual = repo.diff(repo.root_of(c.parent).await.unwrap(), c.root).await.unwrap();
+        assert_eq!(listed.iter().map(|x| &x.path).collect::<Vec<_>>(), actual.iter().map(|x| &x.path).collect::<Vec<_>>());
+        subjects.push(c.message.clone());
+        cur = c.parent;
+    }
+    subjects.reverse();
+    assert_eq!(subjects.len(), 14, "{subjects:?}");
+    let s0 = subjects.iter().position(|s| s == "s0").unwrap();
+    assert_eq!(&subjects[s0..s0 + 5], ["s0", "s1", "s2", "s3", "s4"], "{subjects:?}");
+    for i in 0..8 {
+        assert!(subjects.contains(&format!("w{i}")), "writer {i} lost: {subjects:?}");
+    }
+    let c = repo.commit_obj(&head).await.unwrap();
+    assert_eq!(c.files, 1 + 5 + 8);
+}

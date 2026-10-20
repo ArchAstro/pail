@@ -68,8 +68,18 @@ enum Cmd {
     Branch { name: Option<String>, #[arg(short, long)] delete: bool },
     /// Switch to another branch (`-c` creates it at the current base).
     Switch { branch: String, #[arg(short, long)] create: bool },
-    /// Squash a branch's changes onto another branch.
-    Land { branch: String, #[arg(long, default_value = "main")] onto: String, #[arg(short, long)] message: Option<String> },
+    /// Land a branch onto another (default main): squashed into one commit, or with --stack
+    /// every commit in order (fast-forward, or replayed on the new head), atomically.
+    Land {
+        branch: String,
+        #[arg(long, default_value = "main")]
+        onto: String,
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Land each commit of the branch, not one squashed commit.
+        #[arg(long, conflicts_with = "message")]
+        stack: bool,
+    },
     /// Show history, with `git log`'s options and output.
     #[command(disable_help_flag = true)]
     Log {
@@ -547,9 +557,26 @@ async fn run(cli: Cli) -> Result<()> {
             let n = wt.switch(&branch).await?;
             println!("switched to {branch} @ {} ({n} path(s) changed)", wt.head.base.unwrap().short());
         }
-        Cmd::Land { branch, onto, message } => {
-            let wt = Worktree::open(&cwd()?)?;
-            let repo = &wt.repo;
+        Cmd::Land { branch, onto, stack: true, .. } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let out = ctx.repo.land_stack(&branch, &onto, &author(), &now_date()).await?;
+            if out.landed.is_empty() {
+                println!("{branch} has nothing to land");
+                return Ok(());
+            }
+            println!(
+                "landed {} commit(s) from {branch} onto {onto} @ {} ({})",
+                out.landed.len(),
+                out.tip.short(),
+                if out.fast_forward { "fast-forward" } else { "replayed on the new head" }
+            );
+            for h in &out.landed {
+                println!("  {} {}", h.short(), ctx.repo.commit_meta(h).await?.subject());
+            }
+        }
+        Cmd::Land { branch, onto, message, stack: false } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let repo = &ctx.repo;
             let (src, _) = repo.read_ref(&branch).await?.with_context(|| format!("no branch {branch}"))?;
             let (dst, _) = repo.read_ref(&onto).await?.with_context(|| format!("no branch {onto}"))?;
             let anc = repo.merge_base(src, dst).await?.context("branches share no history")?;

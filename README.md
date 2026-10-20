@@ -84,6 +84,28 @@ pail --repo repo.pail log --oneline               # or cd repo.pail; or PAIL_DIR
 A commit that loses the CAS race is replayed on the new head when the paths don't overlap.
 If they overlap, the commit stops with a conflict.
 
+### Stacks
+
+Commit as often as you like on a branch, then land the whole stack on main:
+
+```sh
+pail switch -c feature
+pail commit -a -m "step 1" … pail commit -a -m "step 2" … pail commit -a -m "step 3"
+pail land feature --stack            # every commit, in order, onto main
+pail land feature                    # or: one squashed commit
+```
+
+1. Main untouched since the stack started: main fast-forwards to the stack (same commits).
+2. Main moved: each stack commit is replayed on the new head from its change list, keeping
+   author, date and message (committer: the lander; `rewritten.from` names the original).
+3. A stack commit touching a path main changed meanwhile is a conflict: nothing lands.
+4. Atomic: the replayed commits are written first, then main moves once by CAS; a lost race
+   retries from the new head. The branch then names what landed (old tip in the reflog).
+
+Built from two store primitives: `write_commit` (store a commit on any parent without moving a
+ref) and `advance_ref` (one CAS from the tip the caller saw). `commit` is one of each;
+`land --stack` is N `write_commit`s and one `advance_ref`.
+
 S3 settings come from the usual `AWS_*` variables (`AWS_ENDPOINT`, `AWS_ALLOW_HTTP` for
 emulators). GCS settings come from `GOOGLE_*`.
 

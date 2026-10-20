@@ -410,3 +410,83 @@ fn worktrees_attach_to_a_repository() {
     pail(&r, &["worktree", "remove", "../from-bare"]);
     assert!(!pail(&r, &["worktree", "list"]).contains("from-bare"));
 }
+
+/// A stack of commits on a branch lands on main commit by commit: a fast-forward when main
+/// hasn't moved, a replay on the new head when it has, and nothing at all on a conflict.
+#[test]
+fn stacked_commits_land_on_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = t.join("store");
+    let s = store.to_str().unwrap();
+    pail(&t, &["init", s]);
+    pail(&t, &["clone", s, "a"]);
+    pail(&t, &["clone", s, "b"]);
+    let (a, b) = (t.join("a"), t.join("b"));
+    let read = |args: &[&str]| -> String {
+        let mut full = vec!["--store", s];
+        full.extend_from_slice(args);
+        pail(&t, &full)
+    };
+    let commit = |dir: &Path, msg: &str| {
+        pail(dir, &["add", "-A"]);
+        pail(dir, &["commit", "-m", msg]);
+    };
+    write(&a.join("x.txt"), "x0\n");
+    write(&a.join("y.txt"), "y0\n");
+    commit(&a, "base");
+
+    // 1. A stack on a branch while main stays put: landing fast-forwards (same commit ids).
+    pail(&a, &["switch", "-c", "feature"]);
+    write(&a.join("f1.txt"), "one\n");
+    commit(&a, "s1: add f1");
+    write(&a.join("f1.txt"), "one\ntwo\n");
+    commit(&a, "s2: extend f1");
+    write(&a.join("f2.txt"), "f2\n");
+    std::fs::remove_file(a.join("y.txt")).unwrap();
+    commit(&a, "s3: add f2, drop y");
+    let stack_ids = read(&["log", "--format=%H", "-3", "feature"]);
+    let out = pail(&a, &["land", "feature", "--stack"]);
+    assert!(out.contains("landed 3 commit(s)") && out.contains("fast-forward"), "{out}");
+    assert_eq!(read(&["log", "--format=%H", "-3", "main"]), stack_ids, "the stack's own commits");
+    assert_eq!(read(&["log", "--format=%s", "main"]), "s3: add f2, drop y\ns2: extend f1\ns1: add f1\nbase\nInitial empty commit\n");
+
+    // 2. Main moves meanwhile (disjoint paths): the stack is replayed on the new head.
+    pail(&a, &["switch", "main"]);
+    pail(&a, &["sync"]);
+    pail(&a, &["switch", "-c", "feature2"]);
+    write(&a.join("g.txt"), "g1\n");
+    commit(&a, "t1: add g");
+    write(&a.join("g.txt"), "g1\ng2\n");
+    commit(&a, "t2: extend g");
+    let before = read(&["log", "--format=%s|%an|%ad", "-2", "feature2"]);
+    let diffs_before = read(&["log", "--format=%s", "--name-status", "-2", "feature2"]);
+    pail(&b, &["sync"]);
+    write(&b.join("other.txt"), "theirs\n");
+    commit(&b, "main moved");
+    let out = pail(&a, &["land", "feature2", "--stack"]);
+    assert!(out.contains("landed 2 commit(s)") && out.contains("replayed"), "{out}");
+    assert_eq!(read(&["log", "--format=%s", "-4", "main"]), "t2: extend g\nt1: add g\nmain moved\ns3: add f2, drop y\n");
+    assert_eq!(read(&["log", "--format=%s|%an|%ad", "-2", "main"]), before, "authors, dates and messages kept");
+    assert_eq!(read(&["log", "--format=%s", "--name-status", "-2", "main"]), diffs_before, "each commit changes what it changed");
+    assert_eq!(read(&["cat", "main:g.txt"]), "g1\ng2\n");
+    assert_eq!(read(&["cat", "main:other.txt"]), "theirs\n");
+    assert_eq!(read(&["log", "--format=%H", "-1", "feature2"]), read(&["log", "--format=%H", "-1", "main"]), "the branch names what landed");
+
+    // 3. A stack touching a path main changed meanwhile: conflict, and main doesn't move.
+    pail(&a, &["switch", "main"]);
+    pail(&a, &["sync"]);
+    pail(&a, &["switch", "-c", "feature3"]);
+    write(&a.join("h.txt"), "h\n");
+    commit(&a, "u1: add h");
+    write(&a.join("x.txt"), "x mine\n");
+    commit(&a, "u2: edit x");
+    pail(&b, &["sync"]);
+    write(&b.join("x.txt"), "x theirs\n");
+    commit(&b, "main edits x");
+    let main_before = read(&["log", "--format=%H", "-1", "main"]);
+    let err = pail_fails(&a, &["land", "feature3", "--stack"]);
+    assert!(err.contains("conflict") && err.contains("x.txt"), "{err}");
+    assert_eq!(read(&["log", "--format=%H", "-1", "main"]), main_before, "nothing landed");
+    assert!(!read(&["ls", "-r", "main"]).contains("h.txt"), "not even the commits before the conflicting one");
+}
