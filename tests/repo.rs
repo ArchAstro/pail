@@ -301,3 +301,41 @@ async fn stack_lands_atomically_under_contention() {
     let c = repo.commit_obj(&head).await.unwrap();
     assert_eq!(c.files, 1 + 5 + 8);
 }
+
+/// Landing a stack writes exactly one ref, once: `onto`. Commits are content-addressed
+/// create-only puts; the branch and the reflog are untouched.
+#[tokio::test]
+async fn landing_a_stack_is_one_cas() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (_d, repo) = temp_repo();
+    let d0 = put_files(&repo, &[("base.txt", "b")]).await;
+    let c0 = repo.commit(req("main", None, d0, "base")).await.unwrap().commit;
+    repo.create_branch("stack", c0).await.unwrap();
+    let mut tip = c0;
+    for i in 0..4 {
+        let d = put_files(&repo, &[(&format!("s/{i}.txt"), &format!("stack {i}"))]).await;
+        tip = repo.commit(req("stack", Some(tip), d, &format!("s{i}"))).await.unwrap().commit;
+    }
+    let d = put_files(&repo, &[("other.txt", "theirs")]).await;
+    repo.commit(req("main", Some(c0), d, "main moved")).await.unwrap();
+    for case in ["replay", "no-op"] {
+        let before = repo.store.stats.cas.load(Relaxed);
+        let out = repo.land_stack("stack", "main", "L <l@x>", "1 +0000").await.unwrap();
+        let cas = repo.store.stats.cas.load(Relaxed) - before;
+        match case {
+            "replay" => assert_eq!((out.landed.len(), cas), (4, 1), "{case}"),
+            _ => assert_eq!((out.landed.len(), cas), (0, 0), "{case}"),
+        }
+    }
+    assert_eq!(repo.read_ref("stack").await.unwrap().unwrap().0, tip, "the branch is untouched");
+    assert!(repo.store.list("reflog/").await.unwrap().is_empty(), "no reflog writes");
+    // Fast-forward: a fresh stack on the new main tip.
+    let (main_tip, _) = repo.read_ref("main").await.unwrap().unwrap();
+    repo.create_branch("ff", main_tip).await.unwrap();
+    let d = put_files(&repo, &[("ff.txt", "ff")]).await;
+    let ff_tip = repo.commit(req("ff", Some(main_tip), d, "ff1")).await.unwrap().commit;
+    let before = repo.store.stats.cas.load(Relaxed);
+    let out = repo.land_stack("ff", "main", "L <l@x>", "1 +0000").await.unwrap();
+    assert!(out.fast_forward && out.tip == ff_tip);
+    assert_eq!(repo.store.stats.cas.load(Relaxed) - before, 1);
+}

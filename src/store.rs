@@ -46,6 +46,8 @@ pub enum Cas {
 pub struct Stats {
     pub gets: AtomicU64,
     pub puts: AtomicU64,
+    /// Compare-and-swap writes (ref updates).
+    pub cas: AtomicU64,
     pub bytes_down: AtomicU64,
     pub bytes_up: AtomicU64,
 }
@@ -213,6 +215,7 @@ impl Store {
     /// Compare-and-swap. `expected = None` means "create only if absent".
     pub async fn cas(&self, key: &str, data: Bytes, expected: Option<&Version>) -> Result<Cas> {
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
+        self.stats.cas.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
         if let Some(root) = &self.local_root {
             return local_cas(root, key, &data, expected);

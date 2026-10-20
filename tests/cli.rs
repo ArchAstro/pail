@@ -471,7 +471,15 @@ fn stacked_commits_land_on_main() {
     assert_eq!(read(&["log", "--format=%s", "--name-status", "-2", "main"]), diffs_before, "each commit changes what it changed");
     assert_eq!(read(&["cat", "main:g.txt"]), "g1\ng2\n");
     assert_eq!(read(&["cat", "main:other.txt"]), "theirs\n");
-    assert_eq!(read(&["log", "--format=%H", "-1", "feature2"]), read(&["log", "--format=%H", "-1", "main"]), "the branch names what landed");
+    // Landing again is a no-op; a commit added to the stack later lands alone, on top.
+    let out = pail(&a, &["land", "feature2", "--stack"]);
+    assert!(out.contains("nothing to land"), "{out}");
+    write(&a.join("g.txt"), "g1\ng2\ng3\n");
+    commit(&a, "t3: extend g again");
+    let out = pail(&a, &["land", "feature2", "--stack"]);
+    assert!(out.contains("landed 1 commit(s)"), "{out}");
+    assert_eq!(read(&["log", "--format=%s", "-4", "main"]), "t3: extend g again\nt2: extend g\nt1: add g\nmain moved\n");
+    assert_eq!(read(&["cat", "main:g.txt"]), "g1\ng2\ng3\n");
 
     // 3. A stack touching a path main changed meanwhile: conflict, and main doesn't move.
     pail(&a, &["switch", "main"]);

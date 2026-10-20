@@ -99,8 +99,12 @@ pail land feature                    # or: one squashed commit
 2. Main moved: each stack commit is replayed on the new head from its change list, keeping
    author, date and message (committer: the lander; `rewritten.from` names the original).
 3. A stack commit touching a path main changed meanwhile is a conflict: nothing lands.
-4. Atomic: the replayed commits are written first, then main moves once by CAS; a lost race
-   retries from the new head. The branch then names what landed (old tip in the reflog).
+4. One CAS: the replayed commits are written first (content-addressed, create-only), then
+   main moves once. That is the only ref write: the branch and the reflog are untouched. A
+   lost race retries from the new head.
+5. Idempotent and incremental: commits main already has (by `rewritten.from`) are skipped,
+   so landing twice is a no-op and commits added to the stack later land on top of their
+   landed predecessors.
 
 Built from two store primitives: `write_commit` (store a commit on any parent without moving a
 ref) and `advance_ref` (one CAS from the tip the caller saw). `commit` is one of each;

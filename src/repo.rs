@@ -753,11 +753,13 @@ impl Repo {
         Ok(changes.into_iter().map(|c| (c.path, c.new)).collect())
     }
 
-    /// Land every commit of `branch` that `onto` lacks, in order, as one atomic update of
-    /// `onto`: a fast-forward when `onto` hasn't moved since the stack was based on it,
-    /// otherwise each commit is replayed on the new head (author, dates and message kept;
-    /// committer is the lander) and `onto` moves once to the last one. A stack commit that
-    /// touches a path `onto` changed meanwhile is a conflict and nothing moves.
+    /// Land every commit of `branch` that `onto` lacks, in order, with a single CAS on `onto`
+    /// (no other ref is written): a fast-forward when `onto` hasn't moved since the stack was
+    /// based on it, otherwise each commit is replayed on the new head (author, dates and
+    /// message kept; committer is the lander; `rewritten.from` names the original) and `onto`
+    /// moves once to the last one. Commits already landed (found by `rewritten.from` on
+    /// `onto`) are skipped, so landing is idempotent and a growing stack lands incrementally.
+    /// A stack commit touching a path `onto` changed meanwhile is a conflict; nothing moves.
     pub async fn land_stack(&self, branch: &str, onto: &str, committer: &str, date: &str) -> Result<LandOutcome> {
         validate_branch(onto)?;
         let started = std::time::Instant::now();
@@ -774,15 +776,30 @@ impl Repo {
                 cur = self.commit_meta(&h).await?.parent;
             }
             stack.reverse();
+            // Stack commits `onto` already has as replayed copies: a prefix of the stack, since
+            // landing keeps order. The rest goes on top of the last copy.
+            let mut copies: HashMap<String, Hash> = HashMap::new();
+            let mut cur = Some(onto_tip);
+            while let Some(h) = cur.filter(|h| *h != base) {
+                let c = self.commit_meta(&h).await?;
+                if let Some(orig) = c.meta.get("rewritten.from") {
+                    copies.entry(orig.clone()).or_insert(h);
+                }
+                cur = c.parent;
+            }
+            let done = stack.iter().take_while(|h| copies.contains_key(&h.hex())).count();
+            let from = if done == 0 { base } else { copies[&stack[done - 1].hex()] };
+            let stack: Vec<Hash> = stack[done..].to_vec();
             if stack.is_empty() {
                 return Ok(LandOutcome { tip: onto_tip, landed: vec![], fast_forward: true, attempts });
             }
-            let (new_tip, landed, ff) = if base == onto_tip {
+            let (new_tip, landed, ff) = if done == 0 && base == onto_tip {
                 (tip, stack.clone(), true)
             } else {
-                // Paths `onto` changed since the stack's base must not be touched by the stack.
+                // Paths `onto` changed since what the rest of the stack builds on must not be
+                // touched by it.
                 let theirs: std::collections::BTreeSet<String> =
-                    self.diff(self.root_of(Some(base)).await?, self.root_of(Some(onto_tip)).await?).await?.into_iter().map(|c| c.path).collect();
+                    self.diff(self.root_of(Some(from)).await?, self.root_of(Some(onto_tip)).await?).await?.into_iter().map(|c| c.path).collect();
                 let mut deltas = vec![];
                 let mut overlap = std::collections::BTreeSet::new();
                 for h in &stack {
@@ -813,12 +830,9 @@ impl Repo {
                 }
                 (parent, landed, false)
             };
+            // The one write that publishes the stack.
             match self.advance_ref(onto, Some(&version), new_tip).await {
                 Ok(Cas::Ok(_)) => {
-                    // The branch now names what landed (its old tip stays in the reflog).
-                    if !ff {
-                        self.force_ref(branch, new_tip).await?;
-                    }
                     return Ok(LandOutcome { tip: new_tip, landed, fast_forward: ff, attempts });
                 }
                 Ok(Cas::Conflict) | Err(_) => {
