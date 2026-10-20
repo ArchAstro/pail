@@ -27,7 +27,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn from_u8(v: u8) -> Result<Kind> {
+    pub fn from_u8(v: u8) -> Result<Kind> {
         Ok(match v {
             0 => Kind::File,
             1 => Kind::Exec,

@@ -253,6 +253,7 @@ impl Store {
     /// List keys under a prefix with size and last-modified time (unix seconds).
     /// An object's size, or None if it doesn't exist.
     pub async fn size(&self, key: &str) -> Result<Option<u64>> {
+        self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let p = self.path(key);
         match retry(|| self.inner.head(&p)).await {
             Ok(m) => Ok(Some(m.size)),

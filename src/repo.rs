@@ -575,12 +575,24 @@ impl Repo {
 
         let finished: Vec<(Hash, Bytes)> =
             packs.into_iter().filter(|p| !p.is_empty()).map(|p| p.finish()).collect();
+        // Packs are new by construction. Chunks of an edited large file mostly exist already,
+        // and a create-if-absent PUT still sends the body, so ask first (a HEAD costs no bytes).
         let uploads = finished
             .iter()
-            .map(|(h, d)| (pack_key(h), d.clone()))
-            .chain(chunk_uploads.into_iter().map(|(h, d)| (chunk_key(&h), d)));
-        run_unordered(uploads.map(|(k, d)| async move { self.store.put_new(&k, d).await }).collect(), PARALLELISM)
-            .await?;
+            .map(|(h, d)| (pack_key(h), d.clone(), false))
+            .chain(chunk_uploads.into_iter().map(|(h, d)| (chunk_key(&h), d, true)));
+        run_unordered(
+            uploads
+                .map(|(k, d, check)| async move {
+                    if check && self.store.size(&k).await?.is_some() {
+                        return Ok(false);
+                    }
+                    self.store.put_new(&k, d).await
+                })
+                .collect(),
+            PARALLELISM,
+        )
+        .await?;
 
         Ok(inputs
             .iter()
@@ -846,8 +858,7 @@ impl Repo {
             if started.elapsed() >= COMMIT_DEADLINE {
                 bail!("gave up landing after {attempts} attempts: {onto} is too contended");
             }
-            let cap = (50u64 << attempts.min(6)).min(2000);
-            tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % cap + 10)).await;
+            backoff(attempts).await;
         }
     }
 
@@ -925,9 +936,7 @@ impl Repo {
             if started.elapsed() >= COMMIT_DEADLINE {
                 bail!("gave up after {attempts} attempts in {:?}: {} is too contended", started.elapsed(), req.branch);
             }
-            // Full jitter, capped: spreads contending writers out instead of synchronising them.
-            let cap = (50u64 << attempts.min(6)).min(2000);
-            tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % cap + 10)).await;
+            backoff(attempts).await;
         }
     }
 }
@@ -971,4 +980,15 @@ pub async fn run_ordered<T, F: Future<Output = Result<T>>>(futs: Vec<F>, n: usiz
 /// Run futures with bounded concurrency, in completion order.
 pub async fn run_unordered<T, F: Future<Output = Result<T>>>(futs: Vec<F>, n: usize) -> Result<Vec<T>> {
     stream::iter(futs).buffer_unordered(n).try_collect().await
+}
+
+/// Wait before retrying a lost CAS. Losing once only means another writer got in first, and
+/// the rebase is local, so the first retry is immediate; repeated losses back off with full
+/// jitter (capped) to spread contending writers out instead of synchronising them.
+async fn backoff(attempts: u32) {
+    if attempts <= 1 {
+        return;
+    }
+    let cap = (5u64 << attempts.min(9)).min(2000);
+    tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % cap + 1)).await;
 }

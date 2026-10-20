@@ -6,7 +6,7 @@
 //! .pail/HEAD.json       {"branch": "...", "base": "<commit>"}
 //! .pail/stage.json      staged delta only: path → put|del (size O(changes), not O(repo))
 //! .pail/pending/<hash>  staged file contents, snapshotted at `add` time
-//! .pail/statcache.json  path → (mtime, size, inode, hash) — a cache, safe to delete
+//! .pail/statcache.bin   path → (mtime, size, inode, hash) — a cache, safe to delete
 //! .pail/repo            linked working copies: path of the shared repository
 //! ```
 
@@ -68,7 +68,7 @@ impl From<KindName> for Kind {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct StatEntry {
     mtime: i64,
     mtime_ns: i64,
@@ -265,12 +265,19 @@ impl Checkout {
         let mut seen = HashSet::new();
         let missing: Vec<Entry> =
             shared.iter().filter(|e| seen.insert(e.hash) && !blobs.has(&e.hash)).cloned().collect();
-        for batch in batches(&missing) {
-            for (e, d) in batch.iter().zip(repo.read_files(batch).await?) {
-                blobs.put(&e.hash, &d)?;
-            }
-        }
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
+        for batch in batches(&missing) {
+            let data = repo.read_files(batch).await?;
+            let items: Vec<(&Entry, Bytes)> = batch.iter().zip(data).collect();
+            let per = items.len().div_ceil(threads).max(1);
+            std::thread::scope(|s| {
+                let jobs: Vec<_> = items
+                    .chunks(per)
+                    .map(|chunk| s.spawn(move || chunk.iter().try_for_each(|(e, d)| blobs.put(&e.hash, d))))
+                    .collect();
+                jobs.into_iter().try_for_each(|j| j.join().expect("blob writer panicked"))
+            })?;
+        }
         let per = shared.len().div_ceil(threads).max(1);
         std::thread::scope(|s| {
             let jobs: Vec<_> = shared
@@ -413,12 +420,44 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 
 /// Walks the non-ignored files of a tree, with pail's ignore rules.
 fn ignore_walker(root: &Path) -> ignore::Walk {
-    ignore::WalkBuilder::new(root)
-        .hidden(false)
+    ignore_walker_builder(root).build()
+}
+
+fn ignore_walker_builder(root: &Path) -> ignore::WalkBuilder {
+    let mut b = ignore::WalkBuilder::new(root);
+    b.hidden(false)
         .require_git(false)
         .add_custom_ignore_filename(".pailignore")
-        .filter_entry(|e| e.file_name() != DOT && e.file_name() != ".git")
-        .build()
+        .filter_entry(|e| e.file_name() != DOT && e.file_name() != ".git");
+    b
+}
+
+const STATCACHE_MAGIC: &[u8] = b"PAILSC1\n";
+
+fn decode_statcache(b: &[u8]) -> Option<HashMap<String, StatEntry>> {
+    let mut b = b.strip_prefix(STATCACHE_MAGIC)?;
+    let mut out = HashMap::with_capacity(b.len() / 110);
+    let take = |b: &mut &[u8], n: usize| -> Option<Vec<u8>> {
+        if b.len() < n {
+            return None;
+        }
+        let (h, t) = b.split_at(n);
+        *b = t;
+        Some(h.to_vec())
+    };
+    let n8 = |v: Vec<u8>| -> [u8; 8] { v.try_into().unwrap() };
+    while !b.is_empty() {
+        let len = u16::from_le_bytes(take(&mut b, 2)?.try_into().ok()?) as usize;
+        let path = String::from_utf8(take(&mut b, len)?).ok()?;
+        let mtime = i64::from_le_bytes(n8(take(&mut b, 8)?));
+        let mtime_ns = i64::from_le_bytes(n8(take(&mut b, 8)?));
+        let size = u64::from_le_bytes(n8(take(&mut b, 8)?));
+        let ino = u64::from_le_bytes(n8(take(&mut b, 8)?));
+        let kind = Kind::from_u8(take(&mut b, 1)?[0]).ok()?;
+        let hash = Hash(take(&mut b, 32)?.try_into().ok()?);
+        out.insert(path, StatEntry { mtime, mtime_ns, size, ino, kind: kind.into(), hash });
+    }
+    Some(out)
 }
 
 pub fn find_root(start: &Path) -> Result<PathBuf> {
@@ -497,12 +536,36 @@ impl Worktree {
         write_json(&dot(&self.root).join("stage.json"), &self.stage)
     }
 
+    fn statcache_path(&self) -> PathBuf {
+        dot(&self.root).join("statcache.bin")
+    }
+
+    /// The stat cache: one fixed-layout record per path. Anything unreadable is an empty
+    /// cache (everything is re-hashed once), never an error.
     fn load_statcache(&self) -> HashMap<String, StatEntry> {
-        read_json(&dot(&self.root).join("statcache.json")).unwrap_or_default()
+        let Ok(b) = std::fs::read(self.statcache_path()) else { return HashMap::new() };
+        decode_statcache(&b).unwrap_or_default()
     }
 
     fn save_statcache(&self, c: &HashMap<String, StatEntry>) -> Result<()> {
-        write_json(&dot(&self.root).join("statcache.json"), c)
+        let mut b = Vec::with_capacity(16 + c.len() * 110);
+        b.extend_from_slice(STATCACHE_MAGIC);
+        for (p, e) in c {
+            b.extend_from_slice(&(p.len() as u16).to_le_bytes());
+            b.extend_from_slice(p.as_bytes());
+            b.extend_from_slice(&e.mtime.to_le_bytes());
+            b.extend_from_slice(&e.mtime_ns.to_le_bytes());
+            b.extend_from_slice(&e.size.to_le_bytes());
+            b.extend_from_slice(&e.ino.to_le_bytes());
+            b.push(Kind::from(e.kind) as u8);
+            b.extend_from_slice(&e.hash.0);
+        }
+        let p = self.statcache_path();
+        let tmp = p.with_extension("tmp");
+        std::fs::write(&tmp, b)?;
+        std::fs::rename(&tmp, p)?;
+        let _ = std::fs::remove_file(dot(&self.root).join("statcache.json")); // the old format
+        Ok(())
     }
 
     fn cache_stat(&self, cache: &mut HashMap<String, StatEntry>, path: &str, kind: Kind, hash: Hash) {
@@ -519,26 +582,41 @@ impl Worktree {
         Ok(self.repo.entries(root).await?.into_iter().map(|e| (e.path.clone(), e)).collect())
     }
 
-    /// All non-ignored paths on disk, plus tracked paths even if an ignore rule matches them.
-    fn disk_paths(&self, tracked: impl Iterator<Item = String>) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        for ent in ignore_walker(&self.root).flatten() {
-            let ft = match ent.file_type() {
-                Some(f) => f,
-                None => continue,
-            };
-            if ft.is_dir() {
-                continue;
-            }
-            if let Ok(rel) = ent.path().strip_prefix(&self.root) {
-                if let Some(s) = rel.to_str() {
-                    out.insert(s.to_string());
+    /// All non-ignored paths on disk with their lstat, plus tracked paths even if an ignore
+    /// rule matches them. The walk runs on all cores and stats as it goes.
+    fn disk_paths(&self, tracked: impl Iterator<Item = String>) -> HashMap<String, std::fs::Metadata> {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, std::fs::Metadata)>>();
+        let root = self.root.clone();
+        ignore_walker_builder(&self.root).build_parallel().run(|| {
+            // Each walker thread batches its finds and sends them when it is done.
+            struct Batch(Vec<(String, std::fs::Metadata)>, std::sync::mpsc::Sender<Vec<(String, std::fs::Metadata)>>);
+            impl Drop for Batch {
+                fn drop(&mut self) {
+                    let _ = self.1.send(std::mem::take(&mut self.0));
                 }
             }
-        }
+            let mut batch = Batch(vec![], tx.clone());
+            let root = root.clone();
+            Box::new(move |ent| {
+                let Ok(ent) = ent else { return ignore::WalkState::Continue };
+                if ent.file_type().is_none_or(|f| f.is_dir()) {
+                    return ignore::WalkState::Continue;
+                }
+                if let (Ok(rel), Ok(md)) = (ent.path().strip_prefix(&root), ent.path().symlink_metadata()) {
+                    if let Some(s) = rel.to_str() {
+                        batch.0.push((s.to_string(), md));
+                    }
+                }
+                ignore::WalkState::Continue
+            })
+        });
+        drop(tx);
+        let mut out: HashMap<String, std::fs::Metadata> = rx.into_iter().flatten().collect();
         for p in tracked {
-            if !out.contains(&p) && std::fs::symlink_metadata(self.root.join(&p)).is_ok() {
-                out.insert(p);
+            if !out.contains_key(&p) {
+                if let Ok(md) = std::fs::symlink_metadata(self.root.join(&p)) {
+                    out.insert(p, md);
+                }
             }
         }
         out
@@ -547,14 +625,11 @@ impl Worktree {
     /// Hash everything on disk, reusing the stat cache for unchanged files.
     pub fn scan(&self, tracked: impl Iterator<Item = String>) -> Result<BTreeMap<String, DiskFile>> {
         let mut cache = self.load_statcache();
-        let cache_written = std::fs::metadata(dot(&self.root).join("statcache.json"))
-            .map(|m| m.mtime())
-            .unwrap_or(0);
+        let cache_written = std::fs::metadata(self.statcache_path()).map(|m| m.mtime()).unwrap_or(0);
         let mut out = BTreeMap::new();
         let mut dirty = false;
-        for p in self.disk_paths(tracked) {
+        for (p, md) in self.disk_paths(tracked) {
             let full = self.root.join(&p);
-            let Ok(md) = std::fs::symlink_metadata(&full) else { continue };
             if let Some(c) = cache.get(&p) {
                 // Files modified in the same second the cache was written are re-hashed (racy mtime).
                 if c.mtime == md.mtime()

@@ -13,7 +13,7 @@
 //!   worktrees.json            working copies attached to this repository
 //! ```
 //!
-//! A working copy's own state (HEAD.json, stage.json, pending/, statcache.json) sits in its
+//! A working copy's own state (HEAD.json, stage.json, pending/, statcache.bin) sits in its
 //! `.pail/`. The first working copy's `.pail/` is the repository; a linked one
 //! (`pail worktree add`) has a `repo` file naming the shared repository instead.
 

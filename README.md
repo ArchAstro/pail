@@ -61,7 +61,7 @@ work/.pail/                or the first working copy's .pail/
 work/.pail/                a working copy's own state, next to (or instead of) the repository:
 ├─ HEAD.json               {"branch", "base"}
 ├─ stage.json, pending/    the stage: staged delta + snapshotted contents
-├─ statcache.json          stat cache for fast status
+├─ statcache.bin           stat cache for fast status
 └─ repo                    linked working copies only: path of the shared repository
 ```
 
