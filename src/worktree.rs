@@ -8,7 +8,7 @@
 //! .pail/statcache.json  path → (mtime, size, inode, hash) — a cache, safe to delete
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -16,8 +16,9 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::blobs::{Blobs, CloneStats, clone_path, pail_home};
 use crate::hash::Hash;
-use crate::manifest::{Change, Entry, Kind};
+use crate::manifest::{Change, Entry, Kind, Loc};
 use crate::objects::now_date;
 use crate::repo::{CommitRequest, Delta, FileInput, Repo};
 
@@ -142,11 +143,11 @@ pub fn read_disk(path: &Path) -> Result<Option<(Kind, Vec<u8>)>> {
     Ok(Some((kind, std::fs::read(path)?)))
 }
 
-/// Write one file (or symlink) into a directory tree, replacing whatever is there.
-pub fn write_disk(root: &Path, path: &str, kind: Kind, data: &[u8]) -> Result<()> {
+/// Make way for a new file at `path`: create parent directories (removing files that sit where
+/// a directory must go) and remove whatever is at the path itself.
+fn prepare_path(root: &Path, path: &str) -> Result<PathBuf> {
     let full = root.join(path);
     if let Some(parent) = full.parent() {
-        // A file may sit where a directory now needs to be.
         let mut p = parent.to_path_buf();
         let mut blockers = vec![];
         while p.starts_with(root) && p != root {
@@ -167,6 +168,32 @@ pub fn write_disk(root: &Path, path: &str, kind: Kind, data: &[u8]) -> Result<()
             std::fs::remove_file(&full)?;
         }
     }
+    Ok(full)
+}
+
+fn set_mode(full: &Path, kind: Kind) -> Result<()> {
+    let mode = if kind == Kind::Exec { 0o755 } else { 0o644 };
+    Ok(std::fs::set_permissions(full, std::fs::Permissions::from_mode(mode))?)
+}
+
+/// Set a file's mtime (and atime) to `t`, or to now.
+fn set_mtime(full: &Path, t: Option<std::time::SystemTime>) -> Result<()> {
+    let c = std::ffi::CString::new(full.as_os_str().as_encoded_bytes())?;
+    let ts = t.map(|t| {
+        let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let s = libc::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ };
+        [s, s]
+    });
+    let ptr = ts.as_ref().map_or(std::ptr::null(), |a| a.as_ptr());
+    if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ptr, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("setting mtime of {}", full.display()));
+    }
+    Ok(())
+}
+
+/// Write one file (or symlink) into a directory tree, replacing whatever is there.
+pub fn write_disk(root: &Path, path: &str, kind: Kind, data: &[u8]) -> Result<()> {
+    let full = prepare_path(root, path)?;
     match kind {
         Kind::Symlink => {
             let target = std::str::from_utf8(data).context("symlink target is not UTF-8")?;
@@ -174,8 +201,7 @@ pub fn write_disk(root: &Path, path: &str, kind: Kind, data: &[u8]) -> Result<()
         }
         Kind::File | Kind::Exec => {
             std::fs::write(&full, data)?;
-            let mode = if kind == Kind::Exec { 0o755 } else { 0o644 };
-            std::fs::set_permissions(&full, std::fs::Permissions::from_mode(mode))?;
+            set_mode(&full, kind)?;
         }
     }
     Ok(())
@@ -199,8 +225,90 @@ pub fn remove_disk(root: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write the given entries' contents to disk, fetching in memory-bounded batches.
-pub async fn materialize(repo: &Repo, root: &Path, entries: &[Entry]) -> Result<()> {
+/// How to put file contents on disk.
+#[derive(Default)]
+pub struct Checkout {
+    /// Clone from this machine-local store instead of writing bytes (None: write directly).
+    pub blobs: Option<Blobs>,
+    /// A sibling directory whose identical files lend their mtimes, so build tools that compare
+    /// source and artifact mtimes (cargo, make) see seeded build output as up to date.
+    pub donor: Option<PathBuf>,
+    pub stats: CloneStats,
+}
+
+impl Checkout {
+    pub fn for_root(root: &Path) -> Checkout {
+        Checkout { blobs: Blobs::for_root(root), ..Default::default() }
+    }
+
+    /// The donor's mtime for `path` if the donor holds the same content.
+    fn donor_mtime(&self, e: &Entry) -> Option<std::time::SystemTime> {
+        let full = self.donor.as_ref()?.join(&e.path);
+        let md = std::fs::symlink_metadata(&full).ok()?;
+        if !md.is_file() || md.len() != e.size {
+            return None;
+        }
+        (Hash::of(&std::fs::read(&full).ok()?) == e.hash).then(|| md.modified().ok()).flatten()
+    }
+
+    /// Write the given entries' contents to disk, fetching what the store lacks in
+    /// memory-bounded batches.
+    pub async fn materialize(&self, repo: &Repo, root: &Path, entries: &[Entry]) -> Result<()> {
+        let Some(blobs) = &self.blobs else {
+            return self.write_direct(repo, root, entries).await;
+        };
+        // Symlinks and inline files carry their bytes in the manifest; nothing to share.
+        let (direct, shared): (Vec<Entry>, Vec<Entry>) =
+            entries.iter().cloned().partition(|e| e.kind == Kind::Symlink || matches!(e.loc, Loc::Inline(_)));
+        self.write_direct(repo, root, &direct).await?;
+        let mut seen = HashSet::new();
+        let missing: Vec<Entry> =
+            shared.iter().filter(|e| seen.insert(e.hash) && !blobs.has(&e.hash)).cloned().collect();
+        for batch in batches(&missing) {
+            for (e, d) in batch.iter().zip(repo.read_files(batch).await?) {
+                blobs.put(&e.hash, &d)?;
+            }
+        }
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
+        let per = shared.len().div_ceil(threads).max(1);
+        std::thread::scope(|s| {
+            let jobs: Vec<_> = shared
+                .chunks(per)
+                .map(|chunk| {
+                    s.spawn(move || -> Result<()> {
+                        for e in chunk {
+                            let full = prepare_path(root, &e.path)?;
+                            blobs.checkout(&e.hash, &full, &self.stats)?;
+                            set_mode(&full, e.kind)?;
+                            set_mtime(&full, self.donor_mtime(e))?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            jobs.into_iter().try_for_each(|j| j.join().expect("checkout thread panicked"))
+        })
+    }
+
+    async fn write_direct(&self, repo: &Repo, root: &Path, entries: &[Entry]) -> Result<()> {
+        for batch in batches(entries) {
+            for (e, d) in batch.iter().zip(repo.read_files(batch).await?) {
+                write_disk(root, &e.path, e.kind, &d)?;
+                if e.kind != Kind::Symlink {
+                    if let Some(t) = self.donor_mtime(e) {
+                        set_mtime(&root.join(&e.path), Some(t))?;
+                    }
+                }
+                self.stats.add(false, e.size);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Split entries into runs of about 256MB of content.
+fn batches(entries: &[Entry]) -> Vec<&[Entry]> {
+    let mut out = vec![];
     let mut start = 0;
     while start < entries.len() {
         let mut end = start;
@@ -209,14 +317,139 @@ pub async fn materialize(repo: &Repo, root: &Path, entries: &[Entry]) -> Result<
             bytes += entries[end].size;
             end += 1;
         }
-        let batch = &entries[start..end];
-        let data = repo.read_files(batch).await?;
-        for (e, d) in batch.iter().zip(data) {
-            write_disk(root, &e.path, e.kind, &d)?;
-        }
+        out.push(&entries[start..end]);
         start = end;
     }
+    out
+}
+
+/// What `seed_ignored` brought over.
+#[derive(Default, Debug)]
+pub struct Seeded {
+    pub paths: Vec<String>,
+    pub cloned: usize,
+    pub copied: usize,
+}
+
+/// What `seed_ignored` clones when the donor has no `.pailseed`: build output, dependency
+/// directories and local env files. Other ignored paths (scratch space, nested checkouts, logs)
+/// are left behind: they can hold millions of files, and each cloned file still costs an inode.
+pub const DEFAULT_SEED: &str = "target/\nnode_modules/\n_build/\ndeps/\n.next/\n.turbo/\ndist/\nbuild/\n.venv/\n__pycache__/\n.gradle/\n.env\n.env.*\n";
+
+/// Seed rules (gitignore syntax): the donor's `.pailseed`, else `DEFAULT_SEED`.
+fn seed_rules(donor: &Path) -> Result<ignore::gitignore::Gitignore> {
+    let text = std::fs::read_to_string(donor.join(".pailseed")).unwrap_or_else(|_| DEFAULT_SEED.to_string());
+    let mut b = ignore::gitignore::GitignoreBuilder::new(donor);
+    for line in text.lines() {
+        b.add_line(None, line)?;
+    }
+    Ok(b.build()?)
+}
+
+/// Clone the ignored paths of `donor` that match the seed rules into `dst`, skipping paths that
+/// already exist. Directories are cloned whole, so a new working copy starts with a warm build
+/// that shares the donor's blocks until either side rebuilds.
+pub fn seed_ignored(donor: &Path, dst: &Path) -> Result<Seeded> {
+    let rules = seed_rules(donor)?;
+    let kept: HashSet<PathBuf> = ignore_walker(donor)
+        .flatten()
+        .filter_map(|e| e.path().strip_prefix(donor).ok().map(Path::to_path_buf))
+        .collect();
+    let mut out = Seeded::default();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        for ent in std::fs::read_dir(donor.join(&rel))? {
+            let ent = ent?;
+            let name = ent.file_name();
+            if name == DOT || name == ".git" {
+                continue;
+            }
+            let child = rel.join(&name);
+            if kept.contains(&child) {
+                if ent.file_type()?.is_dir() {
+                    stack.push(child);
+                }
+                continue;
+            }
+            let is_dir = ent.file_type()?.is_dir();
+            if !rules.matched(&child, is_dir).is_ignore() {
+                continue;
+            }
+            let to = dst.join(&child);
+            if std::fs::symlink_metadata(&to).is_ok() {
+                continue;
+            }
+            std::fs::create_dir_all(to.parent().unwrap())?;
+            if clone_path(&ent.path(), &to)? {
+                out.cloned += 1;
+            } else {
+                copy_tree(&ent.path(), &to)?;
+                out.copied += 1;
+            }
+            out.paths.push(child.to_string_lossy().into_owned());
+        }
+    }
+    out.paths.sort();
+    Ok(out)
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    let md = std::fs::symlink_metadata(src)?;
+    if md.file_type().is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
+    } else if md.is_dir() {
+        std::fs::create_dir(dst)?;
+        for ent in std::fs::read_dir(src)? {
+            let ent = ent?;
+            copy_tree(&ent.path(), &dst.join(ent.file_name()))?;
+        }
+    } else {
+        std::fs::copy(src, dst)?;
+        let _ = std::fs::File::options().write(true).open(dst).and_then(|f| f.set_modified(md.modified()?));
+    }
     Ok(())
+}
+
+/// Walks the non-ignored files of a tree, with pail's ignore rules.
+fn ignore_walker(root: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .add_custom_ignore_filename(".pailignore")
+        .filter_entry(|e| e.file_name() != DOT && e.file_name() != ".git")
+        .build()
+}
+
+/// Working copies on this machine: path → store. Kept so `pail worktree list` can find them.
+pub fn registered() -> BTreeMap<PathBuf, String> {
+    read_json(&pail_home().join("worktrees.json")).unwrap_or_default()
+}
+
+fn registry_lock() -> Result<std::fs::File> {
+    use fs2::FileExt;
+    let f = std::fs::File::create(pail_home().join("worktrees.lock"))?;
+    f.lock_exclusive()?;
+    Ok(f)
+}
+
+fn edit_registry(f: impl FnOnce(&mut BTreeMap<PathBuf, String>)) -> Result<()> {
+    std::fs::create_dir_all(pail_home())?;
+    let _lock = registry_lock()?;
+    let mut r = registered();
+    f(&mut r);
+    write_json(&pail_home().join("worktrees.json"), &r)
+}
+
+pub fn register(root: &Path, store: &str) -> Result<()> {
+    edit_registry(|r| {
+        r.insert(root.to_path_buf(), store.to_string());
+    })
+}
+
+pub fn unregister(root: &Path) -> Result<()> {
+    edit_registry(|r| {
+        r.remove(root);
+    })
 }
 
 pub fn find_root(start: &Path) -> Result<PathBuf> {
@@ -259,18 +492,25 @@ impl Worktree {
         Ok(Worktree { root, repo: Repo::open(&cfg.store)?, head, stage })
     }
 
-    /// Check out `branch` from `store` into a new directory.
-    pub async fn clone(store: &str, dir: &Path, branch: &str) -> Result<Worktree> {
+    /// Check out `branch` (at its head, or at commit `at`) from `store` into a new directory.
+    /// `co` decides how bytes reach the disk; its blob store is filled in when None.
+    pub async fn clone(store: &str, dir: &Path, branch: &str, at: Option<Hash>, co: &mut Checkout) -> Result<Worktree> {
         let repo = Repo::open(store)?;
-        let (commit, _) = repo.read_ref(branch).await?.with_context(|| format!("branch {branch} not found"))?;
+        let commit = match at {
+            Some(h) => h,
+            None => repo.read_ref(branch).await?.with_context(|| format!("branch {branch} not found"))?.0,
+        };
         if dir.exists() && std::fs::read_dir(dir)?.next().is_some() {
             bail!("{} exists and is not empty", dir.display());
         }
         std::fs::create_dir_all(dot(dir).join("pending"))?;
         let root = std::fs::canonicalize(dir)?;
+        if co.blobs.is_none() {
+            co.blobs = Blobs::for_root(&root);
+        }
         let c = repo.commit_obj(&commit).await?;
         let entries = repo.entries(c.root).await?;
-        materialize(&repo, &root, &entries).await?;
+        co.materialize(&repo, &root, &entries).await?;
         write_json(&dot(&root).join("config.json"), &Config { store: store.to_string() })?;
         let head = Head { branch: branch.to_string(), base: Some(commit) };
         write_json(&dot(&root).join("HEAD.json"), &head)?;
@@ -280,6 +520,7 @@ impl Worktree {
             wt.cache_stat(&mut cache, &e.path, e.kind, e.hash);
         }
         wt.save_statcache(&cache)?;
+        register(&wt.root, store)?;
         Ok(wt)
     }
 
@@ -316,13 +557,7 @@ impl Worktree {
     /// All non-ignored paths on disk, plus tracked paths even if an ignore rule matches them.
     fn disk_paths(&self, tracked: impl Iterator<Item = String>) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
-        let walker = ignore::WalkBuilder::new(&self.root)
-            .hidden(false)
-            .require_git(false)
-            .add_custom_ignore_filename(".pailignore")
-            .filter_entry(|e| e.file_name() != DOT && e.file_name() != ".git")
-            .build();
-        for ent in walker.flatten() {
+        for ent in ignore_walker(&self.root).flatten() {
             let ft = match ent.file_type() {
                 Some(f) => f,
                 None => continue,
@@ -548,6 +783,18 @@ impl Worktree {
         self.head.base = Some(out.commit);
         self.save_head()?;
         let staged: Vec<String> = self.stage.keys().cloned().collect();
+        // The committed snapshots are now shared content: hand them to the blob store so other
+        // working copies clone them instead of fetching.
+        if let Some(blobs) = Blobs::for_root(&self.root) {
+            for s in self.stage.values() {
+                if let Staged::Put { hash, .. } = s {
+                    let f = pending.join(hash.hex());
+                    if f.exists() {
+                        blobs.adopt(hash, &f)?;
+                    }
+                }
+            }
+        }
         self.stage.clear();
         self.save_stage()?;
         let _ = std::fs::remove_dir_all(&pending);
@@ -569,7 +816,7 @@ impl Worktree {
             remove_disk(&self.root, &c.path)?;
             cache.remove(&c.path);
         }
-        materialize(&self.repo, &self.root, &writes).await?;
+        Checkout::for_root(&self.root).materialize(&self.repo, &self.root, &writes).await?;
         for e in &writes {
             self.cache_stat(&mut cache, &e.path, e.kind, e.hash);
         }
@@ -644,7 +891,7 @@ impl Worktree {
                 n += 1;
             }
         }
-        materialize(&self.repo, &self.root, &fetch).await?;
+        Checkout::for_root(&self.root).materialize(&self.repo, &self.root, &fetch).await?;
         Ok(n)
     }
 }

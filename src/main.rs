@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use pail::hash::Hash;
 use pail::objects::now_date;
 use pail::repo::{CommitRequest, Delta, Repo};
-use pail::worktree::{Worktree, author};
+use pail::worktree::{Checkout, Worktree, author, registered, seed_ignored, unregister};
 
 #[derive(Parser)]
 #[command(name = "pail", version, about = "Version control that lives in a bucket")]
@@ -47,8 +47,35 @@ enum Cmd {
     Ls { rev: Option<String> },
     /// Delete unreachable objects older than the grace period.
     Gc { store: Option<String>, #[arg(long, default_value_t = 168.0)] grace_hours: f64, #[arg(long)] dry_run: bool },
+    /// Extra working copies that share file contents and build output copy-on-write.
+    #[command(subcommand)]
+    Worktree(WtCmd),
     /// Print a file from a commit.
     Cat { path: String, #[arg(long)] rev: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum WtCmd {
+    /// Add a working copy of this one's base (or another branch), seeded with its build output.
+    Add {
+        path: PathBuf,
+        /// Create this branch at the current base and check it out.
+        #[arg(short = 'b', long = "create")]
+        create: Option<String>,
+        /// Check out this existing branch at its head (default: this working copy's branch and base).
+        #[arg(long)]
+        branch: Option<String>,
+        /// Clone ignored files (build output, dependencies) from this directory (default: here).
+        #[arg(long)]
+        seed_from: Option<PathBuf>,
+        /// Don't seed ignored files.
+        #[arg(long)]
+        no_seed: bool,
+    },
+    /// List working copies of this store on this machine.
+    List,
+    /// Delete a working copy (refuses if it has uncommitted changes unless --force).
+    Remove { path: PathBuf, #[arg(long)] force: bool },
 }
 
 fn cwd() -> Result<PathBuf> {
@@ -69,6 +96,16 @@ async fn resolve_rev(repo: &Repo, rev: &str) -> Result<Hash> {
         [] => bail!("unknown revision {rev}"),
         _ => bail!("ambiguous revision {rev}"),
     }
+}
+
+fn checkout_summary(co: &Checkout) -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let s = &co.stats;
+    format!(
+        "{} cloned, {} written",
+        fmt_bytes(s.cloned_bytes.load(Relaxed)),
+        fmt_bytes(s.copied_bytes.load(Relaxed))
+    )
 }
 
 fn fmt_bytes(n: u64) -> String {
@@ -113,17 +150,19 @@ async fn run(cli: Cli) -> Result<()> {
                 PathBuf::from(store.trim_end_matches('/').rsplit('/').next().unwrap_or("repo"))
             });
             let t = std::time::Instant::now();
-            let wt = Worktree::clone(&store, &dir, &branch).await?;
+            let mut co = Checkout::default();
+            let wt = Worktree::clone(&store, &dir, &branch, None, &mut co).await?;
             let c = wt.repo.commit_obj(&wt.head.base.unwrap()).await?;
             let (gets, _, down, _) = wt.repo.store.stats.snapshot();
             println!(
-                "cloned {branch} @ {} into {}: {} files, {} in {:.1}s ({gets} requests, {} transferred)",
+                "cloned {branch} @ {} into {}: {} files, {} in {:.1}s ({gets} requests, {} transferred; {})",
                 wt.head.base.unwrap().short(),
                 dir.display(),
                 c.files,
                 fmt_bytes(c.bytes),
                 t.elapsed().as_secs_f64(),
-                fmt_bytes(down)
+                fmt_bytes(down),
+                checkout_summary(&co)
             );
         }
         Cmd::Status => {
@@ -336,6 +375,91 @@ async fn run(cli: Cli) -> Result<()> {
                 fmt_bytes(r.bytes_freed),
                 r.kept_young
             );
+        }
+        Cmd::Worktree(WtCmd::Add { path, create, branch, seed_from, no_seed }) => {
+            let here = Worktree::open(&cwd()?)?;
+            let store = std::fs::read_to_string(here.root.join(".pail/config.json"))?;
+            let store: serde_json::Value = serde_json::from_str(&store)?;
+            let store = store["store"].as_str().context("bad config")?.to_string();
+            let (br, at) = match (create, branch) {
+                (Some(_), Some(_)) => bail!("use either -b or --branch"),
+                (Some(n), None) => {
+                    let base = here.head.base.context("nothing to branch from")?;
+                    here.repo.create_branch(&n, base).await?;
+                    (n, Some(base))
+                }
+                (None, Some(b)) => (b, None),
+                (None, None) => (here.head.branch.clone(), here.head.base),
+            };
+            let donor = if no_seed { None } else { Some(std::fs::canonicalize(seed_from.unwrap_or(here.root.clone()))?) };
+            let t = std::time::Instant::now();
+            let mut co = Checkout { donor: donor.clone(), ..Default::default() };
+            let wt = Worktree::clone(&store, &path, &br, at, &mut co).await?;
+            let files_s = t.elapsed().as_secs_f64();
+            println!(
+                "added {} on {br} @ {}: files in {files_s:.1}s ({})",
+                wt.root.display(),
+                wt.head.base.unwrap().short(),
+                checkout_summary(&co)
+            );
+            if let Some(d) = donor {
+                let t = std::time::Instant::now();
+                let s = seed_ignored(&d, &wt.root)?;
+                println!(
+                    "seeded {} ignored path(s) from {} in {:.1}s ({} cloned, {} copied)",
+                    s.paths.len(),
+                    d.display(),
+                    t.elapsed().as_secs_f64(),
+                    s.cloned,
+                    s.copied
+                );
+                for p in s.paths.iter().take(12) {
+                    println!("  {p}");
+                }
+                if s.paths.len() > 12 {
+                    println!("  … and {} more", s.paths.len() - 12);
+                }
+            }
+        }
+        Cmd::Worktree(WtCmd::List) => {
+            let here = Worktree::open(&cwd()?).ok();
+            let store = here.as_ref().map(|w| {
+                let c: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(w.root.join(".pail/config.json")).unwrap_or_default())
+                        .unwrap_or_default();
+                c["store"].as_str().unwrap_or_default().to_string()
+            });
+            for (p, s) in registered() {
+                if store.as_ref().is_some_and(|st| *st != s) {
+                    continue;
+                }
+                let mark = if here.as_ref().is_some_and(|w| w.root == p) { "*" } else { " " };
+                match Worktree::open(&p) {
+                    Ok(w) if w.root == p => println!(
+                        "{mark} {:50} {} @ {}",
+                        p.display(),
+                        w.head.branch,
+                        w.head.base.map(|h| h.short()).unwrap_or_default()
+                    ),
+                    _ => println!("{mark} {:50} (missing)", p.display()),
+                }
+            }
+        }
+        Cmd::Worktree(WtCmd::Remove { path, force }) => {
+            let root = std::fs::canonicalize(&path)?;
+            let wt = Worktree::open(&root)?;
+            if wt.root != root {
+                bail!("{} is not the root of a working copy", path.display());
+            }
+            if !force && !wt.status().await?.is_clean() {
+                bail!("{} has uncommitted changes (use --force to delete anyway)", root.display());
+            }
+            if cwd()?.starts_with(&root) {
+                bail!("can't remove the working copy you are in");
+            }
+            std::fs::remove_dir_all(&root)?;
+            unregister(&root)?;
+            println!("removed {}", root.display());
         }
         Cmd::Cat { path, rev } => {
             let wt = Worktree::open(&cwd()?)?;

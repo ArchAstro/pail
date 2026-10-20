@@ -1,21 +1,33 @@
 use std::path::Path;
 use std::process::Command;
 
-fn pail(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_pail"))
-        .args(args)
+/// One machine-local pail home (blob store, worktree registry) shared by this test process.
+fn home() -> &'static Path {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| tempfile::tempdir().unwrap()).path()
+}
+
+fn cmd(dir: &Path, args: &[&str]) -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_pail"));
+    c.args(args)
         .current_dir(dir)
         .env("PAIL_AUTHOR", "Tester <t@example.com>")
         .env("PAIL_CACHE", "off")
-        .output()
-        .unwrap();
+        .env("PAIL_HOME", home())
+        .env("PAIL_BLOBS", home().join("blobs"))
+        .env_remove("PAIL_CLONE");
+    c
+}
+
+fn pail(dir: &Path, args: &[&str]) -> String {
+    let out = cmd(dir, args).output().unwrap();
     let s = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "pail {args:?} failed:\n{s}");
     s
 }
 
 fn pail_fails(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_pail")).args(args).current_dir(dir).env("PAIL_CACHE", "off").output().unwrap();
+    let out = cmd(dir, args).output().unwrap();
     assert!(!out.status.success(), "pail {args:?} should fail");
     String::from_utf8_lossy(&out.stderr).to_string()
 }
@@ -120,4 +132,109 @@ fn gc_removes_only_unreachable() {
     pail(&t, &["clone", &store, "after"]);
     assert_eq!(std::fs::read_to_string(t.join("after/keep.txt")).unwrap(), "k".repeat(500));
     assert!(!t.join("after/doomed.txt").exists());
+}
+
+fn blob_path(content: &[u8]) -> std::path::PathBuf {
+    let hex = pail::hash::Hash::of(content).hex();
+    home().join("blobs").join(&hex[..2]).join(hex)
+}
+
+fn mtime(p: &Path) -> std::time::SystemTime {
+    std::fs::symlink_metadata(p).unwrap().modified().unwrap()
+}
+
+#[test]
+fn worktrees_share_content_and_build_output() {
+    use std::io::{Seek, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "a"]);
+    let a = t.join("a");
+
+    let lib = "pub fn f() {}\n".repeat(100);
+    let big: Vec<u8> = (0..3u32 << 20).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    write(&a.join("src/lib.rs"), &lib);
+    write(&a.join("README.md"), &"readme ".repeat(20));
+    write(&a.join("tiny"), "inline");
+    std::fs::write(a.join("big.bin"), &big).unwrap();
+    write(&a.join("run.sh"), &format!("#!/bin/sh\n{}", "echo hi\n".repeat(20)));
+    std::fs::set_permissions(a.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("src/lib.rs", a.join("link")).unwrap();
+    write(&a.join(".gitignore"), "target/\n.env\nscratch/\n");
+    pail(&a, &["add", "-A"]);
+    pail(&a, &["commit", "-m", "base"]);
+    // Ignored build output and env file, as a build would leave them.
+    write(&a.join("target/debug/app"), &"binary".repeat(1000));
+    write(&a.join(".env"), "SECRET=1");
+    write(&a.join("scratch/huge.log"), "ignored but not build output");
+    // Build tools compare mtimes: sources older than outputs mean "up to date".
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    std::fs::File::options().write(true).open(a.join("src/lib.rs")).unwrap().set_modified(old).unwrap();
+    // An unstaged edit in the donor: the new worktree gets the base version with a fresh mtime.
+    write(&a.join("README.md"), "edited in a");
+    let started = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+
+    let out = pail(&a, &["worktree", "add", "../b", "-b", "feat"]);
+    assert!(out.contains("seeded 2 ignored path(s)") && out.contains(".env") && out.contains("target"), "{out}");
+    let b = t.join("b");
+    assert_eq!(std::fs::read_to_string(b.join("src/lib.rs")).unwrap(), lib);
+    assert_eq!(std::fs::read(b.join("big.bin")).unwrap(), big);
+    assert_eq!(std::fs::read_to_string(b.join("README.md")).unwrap(), "readme ".repeat(20));
+    assert_eq!(std::fs::read_link(b.join("link")).unwrap().to_str().unwrap(), "src/lib.rs");
+    assert_eq!(std::fs::metadata(b.join("run.sh")).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(std::fs::metadata(b.join("src/lib.rs")).unwrap().permissions().mode() & 0o777, 0o644);
+    assert_eq!(std::fs::read_to_string(b.join("target/debug/app")).unwrap(), "binary".repeat(1000));
+    assert_eq!(std::fs::read_to_string(b.join(".env")).unwrap(), "SECRET=1");
+    assert!(!b.join("scratch").exists(), "only build output and env files are seeded by default");
+    assert_eq!(mtime(&b.join("src/lib.rs")), old, "identical file keeps the donor's mtime");
+    assert!(mtime(&b.join("README.md")) >= started, "differing file gets a fresh mtime");
+    assert!(blob_path(lib.as_bytes()).exists() && blob_path(&big).exists());
+    if cfg!(target_vendor = "apple") {
+        assert!(out.contains("MB cloned"), "APFS should clone: {out}");
+    }
+    let st = pail(&b, &["status"]);
+    assert!(st.contains("on feat") && st.contains("clean"), "{st}");
+
+    // Editing a clone in place touches neither the blob store nor the donor.
+    let mut f = std::fs::File::options().write(true).open(b.join("src/lib.rs")).unwrap();
+    f.seek(std::io::SeekFrom::Start(0)).unwrap();
+    f.write_all(b"XXXX").unwrap();
+    drop(f);
+    let mut f = std::fs::File::options().write(true).open(b.join("target/debug/app")).unwrap();
+    f.write_all(b"REBUILT").unwrap();
+    drop(f);
+    assert_eq!(std::fs::read_to_string(a.join("src/lib.rs")).unwrap(), lib);
+    assert_eq!(std::fs::read_to_string(a.join("target/debug/app")).unwrap(), "binary".repeat(1000));
+    let stored = blob_path(lib.as_bytes());
+    assert_eq!(pail::hash::Hash::of(&std::fs::read(&stored).unwrap()), pail::hash::Hash::of(lib.as_bytes()));
+    assert!(pail(&b, &["status"]).contains("M src/lib.rs"));
+
+    // Committed content goes into the blob store for the next worktree to clone.
+    write(&b.join("new.txt"), &"fresh content ".repeat(10));
+    pail(&b, &["add", "new.txt"]);
+    pail(&b, &["commit", "-m", "new"]);
+    assert!(blob_path("fresh content ".repeat(10).as_bytes()).exists());
+
+    // Without clone support, the same result by copying.
+    let out = cmd(&a, &["worktree", "add", "../c", "--branch", "feat"]).env("PAIL_CLONE", "off").output().unwrap();
+    let out = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.contains("0 KB cloned") && out.contains("0 cloned, 2 copied"), "{out}");
+    let c = t.join("c");
+    assert_eq!(std::fs::read_to_string(c.join("new.txt")).unwrap(), "fresh content ".repeat(10));
+    assert_eq!(std::fs::read(c.join("big.bin")).unwrap(), big);
+    assert_eq!(std::fs::read_to_string(c.join("target/debug/app")).unwrap(), "binary".repeat(1000));
+
+    let list = pail(&a, &["worktree", "list"]);
+    assert!(list.contains(&format!("* {}", a.display())), "{list}");
+    assert!(list.contains("feat") && list.contains(&c.display().to_string()), "{list}");
+    let err = pail_fails(&a, &["worktree", "remove", "../b"]);
+    assert!(err.contains("uncommitted"), "{err}");
+    pail(&a, &["worktree", "remove", "../b", "--force"]);
+    pail(&a, &["worktree", "remove", "../c"]);
+    assert!(!b.exists() && !c.exists());
+    let list = pail(&a, &["worktree", "list"]);
+    assert!(!list.contains(&c.display().to_string()), "{list}");
 }

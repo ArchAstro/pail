@@ -392,6 +392,8 @@ async fn deep_check(git: &Git, store: &str, branch: &str, git_sha: &str, state: 
     let out = std::process::Command::new(&bin)
         .args(["clone", store, pail_dir.to_str().unwrap(), "--branch", branch])
         .env("PAIL_CACHE", "off")
+        .env("PAIL_BLOBS", "off")
+        .env("PAIL_HOME", work.path())
         .output()
         .with_context(|| format!("running {}", bin.display()))?;
     if !out.status.success() {

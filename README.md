@@ -37,6 +37,43 @@ S3 settings come from the usual `AWS_*` variables (`AWS_ENDPOINT`, `AWS_ALLOW_HT
 emulators). GCS settings come from `GOOGLE_*`. `PAIL_CACHE` sets the local cache of
 immutable pages and commits (`off` disables it).
 
+## Worktrees: many checkouts, one copy on disk
+
+```
+             bucket ──fetch once──▶ ~/.cache/pail/blobs/<blake3>   (read-only, one copy per content)
+                                         │ clone   │ clone   │ clone      APFS clonefile / Linux FICLONE
+                                         ▼         ▼         ▼
+                                       wt/a      wt/b      wt/c           share blocks until edited
+seed: wt/a/target, node_modules … ──clone──▶ wt/b/…                       warm build, no extra disk
+```
+
+```sh
+pail worktree add ../feature -b feature      # new branch at this base, seeded from here
+pail worktree add ../review --branch main --seed-from ~/src/other-checkout
+pail worktree list | pail worktree remove ../feature
+```
+
+1. Files are copy-on-write clones of a machine-local blob store, so extra worktrees cost
+   inodes, not bytes. Editing a file in place is safe: the clone gets its own blocks. The store
+   is a plain cache (no refcounts), and it lives on the worktree's volume
+   (`PAIL_BLOBS`, `PAIL_HOME`). If the filesystem can't clone, files are copied.
+2. `--seed-from` (default: the current worktree) clones ignored build output into the new
+   worktree: `target/`, `node_modules/`, `_build/`, `.next/`, `.env*` … (override with a
+   `.pailseed` file in gitignore syntax). Nested checkouts and other ignored paths are skipped.
+3. Files identical to the seed source get its mtimes, so cargo/make see the seeded build as up
+   to date. Files that differ get a fresh mtime and rebuild normally.
+
+Measured on firstlanding (28,877 files, 459 MB; APFS):
+
+| | real disk | time |
+|---|---|---|
+| plain clone | 529 MB | 4.9s |
+| `worktree add` | 26 MB | 2.4s |
+| `worktree add` seeded with archdev's 10 GB `target/` | 29 MB | 3.6s |
+| `cargo build` in it (cold build: 446 crates, 147s) | 0 MB, 0 crates | 0.6s |
+| same, but target cloned without mtime matching | 5.6 GB, 8 crates | 112s |
+| seeded from a real checkout: 140 `node_modules`/`_build`/`.next`, 5.3 GB apparent | 157 MB | 15s |
+
 ## pail-mirror: proving it on a real repository
 
 `pail-mirror` watches a GitHub branch, forwards each first-parent commit into pail, and
