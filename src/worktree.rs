@@ -8,6 +8,8 @@
 //! .pail/pending/<hash>  staged file contents, snapshotted at `add` time
 //! .pail/statcache.bin   path → (mtime, size, inode, hash) — a cache, safe to delete
 //! .pail/repo            linked working copies: path of the shared repository
+//! .pail/ORIG_HEAD       the base before the last switch, sync or replayed commit
+//! .pail/COMMIT_EDITMSG  the message of the last commit, as handed to commit-msg
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -21,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::blobs::{Blobs, CloneStats, clone_path};
 use crate::local::LocalRepo;
 use crate::hash::Hash;
+use crate::hooks::{self, Hooks};
 use crate::manifest::{Change, Entry, Kind, Loc};
 use crate::objects::now_date;
 use crate::repo::{CommitRequest, Delta, FileInput, Repo};
@@ -776,9 +779,53 @@ impl Worktree {
         Ok(before - self.stage.len())
     }
 
-    pub async fn commit(&mut self, message: &str) -> Result<crate::repo::CommitOutcome> {
+    /// The hooks for this working copy (see `hooks`).
+    pub fn hooks(&self) -> Hooks {
+        let cfg = crate::config::Config::load(Some(&self.local.dir));
+        Hooks::new(&cfg, &self.local.dir, &self.root)
+            .with_env("BRANCH", self.head.branch.clone())
+            .with_env("WORKTREE", self.root.to_string_lossy().to_string())
+    }
+
+    fn set_orig_head(&self, h: Option<Hash>) -> Result<()> {
+        let p = dot(&self.root).join("ORIG_HEAD");
+        match h {
+            Some(h) => std::fs::write(p, format!("{}\n", h.hex()))?,
+            None => {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        Ok(())
+    }
+
+    /// Commit the stage, which publishes it. Hooks: pre-commit (may restage with `pail add`),
+    /// commit-msg (may rewrite the message), pre-publish (sees the written commit before the
+    /// CAS), then post-rewrite (when the commit was replayed onto a newer head) and
+    /// post-commit. `no_verify` skips the three that can refuse. Returns the final message.
+    pub async fn commit(&mut self, message: &str, no_verify: bool) -> Result<(crate::repo::CommitOutcome, String)> {
         if self.stage.is_empty() {
             bail!("nothing staged (use `pail add <path>` or `pail commit -a`)");
+        }
+        let hooks = self.hooks();
+        let mut message = message.to_string();
+        if !no_verify {
+            hooks.run("pre-commit", &[], None)?;
+            // The hook may have staged (formatted files) or unstaged paths.
+            let stage_path = dot(&self.root).join("stage.json");
+            self.stage = if stage_path.exists() { read_json(&stage_path)? } else { BTreeMap::new() };
+            if self.stage.is_empty() {
+                bail!("nothing staged after the pre-commit hook");
+            }
+            if hooks.find("commit-msg").is_some() {
+                let f = dot(&self.root).join("COMMIT_EDITMSG");
+                std::fs::write(&f, format!("{message}\n"))?;
+                hooks.run("commit-msg", &[&f.to_string_lossy()], None)?;
+                let edited = std::fs::read_to_string(&f)?;
+                message = edited.trim_end_matches('\n').to_string();
+                if message.trim().is_empty() {
+                    bail!("the commit-msg hook left an empty message");
+                }
+            }
         }
         let base = self.base_entries().await?;
         let pending = dot(&self.root).join("pending");
@@ -804,9 +851,15 @@ impl Worktree {
         let cfg = crate::config::Config::load(Some(&self.local.dir));
         let who = cfg.identity("author")?;
         let date = now_date();
+        let pre_publish = |p: &crate::repo::Publish| -> Result<()> {
+            let line = format!("{} {} {}\n", p.branch, hooks::id(p.old), p.new.hex());
+            hooks.run("pre-publish", &[&p.branch, "commit"], Some(line.as_bytes())).map(|_| ())
+        };
+        let check: Option<crate::repo::PublishCheck> =
+            if !no_verify && hooks.find("pre-publish").is_some() { Some(&pre_publish) } else { None };
         let out = self
             .repo
-            .commit(CommitRequest {
+            .commit_with(CommitRequest {
                 branch: self.head.branch.clone(),
                 base: self.head.base,
                 delta,
@@ -814,9 +867,9 @@ impl Worktree {
                 author_date: date.clone(),
                 committer: cfg.identity("committer")?,
                 committer_date: date,
-                message: message.to_string(),
+                message: message.clone(),
                 meta: BTreeMap::new(),
-            })
+            }, check)
             .await?;
         // The branch may have advanced under us (replayed commit). Bring in others' changes.
         let old_base = self.head.base;
@@ -845,8 +898,13 @@ impl Worktree {
             let theirs: Vec<Change> = self.repo.diff(from, to).await?;
             let theirs: Vec<Change> = theirs.into_iter().filter(|c| !staged.contains(&c.path)).collect();
             self.apply_changes(&theirs).await?;
+            self.set_orig_head(old_base)?;
         }
-        Ok(out)
+        if let Some(from) = out.replayed_from {
+            hooks.notify("post-rewrite", &["replay"], Some(format!("{} {}\n", from.hex(), out.commit.hex()).as_bytes()));
+        }
+        hooks.notify("post-commit", &[], None);
+        Ok((out, message))
     }
 
     /// Apply tree changes to disk and the stat cache.
@@ -875,8 +933,11 @@ impl Worktree {
         let to = self.repo.root_of(Some(target)).await?;
         let changes = self.repo.diff(from, to).await?;
         self.apply_changes(&changes).await?;
+        let prev = self.head.base;
         self.head = Head { branch: branch.to_string(), base: Some(target) };
         self.save_head()?;
+        self.set_orig_head(prev)?;
+        self.hooks().notify("post-checkout", &[&hooks::id(prev), &target.hex(), "1"], None);
         Ok(changes.len())
     }
 
@@ -901,8 +962,11 @@ impl Worktree {
             bail!("sync would overwrite local changes in: {}", clash.join(", "));
         }
         self.apply_changes(&changes).await?;
+        let old = self.head.base;
         self.head.base = Some(head);
         self.save_head()?;
+        self.set_orig_head(old)?;
+        self.hooks().notify("post-sync", &[&hooks::id(old), &head.hex()], None);
         Ok(changes.len())
     }
 

@@ -294,6 +294,14 @@ impl Ctx {
         if base == "HEAD" || base == "@" || base.is_empty() {
             return self.head().await;
         }
+        if base == "ORIG_HEAD" {
+            // Recorded by commands that move a working copy: switch, sync, a replayed commit.
+            let wt = self.worktree.as_ref().context("ORIG_HEAD needs a working copy")?;
+            return match std::fs::read_to_string(wt.join(crate::local::DOT).join("ORIG_HEAD")) {
+                Ok(s) => Ok(Some(Hash::from_hex(s.trim())?)),
+                Err(_) => Ok(None),
+            };
+        }
         // Ids the commit graph knows resolve locally, without asking the store about refs.
         let hexlike = base.len() >= 4 && base.bytes().all(|b| b.is_ascii_hexdigit());
         if hexlike {

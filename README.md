@@ -309,6 +309,59 @@ pail-mirror verify --git-dir … --store … --state-dir ./state   # re-prove th
 The dashboard at `--serve` shows sync state, per-commit import and proof times, upload
 costs, and deep-check results. `state/mirror.jsonl` holds one record per commit.
 
+## Hooks
+
+Executables pail runs at fixed points, like Git's, but shaped by pail's model: a commit is
+published the moment it is made, so pre-commit and pre-push become one flow, and the
+publish check sees the exact commit before the single CAS that publishes it.
+
+```
+pail commit   pre-commit ─▶ commit-msg $1 ─▶ [objects written] ─▶ pre-publish ─▶ CAS
+              ─▶ post-rewrite replay (only if another writer landed after the check) ─▶ post-commit
+pail land     pre-publish ─▶ CAS ─▶ post-rewrite land
+switch, clone, worktree add   post-checkout <prev> <new> 1
+sync                          post-sync <old> <new>
+```
+
+| Hook | Args / stdin | Can refuse | Git counterpart |
+|---|---|---|---|
+| `pre-commit` | none; may restage with `pail add` | yes | pre-commit |
+| `commit-msg` | `$1` = message file, may be edited | yes | commit-msg |
+| `pre-publish` | `<branch> commit\|land`; stdin `<branch> <old> <new>` | yes | pre-push |
+| `post-commit` | none | no | post-commit |
+| `post-rewrite` | `replay\|land`; stdin `<old> <new>` lines | no | post-rewrite |
+| `post-checkout` | `<prev> <new> 1` | no | post-checkout |
+| `post-sync` | `<old> <new>` (and `ORIG_HEAD`) | no | post-merge |
+
+1. **Where:** `core.hooksPath` (relative to the working copy, so checked-in `.githooks`-style
+   dirs work); default `<repo>/hooks`; empty or `/dev/null` turns hooks off. Only files named
+   exactly after a hook and executable run, so helpers like `_lib` can sit beside them.
+2. **Skip:** `pail commit -n/--no-verify` skips pre-commit, commit-msg and pre-publish;
+   `pail land --no-verify` skips pre-publish. post-* hooks always run and never fail a command.
+3. **Environment:** the caller's, plus `PAIL_HOOK=<name>`, `PAIL_HOOK_BRANCH`,
+   `PAIL_HOOK_WORKTREE`, with the running pail first on `PATH`. Pail exports nothing that
+   locates a repository, so a hook's build/test children cannot be retargeted at the real
+   repository (the `GIT_DIR` problem firstlanding's `_git-scrubbed` works around).
+4. **Results:** hook stdout+stderr go to pail's stderr. A refusing hook fails the command with
+   **exit code 3**; `PAIL_TRACE_HOOKS=<file>` appends `{"hook","args","exit","ms"}` per run,
+   so callers tell a hook refusal from any other failure without parsing text.
+5. **Replays:** a commit on a stale base is built on the current head *before* the check, so
+   pre-publish normally sees exactly what is published. Only a writer landing between the
+   check and the CAS causes a replay; it is not re-checked (it adds only others' disjoint
+   changes) and is reported through post-rewrite.
+6. **Helpers for hook scripts:** `pail diff --staged --name-only -z --diff-filter=AM`,
+   `pail rev-parse --show-toplevel`, `pail rev-parse ORIG_HEAD`.
+
+### firstlanding's hooks in pail
+
+| `.githooks/` | In pail |
+|---|---|
+| `pre-commit` (aster format → restage, lint, build, related tests) | `pre-commit`; restage with `pail add`; staged list from `pail diff --staged --name-only -z --diff-filter=ACMRT` |
+| `pre-push` (changed archdev e2e tests, opt-in Dialyzer) | `pre-publish`; base is `$old` from stdin instead of `merge-base HEAD origin/main` |
+| `post-checkout`, `post-merge`, `post-rewrite` → `_clear-stale-expert` | `post-checkout`, `post-sync`, `post-rewrite`; `pail diff --name-only <old> <new>` |
+| `_git-scrubbed` | not needed: pail exports no repository-locating variables |
+| archdev's `post-receive` on the daemon's bare mirror | no server to run it; a watcher on the store's refs and reflog is the equivalent (not built yet) |
+
 ## Benchmarks: pail-bench
 
 `pail-bench` imports a real snapshot (firstlanding: 28.9k files, 460 MB) once, then runs

@@ -68,7 +68,15 @@ enum Cmd {
     /// Discard unstaged changes to paths.
     Restore { paths: Vec<String> },
     /// Commit the stage (`-a` stages tracked changes first).
-    Commit { #[arg(short, long)] message: String, #[arg(short, long)] all: bool },
+    Commit {
+        #[arg(short, long)]
+        message: String,
+        #[arg(short, long)]
+        all: bool,
+        /// Skip the pre-commit, commit-msg and pre-publish hooks.
+        #[arg(short = 'n', long)]
+        no_verify: bool,
+    },
     /// Bring the working copy up to date with its branch.
     Sync,
     /// List branches, or create one at the current base.
@@ -112,6 +120,9 @@ enum Cmd {
         /// Land each commit of the branch, not one squashed commit.
         #[arg(long, conflicts_with = "message")]
         stack: bool,
+        /// Skip the pre-publish hook.
+        #[arg(short = 'n', long)]
+        no_verify: bool,
     },
     /// Show history, with `git log`'s options and output.
     #[command(disable_help_flag = true)]
@@ -144,7 +155,23 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Paths changed between two commits, or base→stage (`--staged`).
-    Diff { from: Option<String>, to: Option<String>, #[arg(long)] staged: bool },
+    Diff {
+        from: Option<String>,
+        to: Option<String>,
+        /// The stage against the base (`--cached` too): `A|M|D <path>` per staged path.
+        #[arg(long, alias = "cached")]
+        staged: bool,
+        /// Paths only.
+        #[arg(long)]
+        name_only: bool,
+        /// NUL-terminated paths (with --name-only), for scripts and hooks. Works for the
+        /// stage and for `<from> [<to>]` alike.
+        #[arg(short = 'z')]
+        nul: bool,
+        /// Only these change kinds, Git-style letters: A (added), M (modified), D (deleted).
+        #[arg(long)]
+        diff_filter: Option<String>,
+    },
     /// List a directory of a commit (`-r` for everything under it, `-l` for sizes).
     Ls {
         /// `<rev>`, `<rev>:<dir>` or a directory of HEAD.
@@ -255,21 +282,6 @@ fn cwd() -> Result<PathBuf> {
 }
 
 /// Resolve a branch name, commit hash or unique hash prefix.
-async fn resolve_rev(repo: &Repo, rev: &str) -> Result<Hash> {
-    if let Some((h, _)) = repo.read_ref(rev).await? {
-        return Ok(h);
-    }
-    if rev.len() == 64 {
-        return Hash::from_hex(rev);
-    }
-    let keys = repo.store.list(&format!("commits/{rev}")).await?;
-    match keys.as_slice() {
-        [(k, _)] => Hash::from_hex(k.trim_start_matches("commits/")),
-        [] => bail!("unknown revision {rev}"),
-        _ => bail!("ambiguous revision {rev}"),
-    }
-}
-
 fn checkout_summary(co: &Checkout) -> String {
     use std::sync::atomic::Ordering::Relaxed;
     let s = &co.stats;
@@ -296,6 +308,10 @@ async fn main() {
         if let Some(f) = e.downcast_ref::<pail::gitlog::Fatal>() {
             eprintln!("fatal: {f}");
             std::process::exit(128);
+        }
+        if let Some(h) = e.downcast_ref::<pail::hooks::HookRefused>() {
+            eprintln!("error: {h}");
+            std::process::exit(pail::hooks::REFUSED_EXIT);
         }
         eprintln!("error: {e:#}");
         std::process::exit(1);
@@ -529,6 +545,7 @@ async fn run(cli: Cli) -> Result<()> {
                 fmt_bytes(down),
                 checkout_summary(&co)
             );
+            wt.hooks().notify("post-checkout", &[&pail::hooks::id(None), &wt.head.base.unwrap().hex(), "1"], None);
         }
         Cmd::Status => {
             let wt = Worktree::open(&cwd()?)?;
@@ -576,12 +593,12 @@ async fn run(cli: Cli) -> Result<()> {
             let spec = wt.resolve(&cwd()?, &paths)?;
             println!("restored {} path(s)", wt.restore(&spec).await?);
         }
-        Cmd::Commit { message, all } => {
+        Cmd::Commit { message, all, no_verify } => {
             let mut wt = Worktree::open(&cwd()?)?;
             if all {
                 wt.add(&[String::new()], true).await?;
             }
-            let out = wt.commit(&message).await?;
+            let (out, message) = wt.commit(&message, no_verify).await?;
             let retried = if out.attempts > 1 { format!(", landed after {} attempts", out.attempts) } else { String::new() };
             println!("[{} {}] {}{retried}", wt.head.branch, out.commit.short(), message.lines().next().unwrap_or(""));
         }
@@ -687,16 +704,30 @@ async fn run(cli: Cli) -> Result<()> {
             let n = wt.switch(&branch).await?;
             println!("switched to {branch} @ {} ({n} path(s) changed)", wt.head.base.unwrap().short());
         }
-        Cmd::Land { branch, onto, stack: true, .. } => {
+        Cmd::Land { branch, onto, stack: true, no_verify, .. } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let onto = match onto {
                 Some(o) => o,
                 None => ctx.default_branch().await?.to_string(),
             };
-            let out = ctx.repo.land_stack(&branch, &onto, &ctx.config.identity("committer")?, &now_date()).await?;
+            let hooks = ctx_hooks(&ctx).with_env("BRANCH", onto.clone());
+            let pre_publish = publish_hook(&hooks, "land");
+            let check: Option<pail::repo::PublishCheck> =
+                if !no_verify && hooks.find("pre-publish").is_some() { Some(&pre_publish) } else { None };
+            let out = ctx.repo.land_stack_with(&branch, &onto, &ctx.config.identity("committer")?, &now_date(), check).await?;
             if out.landed.is_empty() {
                 println!("{branch} has nothing to land");
                 return Ok(());
+            }
+            // Each landed commit names the stack commit it was rewritten from.
+            let mut pairs = String::new();
+            for h in &out.landed {
+                if let Some(from) = ctx.repo.commit_meta(h).await?.meta.get("rewritten.from") {
+                    pairs.push_str(&format!("{from} {}\n", h.hex()));
+                }
+            }
+            if !pairs.is_empty() {
+                hooks.notify("post-rewrite", &["land"], Some(pairs.as_bytes()));
             }
             println!(
                 "landed {} commit(s) from {branch} onto {onto} @ {} ({})",
@@ -708,7 +739,7 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("  {} {}", h.short(), ctx.repo.commit_meta(h).await?.subject());
             }
         }
-        Cmd::Land { branch, onto, message, stack: false } => {
+        Cmd::Land { branch, onto, message, stack: false, no_verify } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let onto = match onto {
                 Some(o) => o,
@@ -739,8 +770,12 @@ async fn run(cli: Cli) -> Result<()> {
             let who = ctx.config.identity("author")?;
             let committer = ctx.config.identity("committer")?;
             let date = now_date();
+            let hooks = ctx_hooks(&ctx).with_env("BRANCH", onto.clone());
+            let pre_publish = publish_hook(&hooks, "land");
+            let check: Option<pail::repo::PublishCheck> =
+                if !no_verify && hooks.find("pre-publish").is_some() { Some(&pre_publish) } else { None };
             let out = repo
-                .commit(CommitRequest {
+                .commit_with(CommitRequest {
                     branch: onto.clone(),
                     base: Some(anc),
                     delta,
@@ -750,24 +785,49 @@ async fn run(cli: Cli) -> Result<()> {
                     committer_date: date,
                     message: msg,
                     meta: BTreeMap::from([("landed.from".into(), branch.clone())]),
-                })
+                }, check)
                 .await?;
             println!("landed {branch} onto {onto} @ {}", out.commit.short());
         }
-        Cmd::Diff { from, to, staged } => {
+        Cmd::Diff { from, to, staged, name_only, nul, diff_filter } => {
             let wt = Worktree::open(&cwd()?)?;
+            // Git's rules: upper-case letters select, lower-case letters exclude.
+            let keep = |c: char| match &diff_filter {
+                None => true,
+                Some(f) if f.chars().any(|x| x.is_ascii_uppercase()) => f.contains(c),
+                Some(f) => !f.contains(c.to_ascii_lowercase()),
+            };
+            use std::io::Write as _;
+            let mut out = std::io::stdout().lock();
+            let mut emit = |code: char, p: &str| -> Result<()> {
+                if keep(code) {
+                    match (name_only, nul) {
+                        (true, true) => write!(out, "{p}\0")?,
+                        (true, false) => writeln!(out, "{p}")?,
+                        (false, _) => writeln!(out, "{code} {p}")?,
+                    }
+                }
+                Ok(())
+            };
             if staged {
+                let base = wt.base_entries().await?;
                 for (p, s) in &wt.stage {
-                    println!("{} {p}", if matches!(s, pail::worktree::Staged::Del) { 'D' } else { 'M' });
+                    let code = match (s, base.contains_key(p)) {
+                        (pail::worktree::Staged::Del, _) => 'D',
+                        (_, true) => 'M',
+                        (_, false) => 'A',
+                    };
+                    emit(code, p)?;
                 }
                 return Ok(());
             }
+            let ctx = Ctx::open(None, cli.repo, ids).await?;
             let a = match from {
-                Some(r) => resolve_rev(&wt.repo, &r).await?,
+                Some(r) => ctx.resolve(&r).await?,
                 None => wt.head.base.context("empty history")?,
             };
             let b = match to {
-                Some(r) => Some(resolve_rev(&wt.repo, &r).await?),
+                Some(r) => Some(ctx.resolve(&r).await?),
                 None => None,
             };
             let changes = match b {
@@ -787,7 +847,7 @@ async fn run(cli: Cli) -> Result<()> {
                     (_, None) => 'D',
                     _ => 'M',
                 };
-                println!("{code} {}", c.path);
+                emit(code, &c.path)?;
             }
         }
         Cmd::Ls { target, recursive, long } => {
@@ -1003,6 +1063,7 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("  … and {} more", s.paths.len() - 12);
                 }
             }
+            wt.hooks().notify("post-checkout", &[&pail::hooks::id(None), &wt.head.base.unwrap().hex(), "1"], None);
         }
         Cmd::Worktree(WtCmd::List) => {
             let ctx = Ctx::open(None, cli.repo, ids).await?;
@@ -1060,4 +1121,22 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Hooks for a command run through a context: the working copy's, else the repository's
+/// (run in the repository directory); none for a bare `--store`.
+fn ctx_hooks(ctx: &Ctx) -> pail::hooks::Hooks {
+    match (&ctx.local, &ctx.worktree) {
+        (Some(local), Some(root)) => pail::hooks::Hooks::new(&ctx.config, &local.dir, root),
+        (Some(local), None) => pail::hooks::Hooks::new(&ctx.config, &local.dir, &local.dir),
+        (None, _) => pail::hooks::Hooks::off(&cwd().unwrap_or_default()),
+    }
+}
+
+/// The pre-publish hook as a publish check: `<branch> <mode>`, stdin `<branch> <old> <new>`.
+fn publish_hook<'a>(hooks: &'a pail::hooks::Hooks, mode: &'a str) -> impl Fn(&pail::repo::Publish) -> Result<()> + Sync + 'a {
+    move |p| {
+        let line = format!("{} {} {}\n", p.branch, pail::hooks::id(p.old), p.new.hex());
+        hooks.run("pre-publish", &[&p.branch, mode], Some(line.as_bytes())).map(|_| ())
+    }
 }

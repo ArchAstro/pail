@@ -620,3 +620,164 @@ fn inspect_serves_the_object_graph() {
     assert!(page["entries"].is_array() || page["children"].is_array());
     child.kill().unwrap();
 }
+
+fn hook(dir: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = dir.join(name);
+    write(&p, &format!("#!/bin/bash\nset -euo pipefail\n{body}\n"));
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The hook patterns firstlanding's archdev workflow relies on, in pail's model: a checked-in
+/// hooks dir (core.hooksPath), a formatting pre-commit that restages what it formats, a
+/// refusing pre-commit, commit-msg trailers, pre-publish seeing the exact commit before it is
+/// published, post-checkout/post-sync with ORIG_HEAD, post-rewrite on replays and landings,
+/// --no-verify, exit code 3 and the trace file.
+#[test]
+fn hooks_follow_the_commit_and_publish_flow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "alice"]);
+    let a = t.join("alice");
+    let log = t.join("hooks.log");
+    let trace = t.join("trace.jsonl");
+    let hooks = a.join(".pailhooks");
+    let l = log.display();
+    // A formatter: upper-cases staged files and restages them, refuses `bad.txt`.
+    hook(&hooks, "pre-commit", &format!(r#"
+echo "pre-commit $PAIL_HOOK $PAIL_HOOK_BRANCH dir=${{PAIL_DIR:-unset}} cwd=$(pwd)" >> {l}
+while IFS= read -r -d '' f; do
+  [[ "$f" == bad.txt ]] && {{ echo "bad.txt is not allowed" >&2; exit 1; }}
+  tr a-z A-Z < "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  pail add "$f"
+done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
+    hook(&hooks, "commit-msg", &format!("echo commit-msg >> {l}\nprintf '\\nHook-Checked: yes\\n' >> \"$1\""));
+    hook(&hooks, "pre-publish", &format!(r#"read -r branch old new; echo "pre-publish $1 $2 $branch $old $new" >> {l}
+[[ "${{BLOCK_PUBLISH:-0}}" != 1 ]]"#));
+    hook(&hooks, "post-commit", &format!("echo post-commit >> {l}"));
+    hook(&hooks, "post-checkout", &format!("echo \"post-checkout $1 $2 $3 orig=$(pail rev-parse ORIG_HEAD 2>/dev/null || echo none)\" >> {l}"));
+    hook(&hooks, "post-sync", &format!("echo \"post-sync $1 $2\" >> {l}"));
+    hook(&hooks, "post-rewrite", &format!("echo \"post-rewrite $1 $(cat | tr '\\n' ';')\" >> {l}"));
+    hook(&hooks, "_helper", "exit 1"); // not a hook name: never run
+    pail(&a, &["config", "core.hooksPath", ".pailhooks"]);
+    // Checked in, like firstlanding's .githooks.
+    pail(&a, &["add", ".pailhooks"]);
+    pail(&a, &["commit", "--no-verify", "-m", "hooks"]);
+    std::fs::write(&log, "").unwrap();
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    let clear_log = || std::fs::write(&log, "").unwrap();
+
+    // 1. pre-commit formats and restages; commit-msg adds a trailer; pre-publish sees the
+    //    exact commit that is then published.
+    write(&a.join("src/a.txt"), "hello");
+    pail(&a, &["add", "src"]);
+    let out = cmd(&a, &["commit", "-m", "add a"]).env("PAIL_TRACE_HOOKS", &trace).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(pail(&a, &["cat", "src/a.txt"]), "HELLO");
+    assert_eq!(std::fs::read_to_string(a.join("src/a.txt")).unwrap(), "HELLO");
+    assert!(pail(&a, &["status"]).contains("nothing to commit"));
+    let msg = pail(&a, &["log", "-1", "--format=%B"]);
+    assert!(msg.contains("add a\n\nHook-Checked: yes"), "{msg}");
+    let head = pail(&a, &["rev-parse", "HEAD"]).trim().to_string();
+    let h = read_log();
+    assert!(h.contains(&format!("pre-commit pre-commit main dir=unset cwd={}", a.display())), "{h}");
+    assert!(h.contains(&format!("pre-publish main commit main {} {head}", "0".repeat(64))) || h.contains(&format!("{head}\n")), "{h}");
+    let order: Vec<&str> = h.lines().map(|l| l.split(' ').next().unwrap()).collect();
+    assert_eq!(order, ["pre-commit", "commit-msg", "pre-publish", "post-commit"], "{h}");
+    let tr = std::fs::read_to_string(&trace).unwrap();
+    assert!(tr.lines().any(|l| l.contains(r#""hook":"pre-commit""#) && l.contains(r#""exit":0"#)), "{tr}");
+
+    // 2. A refusing pre-commit: exit code 3, nothing published, the stage kept.
+    write(&a.join("bad.txt"), "x");
+    pail(&a, &["add", "bad.txt"]);
+    let out = cmd(&a, &["commit", "-m", "bad"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("bad.txt is not allowed"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("pre-commit hook refused (exit 1)"));
+    assert_eq!(pail(&a, &["rev-parse", "HEAD"]).trim(), head);
+    assert!(pail(&a, &["status"]).contains("A bad.txt"));
+
+    // 3. A refusing pre-publish: the commit was written but never published.
+    pail(&a, &["unstage", "bad.txt"]);
+    std::fs::remove_file(a.join("bad.txt")).unwrap();
+    write(&a.join("src/b.txt"), "b");
+    pail(&a, &["add", "src/b.txt"]);
+    clear_log();
+    let out = cmd(&a, &["commit", "-m", "b"]).env("BLOCK_PUBLISH", "1").output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(pail(&a, &["rev-parse", "main"]).trim(), head);
+    assert!(!read_log().contains("post-commit"));
+
+    // 4. --no-verify skips pre-commit, commit-msg and pre-publish (post-commit still runs).
+    clear_log();
+    let out = cmd(&a, &["commit", "-n", "-m", "b unchecked"]).env("BLOCK_PUBLISH", "1").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // Formatted and restaged by the pre-commit of the refused attempt above.
+    assert_eq!(pail(&a, &["cat", "src/b.txt"]), "B");
+    assert_eq!(read_log(), "post-commit\n");
+    let head2 = pail(&a, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // 5. post-checkout on switch (with ORIG_HEAD), then on clone and worktree add.
+    pail(&a, &["switch", "-c", "feature"]);
+    write(&a.join("src/f.txt"), "f");
+    pail(&a, &["add", "src/f.txt"]);
+    pail(&a, &["commit", "-n", "-m", "f"]);
+    let feature = pail(&a, &["rev-parse", "HEAD"]).trim().to_string();
+    clear_log();
+    pail(&a, &["switch", "main"]);
+    assert_eq!(read_log(), format!("post-checkout {feature} {head2} 1 orig={feature}\n"));
+
+    // 6. Another writer moves main: bob's commit is replayed (post-rewrite replay), and
+    //    alice's sync reports post-sync with the old and new base.
+    pail(&t, &["clone", &store, "bob"]);
+    let b = t.join("bob");
+    write(&b.join("other.txt"), "o");
+    pail(&b, &["add", "other.txt"]);
+    pail(&b, &["commit", "-m", "other"]);
+    let bob_head = pail(&b, &["rev-parse", "HEAD"]).trim().to_string();
+    write(&a.join("src/c.txt"), "c");
+    pail(&a, &["add", "src/c.txt"]);
+    clear_log();
+    pail(&a, &["commit", "-m", "c on a stale base"]);
+    let published = pail(&a, &["rev-parse", "HEAD"]).trim().to_string();
+    let h = read_log();
+    // The commit is built on bob's head before it is checked, so pre-publish saw exactly
+    // what was published and nothing was rewritten (a race after the check is covered in
+    // tests/repo.rs).
+    assert!(h.contains(&format!("pre-publish main commit main {bob_head} {published}")), "{h}");
+    assert!(!h.contains("post-rewrite"), "{h}");
+    assert_eq!(pail(&a, &["rev-parse", "ORIG_HEAD"]).trim(), head2);
+    write(&b.join("other2.txt"), "o2");
+    pail(&b, &["add", "other2.txt"]);
+    pail(&b, &["commit", "-m", "other2"]);
+    let tip = pail(&b, &["rev-parse", "HEAD"]).trim().to_string();
+    clear_log();
+    pail(&a, &["sync"]);
+    assert_eq!(read_log(), format!("post-sync {published} {tip}\n"));
+
+    // 7. land --stack runs pre-publish (mode land) once and reports the rewrite.
+    clear_log();
+    pail(&a, &["land", "feature", "--stack", "--onto", "main"]);
+    let h = read_log();
+    assert!(h.contains(&format!("pre-publish main land main {tip} ")), "{h}");
+    assert!(h.contains(&format!("post-rewrite land {feature} ")), "{h}");
+    // A squash land is guarded the same way.
+    pail(&a, &["switch", "-c", "squash"]);
+    write(&a.join("src/s.txt"), "s");
+    pail(&a, &["add", "src/s.txt"]);
+    pail(&a, &["commit", "-n", "-m", "s"]);
+    let main_tip = pail(&a, &["rev-parse", "main"]).trim().to_string();
+    let out = cmd(&a, &["land", "squash", "--onto", "main"]).env("BLOCK_PUBLISH", "1").output().unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(pail(&a, &["rev-parse", "main"]).trim(), main_tip);
+    pail(&a, &["land", "squash", "--onto", "main", "--no-verify"]);
+    pail(&a, &["switch", "main"]);
+
+    // 8. Hooks off: an empty core.hooksPath.
+    pail(&a, &["config", "core.hooksPath", ""]);
+    write(&a.join("bad.txt"), "x");
+    pail(&a, &["add", "bad.txt"]);
+    pail(&a, &["commit", "-m", "hooks off"]);
+}

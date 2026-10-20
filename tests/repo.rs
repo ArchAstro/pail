@@ -339,3 +339,47 @@ async fn landing_a_stack_is_one_cas() {
     assert!(out.fast_forward && out.tip == ff_tip);
     assert_eq!(repo.store.stats.cas.load(Relaxed) - before, 1);
 }
+
+/// The publish check sees the first fully written commit; when another writer lands between
+/// the check and the CAS, the change is replayed without asking again and the outcome names
+/// the checked commit (what `post-rewrite replay` reports). A failing check publishes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_check_runs_once_before_the_cas() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", dir.path().join("bucket").display());
+    let repo = Repo::with_store(Store::open(&url).unwrap(), None);
+    let d0 = put_files(&repo, &[("a.txt", "a")]).await;
+    let c0 = repo.commit(req("main", None, d0, "init")).await.unwrap().commit;
+
+    // A refusing check: nothing published.
+    let refuse = |_: &pail::repo::Publish| -> anyhow::Result<()> { anyhow::bail!("no") };
+    let d = put_files(&repo, &[("b.txt", "b")]).await;
+    assert!(repo.commit_with(req("main", Some(c0), d.clone(), "b"), Some(&refuse)).await.is_err());
+    assert_eq!(repo.read_ref("main").await.unwrap().unwrap().0, c0);
+
+    // A check during which another writer lands on main.
+    let seen = std::sync::Mutex::new(vec![]);
+    let race = |p: &pail::repo::Publish| -> anyhow::Result<()> {
+        seen.lock().unwrap().push(p.clone());
+        let url = url.clone();
+        std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let other = Repo::with_store(Store::open(&url).unwrap(), None);
+                let d = put_files(&other, &[("c.txt", "c")]).await;
+                other.commit(req("main", Some(c0), d, "c")).await.unwrap();
+            })
+        })
+        .join()
+        .unwrap();
+        Ok(())
+    };
+    let out = repo.commit_with(req("main", Some(c0), d, "b"), Some(&race)).await.unwrap();
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(seen.len(), 1, "checked once, not per attempt");
+    assert_eq!(seen[0].old, Some(c0));
+    assert_eq!(out.replayed_from, Some(seen[0].new));
+    assert_ne!(out.commit, seen[0].new);
+    assert_eq!(out.attempts, 2);
+    let files: Vec<String> = repo.entries(repo.commit_obj(&out.commit).await.unwrap().root).await.unwrap().into_iter().map(|e| e.path).collect();
+    assert_eq!(files, ["a.txt", "b.txt", "c.txt"]);
+}

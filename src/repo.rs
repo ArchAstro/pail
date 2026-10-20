@@ -111,7 +111,23 @@ pub struct CommitOutcome {
     pub pages_written: usize,
     pub files: u64,
     pub bytes: u64,
+    /// The commit the publish check approved, when the published one is a replay of it.
+    pub replayed_from: Option<Hash>,
 }
+
+/// A ref move about to be published: `branch` from `old` to `new`, all objects written.
+#[derive(Debug, Clone)]
+pub struct Publish {
+    pub branch: String,
+    pub old: Option<Hash>,
+    pub new: Hash,
+}
+
+/// Called once with the first fully written commit (or landed stack) before the CAS that
+/// would publish it; an error aborts with nothing published. A lost race replays the same
+/// change on the new head without asking again: the replay only adds others' disjoint
+/// changes, and re-running a check (often a test suite) per lost race would starve writers.
+pub type PublishCheck<'a> = &'a (dyn Fn(&Publish) -> Result<()> + Sync);
 
 pub struct Repo {
     pub store: Store,
@@ -773,7 +789,20 @@ impl Repo {
     /// `onto`) are skipped, so landing is idempotent and a growing stack lands incrementally.
     /// A stack commit touching a path `onto` changed meanwhile is a conflict; nothing moves.
     pub async fn land_stack(&self, branch: &str, onto: &str, committer: &str, date: &str) -> Result<LandOutcome> {
+        self.land_stack_with(branch, onto, committer, date, None).await
+    }
+
+    /// [`Repo::land_stack`], asking `check` before the first publish attempt.
+    pub async fn land_stack_with(
+        &self,
+        branch: &str,
+        onto: &str,
+        committer: &str,
+        date: &str,
+        check: Option<PublishCheck<'_>>,
+    ) -> Result<LandOutcome> {
         validate_branch(onto)?;
+        let mut checked = false;
         let started = std::time::Instant::now();
         let mut attempts = 0;
         loop {
@@ -842,6 +871,12 @@ impl Repo {
                 }
                 (parent, landed, false)
             };
+            if !checked {
+                if let Some(check) = check {
+                    check(&Publish { branch: onto.to_string(), old: Some(onto_tip), new: new_tip })?;
+                }
+                checked = true;
+            }
             // The one write that publishes the stack.
             match self.advance_ref(onto, Some(&version), new_tip).await {
                 Ok(Cas::Ok(_)) => {
@@ -865,7 +900,13 @@ impl Repo {
     /// Commit a delta to a branch: upload immutable objects, then compare-and-swap the ref.
     /// If the branch moved, the delta is replayed on the new head when no path overlaps.
     pub async fn commit(&self, req: CommitRequest) -> Result<CommitOutcome> {
+        self.commit_with(req, None).await
+    }
+
+    /// [`Repo::commit`], asking `check` before the first publish attempt.
+    pub async fn commit_with(&self, req: CommitRequest, check: Option<PublishCheck<'_>>) -> Result<CommitOutcome> {
         validate_branch(&req.branch)?;
+        let mut checked: Option<Hash> = None;
         let base_root = self.root_of(req.base).await?;
         let mut attempts = 0;
         let started = std::time::Instant::now();
@@ -901,6 +942,13 @@ impl Repo {
             let tree = self.write_commit(parent, &req.delta, &fields).await?;
             pages_written += tree.pages;
             let ch = tree.commit;
+            if checked.is_none() {
+                if let Some(check) = check {
+                    check(&Publish { branch: req.branch.clone(), old: parent, new: ch })?;
+                }
+                checked = Some(ch);
+            }
+            let replayed_from = checked.filter(|c| *c != ch);
             let body = Bytes::from(serde_json::to_vec(&RefValue { commit: ch })?);
             match self.store.cas(&ref_key(&req.branch), body, expected.as_ref()).await {
                 Ok(Cas::Ok(version)) => {
@@ -911,6 +959,7 @@ impl Repo {
                         pages_written,
                         files: tree.files,
                         bytes: tree.bytes,
+                        replayed_from,
                     });
                 }
                 Ok(Cas::Conflict) => {}
@@ -925,6 +974,7 @@ impl Repo {
                                 pages_written,
                                 files: tree.files,
                                 bytes: tree.bytes,
+                                replayed_from,
                             });
                         }
                     }
