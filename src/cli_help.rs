@@ -1,0 +1,222 @@
+//! Help text: the grouped top-level page and each command's examples (`pail <cmd> --help`).
+//! Every subcommand must appear in [`TOP`]; a test checks that.
+
+pub const TOP: &str = "\
+{before-help}pail {version} — version control that lives in a bucket
+
+  in the store (s3://, gs://, file://)              on this machine
+  refs/<branch> ─▶ commit ─▶ pages ─▶ packs         .pail/  stage, caches, commit graph
+    one CAS        immutable, named by BLAKE3       working copies (copy-on-write)
+
+  A commit is published the moment it is made: there is no push.
+
+{usage-heading} {usage}
+
+Start
+  init <store>              Create a repository in a store
+  clone <store> [dir]       Check out a branch into a working copy (--bare: no files)
+
+Everyday
+  status                    Staged, unstaged and untracked changes
+  add <paths>|-A            Stage changes
+  unstage <paths>           Take paths off the stage
+  restore <paths>           Discard unstaged changes
+  commit -m <msg>           Commit and publish the stage (-a: stage tracked changes first)
+  sync                      Fast-forward the working copy to its branch's head
+  diff [<from> [<to>]]      Paths changed (--staged: the stage)
+
+Branches and landing
+  branch [<name>]           List, create (-d delete, --default the default branch)
+  switch <branch>           Switch the working copy (-c: create at the current base)
+  land <branch>             Land onto the default branch: squashed, or --stack commit by commit
+
+History (Git's interface and output)
+  log, show                 History and commits, as `git log` / `git show`
+  cat-file, ls-tree         Objects with Git ids, as `git cat-file` / `git ls-tree`
+  rev-parse                 Resolve revisions, as `git rev-parse`
+  ls [<rev>:<dir>]          List a directory of a commit
+  cat [<rev>:]<path>        Print a file from a commit
+
+Working copies and caches
+  worktree add|list|remove  More working copies sharing contents and build output
+  fetch [<revs>]            Fill the local content cache (as `git fetch` for a bare repo)
+  cache stats|prune         Inspect or trim the local content cache
+
+Repository
+  config [<key> [<value>]]  Options, as `git config` (user.name, core.hooksPath, …)
+  gc                        Delete unreachable objects past a grace period
+  inspect                   Browse the physical data model in a browser
+
+Shell and agents
+  completion <shell>        Shell completion with live branch names (bash, zsh, fish, …)
+  help <command>            A command's full help and examples (also `<command> --help`)
+
+Options:
+{options}
+
+Examples:
+  pail clone s3://acme/app && cd app
+  pail add -A && pail commit -m \"Fix the parser\"        # committed and published
+  pail switch -c fix && pail commit -am \"wip\" && pail land fix --stack
+  pail log --oneline -20 -- src/
+
+Exit codes: 0 ok · 1 error · 2 usage · 3 a hook refused · 4 conflict (sync, then retry)
+· 128 fatal from a Git-compatible command.
+Hooks: see `pail help commit`. Agents: `pail --skill` prints a skill file.
+{after-help}";
+
+pub const INIT: &str = "\
+Examples:
+  pail init s3://acme/app
+  pail init gs://acme-vcs/app --branch trunk
+  pail init file:///tmp/scratch
+
+The store is the whole repository: refs, commits, manifest pages and packs. Nothing else
+needs to run; any number of machines can clone and commit concurrently.";
+
+pub const CLONE: &str = "\
+Examples:
+  pail clone s3://acme/app                 # ./app on the default branch
+  pail clone s3://acme/app work -b feature
+  pail clone --bare s3://acme/app          # ./app.pail: caches for reading, a home for worktrees
+
+The working copy's .pail/ holds the stage, the content cache and the commit graph.";
+
+pub const ADD: &str = "\
+Examples:
+  pail add src/ README.md
+  pail add -A                              # everything, including new and deleted files
+
+`add` snapshots the content: later edits are not committed until added again.";
+
+pub const COMMIT: &str = "\
+Examples:
+  pail commit -m \"Fix the parser\"
+  pail commit -am \"Fix the parser\"         # stage tracked changes first
+  pail commit -n -m \"wip\"                  # skip pre-commit, commit-msg, pre-publish
+
+Committing publishes: the branch moves in one atomic write (CAS). If another writer moved
+the branch since your base and touched different paths, your change is replayed on top of
+theirs and their changes appear in your working copy. Overlapping paths fail with exit 4:
+`pail sync`, then commit again.
+
+Hooks run in this order (see core.hooksPath):
+  pre-commit → commit-msg <file> → [commit written] → pre-publish → publish
+  → post-rewrite replay (only if another writer landed after the check) → post-commit
+A refusing hook fails the command with exit code 3; PAIL_TRACE_HOOKS=<file> logs each run.";
+
+pub const SYNC: &str = "\
+Brings in commits other writers published, updating files you have not changed. Refuses if
+an incoming change touches a path you changed locally. Runs the post-sync hook and records
+ORIG_HEAD.";
+
+pub const BRANCH: &str = "\
+Examples:
+  pail branch                              # list, * marks the working copy's branch
+  pail branch feature                      # create at the current base
+  pail branch -d feature
+  pail branch --default                    # show the store's default branch
+  pail branch --default trunk              # change it";
+
+pub const SWITCH: &str = "\
+Examples:
+  pail switch feature
+  pail switch -c fix                       # create `fix` at the current base and switch
+
+Requires a clean working copy. Runs post-checkout <prev> <new> 1 and records ORIG_HEAD.";
+
+pub const LAND: &str = "\
+Examples:
+  pail land feature                        # one squashed commit onto the default branch
+  pail land feature --stack                # every commit, in order, in one atomic write
+  pail land fix --stack --onto release
+  pail land feature -n                     # skip pre-publish
+
+--stack fast-forwards when it can and otherwise replays the stack on the new head; landing
+a branch stacked on another lands both. A --stack landing is idempotent: after a failure,
+run it again. Overlapping changes fail with exit 4.";
+
+pub const GIT_READS: &str = "\
+Takes Git's options and prints Git's output (byte for byte) for pail history; Git's
+documentation applies. --ids git prints the Git ids of commits mirrored from Git.
+  pail log --oneline -20
+  pail log -p --stat -- src/parser.rs
+  pail log --format='%h %an %s' main..feature
+  pail show HEAD~2 --name-status
+  pail cat-file -p HEAD:README.md
+  pail ls-tree -r HEAD src/
+  pail rev-parse --short HEAD ORIG_HEAD";
+
+pub const DIFF: &str = "\
+Examples:
+  pail diff                                # what HEAD changed against its parent
+  pail diff main feature
+  pail diff --staged                       # A|M|D <path> for the stage
+  pail diff --staged --name-only -z --diff-filter=AM   # for hooks: added or modified, NUL-separated";
+
+pub const LS: &str = "\
+Examples:
+  pail ls                                  # top of HEAD
+  pail ls -rl main:src                     # everything under src/ with sizes";
+
+pub const CAT: &str = "\
+Examples:
+  pail cat README.md                       # from HEAD
+  pail cat feature:src/main.rs";
+
+pub const WORKTREE: &str = "\
+Examples:
+  pail worktree add ../app-fix -b fix      # new branch at the current base
+  pail worktree add ../app-main --branch main
+  pail worktree list
+  pail worktree remove ../app-fix
+
+Files are copy-on-write clones of one shared content cache, and ignored build output
+(target/, node_modules/, …) is cloned from the current working copy, so a new worktree costs
+almost no disk and starts warm.";
+
+pub const FETCH: &str = "\
+Examples:
+  pail fetch                               # every file of HEAD
+  pail fetch --all                         # every branch tip
+  pail fetch main --history -n 500         # every file version in main's last 500 commits";
+
+pub const CACHE: &str = "\
+Examples:
+  pail cache stats
+  pail cache prune --max-size 10G";
+
+pub const CONFIG: &str = "\
+Git's config format and layering: the repository's .pail/config, then --global
+(~/.config/pail/config). Keys pail reads:
+  user.name, user.email          identity (or PAIL_AUTHOR=\"Name <email>\")
+  init.defaultBranch             branch for `pail init`
+  core.hooksPath                 hooks directory (relative to the working copy; empty: off)
+  core.pager, color.ui, log.date, log.abbrevCommit, format.pretty, …   as Git
+
+Examples:
+  pail config --global user.name \"Ada Lovelace\"
+  pail config core.hooksPath .githooks
+  pail config -l --show-scope";
+
+pub const GC: &str = "\
+Deletes objects no branch reaches, only once they are older than the grace period, so a
+commit in flight is never collected.
+  pail gc --dry-run
+  pail gc --grace-hours 24";
+
+pub const INSPECT: &str = "\
+Opens an object graph of the repository: branches, commits, manifest pages, packs and chunks,
+with the logical file tree beside it. Click a folder to see which objects store it.
+  pail inspect
+  pail inspect --addr 127.0.0.1:9000 --no-open";
+
+pub const COMPLETION: &str = "\
+Prints a script that asks pail for completions as you type, so branch names (from the live
+store) and config keys complete, besides commands and options.
+
+  bash   echo 'source <(pail completion bash)' >> ~/.bashrc
+  zsh    echo 'source <(pail completion zsh)' >> ~/.zshrc
+  fish   pail completion fish > ~/.config/fish/completions/pail.fish
+  elvish pail completion elvish >> ~/.config/elvish/rc.elv
+  powershell  pail completion powershell >> $PROFILE";

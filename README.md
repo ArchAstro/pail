@@ -108,6 +108,16 @@ pail --repo repo.pail log --oneline               # or cd repo.pail; or PAIL_DIR
 A commit that loses the CAS race is replayed on the new head when the paths don't overlap.
 If they overlap, the commit stops with a conflict.
 
+Help, agents and completion:
+
+1. `pail --help` groups the commands; `pail help <command>` (or `<command> --help`) gives
+   options and examples. Exit codes: 0 ok, 1 error, 2 usage, 3 a hook refused, 4 conflict
+   (`pail sync`, then retry), 128 fatal from a Git-compatible command.
+2. `pail --skill` prints a SKILL.md for coding agents (rules that differ from Git: commit
+   publishes, no merges, exit codes, safety).
+3. `pail completion bash|zsh|fish|elvish|powershell` prints a script that asks pail as you
+   type, so branch names come from the live store: `source <(pail completion zsh)`.
+
 ### Stacks
 
 Commit as often as you like on a branch, then land the whole stack on main:

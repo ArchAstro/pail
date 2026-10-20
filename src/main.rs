@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
 use pail::hash::Hash;
 use pail::objects::now_date;
 use pail::repo::{CommitRequest, Delta, Repo};
@@ -11,25 +12,35 @@ use pail::local::LocalRepo;
 use pail::config::{Config, Scope};
 use pail::worktree::{Checkout, Worktree, seed_ignored};
 
+mod cli_help;
+mod complete;
+
 #[derive(Parser)]
-#[command(name = "pail", version, about = "Version control that lives in a bucket")]
+#[command(
+    name = "pail",
+    version,
+    about = "Version control that lives in a bucket",
+    help_template = cli_help::TOP,
+    disable_help_subcommand = true
+)]
 struct Cli {
-    /// Run against a store (bare repository) instead of the working copy: s3://, gs://,
-    /// file:// or a directory path. Also `PAIL_STORE`.
+    /// Print the agent skill file (SKILL.md) and exit.
+    #[arg(long)]
+    skill: bool,
+    /// Read a store directly (s3://, gs://, file://), with no local state. Also PAIL_STORE.
     #[arg(long)]
     store: Option<String>,
-    /// Use this local repository (a bare `*.pail` directory or a working copy), as
-    /// `git --git-dir`. Also `PAIL_DIR`.
+    /// Use this repository (a bare *.pail dir or a working copy), as `git --git-dir`. Also PAIL_DIR.
     #[arg(long)]
     repo: Option<PathBuf>,
-    /// Commit ids to print: pail's, or the Git ids of mirrored commits.
+    /// Print pail's commit ids, or the Git ids of mirrored commits.
     #[arg(long, value_enum, default_value = "pail")]
     ids: IdsArg,
     /// Don't pipe output into a pager.
     #[arg(long, short = 'P')]
     no_pager: bool,
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
@@ -40,16 +51,21 @@ enum IdsArg {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a repository in a store (s3://, gs://, file://) with an empty `main`.
+    /// Create a repository in a store (s3://, gs://, file://) with an empty default branch.
+    #[command(after_long_help = cli_help::INIT)]
     Init {
+        /// Where the repository lives: s3://bucket/prefix, gs://bucket/prefix or file:///path.
         store: String,
         /// The default branch (else `init.defaultBranch`, else `main`).
         #[arg(long)]
         branch: Option<String>,
     },
     /// Check out a branch into a new directory.
+    #[command(after_long_help = cli_help::CLONE)]
     Clone {
+        /// The store: s3://bucket/prefix, gs://bucket/prefix, file:///path or a directory.
         store: String,
+        /// Directory to create (default: the store's last path segment).
         dir: Option<PathBuf>,
         /// Branch to check out (default: the store's default branch).
         #[arg(short, long)]
@@ -62,59 +78,100 @@ enum Cmd {
     /// Show staged, unstaged and untracked changes.
     Status,
     /// Stage changes (`-A` for everything).
-    Add { paths: Vec<String>, #[arg(short = 'A', long)] all: bool },
-    /// Remove paths from the stage.
-    Unstage { paths: Vec<String> },
-    /// Discard unstaged changes to paths.
-    Restore { paths: Vec<String> },
-    /// Commit the stage (`-a` stages tracked changes first).
+    #[command(after_long_help = cli_help::ADD)]
+    Add {
+        /// Files or directories (relative to the current directory).
+        paths: Vec<String>,
+        /// Stage every change in the working copy, including new and deleted files.
+        #[arg(short = 'A', long)]
+        all: bool,
+    },
+    /// Remove paths from the stage (their files are untouched).
+    Unstage {
+        /// Files or directories to unstage.
+        paths: Vec<String>,
+    },
+    /// Discard unstaged changes to paths (back to the staged or committed version).
+    Restore {
+        /// Files or directories to restore.
+        paths: Vec<String>,
+    },
+    /// Commit the stage and publish it in one atomic write (`-a` stages tracked changes first).
+    #[command(after_long_help = cli_help::COMMIT)]
     Commit {
+        /// The commit message.
         #[arg(short, long)]
         message: String,
+        /// Stage changes to tracked files first (not new files).
         #[arg(short, long)]
         all: bool,
         /// Skip the pre-commit, commit-msg and pre-publish hooks.
         #[arg(short = 'n', long)]
         no_verify: bool,
     },
-    /// Bring the working copy up to date with its branch.
+    /// Bring the working copy up to date with its branch (a fast-forward pull).
+    #[command(after_long_help = cli_help::SYNC)]
     Sync,
     /// List branches, or create one at the current base.
+    #[command(after_long_help = cli_help::BRANCH)]
     Branch {
+        /// Branch to create (or delete with -d, or make the default with --default).
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
         name: Option<String>,
+        /// Delete the branch.
         #[arg(short, long)]
         delete: bool,
         /// Show the store's default branch, or with a name make it the default.
         #[arg(long)]
         default: bool,
     },
-    /// Get and set options, as `git config` (`user.name`, `user.email`, `init.defaultBranch`,
-    /// `core.pager`, `color.ui`, `log.date`, …): the repository's file, or `--global`.
+    /// Get and set options, as `git config`: the repository's file, or `--global`.
+    #[command(after_long_help = cli_help::CONFIG)]
     Config {
+        /// Use the user's file (~/.config/pail/config).
         #[arg(long)]
         global: bool,
+        /// Use the repository's file (the default for writes).
         #[arg(long)]
         local: bool,
+        /// List every setting.
         #[arg(short = 'l', long)]
         list: bool,
+        /// Print the value of a key.
         #[arg(long)]
         get: bool,
+        /// Remove a key.
         #[arg(long)]
         unset: bool,
+        /// Show which file each setting comes from.
         #[arg(long)]
         show_scope: bool,
+        /// A key such as user.name or core.hooksPath.
+        #[arg(add = ArgValueCandidates::new(complete::config_keys))]
         key: Option<String>,
+        /// The value to set.
         value: Option<String>,
     },
-    /// Switch to another branch (`-c` creates it at the current base).
-    Switch { branch: String, #[arg(short, long)] create: bool },
-    /// Land a branch onto another (default main): squashed into one commit, or with --stack
-    /// every commit in order (fast-forward, or replayed on the new head), atomically.
+    /// Switch the working copy to another branch (`-c` creates it at the current base).
+    #[command(after_long_help = cli_help::SWITCH)]
+    Switch {
+        /// The branch to switch to (or create with -c).
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
+        branch: String,
+        /// Create the branch at the current base first.
+        #[arg(short, long)]
+        create: bool,
+    },
+    /// Land a branch onto the default branch: squashed, or with --stack commit by commit.
+    #[command(after_long_help = cli_help::LAND)]
     Land {
+        /// The branch to land.
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
         branch: String,
         /// Branch to land onto (default: the store's default branch).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(complete::branches))]
         onto: Option<String>,
+        /// Message of the squashed commit (default: the branch's subjects).
         #[arg(short, long)]
         message: Option<String>,
         /// Land each commit of the branch, not one squashed commit.
@@ -125,38 +182,48 @@ enum Cmd {
         no_verify: bool,
     },
     /// Show history, with `git log`'s options and output.
+    #[command(after_long_help = cli_help::GIT_READS)]
     #[command(disable_help_flag = true)]
     Log {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
         args: Vec<String>,
     },
     /// Show commits (with patches), trees or file contents, as `git show`.
+    #[command(after_long_help = cli_help::GIT_READS)]
     #[command(disable_help_flag = true)]
     Show {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
         args: Vec<String>,
     },
     /// Object contents, type or size, as `git cat-file` (`--batch` reads names from stdin).
+    #[command(after_long_help = cli_help::GIT_READS)]
     #[command(name = "cat-file", disable_help_flag = true)]
     CatFile {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
         args: Vec<String>,
     },
     /// List a tree with Git modes and object ids, as `git ls-tree`.
+    #[command(after_long_help = cli_help::GIT_READS)]
     #[command(name = "ls-tree", disable_help_flag = true)]
     LsTree {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
         args: Vec<String>,
     },
     /// Resolve revisions and object names to ids, as `git rev-parse`.
+    #[command(after_long_help = cli_help::GIT_READS)]
     #[command(name = "rev-parse", disable_help_flag = true)]
     RevParse {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true, num_args = 0..)]
         args: Vec<String>,
     },
     /// Paths changed between two commits, or base→stage (`--staged`).
+    #[command(after_long_help = cli_help::DIFF)]
     Diff {
+        /// A revision (default: HEAD against its parent).
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
         from: Option<String>,
+        /// A second revision: compare `from` with it.
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
         to: Option<String>,
         /// The stage against the base (`--cached` too): `A|M|D <path>` per staged path.
         #[arg(long, alias = "cached")]
@@ -173,28 +240,44 @@ enum Cmd {
         diff_filter: Option<String>,
     },
     /// List a directory of a commit (`-r` for everything under it, `-l` for sizes).
+    #[command(after_long_help = cli_help::LS)]
     Ls {
         /// `<rev>`, `<rev>:<dir>` or a directory of HEAD.
         target: Option<String>,
+        /// Everything under the directory.
         #[arg(short, long)]
         recursive: bool,
+        /// With sizes.
         #[arg(short, long)]
         long: bool,
     },
     /// Delete unreachable objects older than the grace period.
-    Gc { store: Option<String>, #[arg(long, default_value_t = 168.0)] grace_hours: f64, #[arg(long)] dry_run: bool },
-    /// Browse the repository's physical data model in a browser: commits, manifest pages,
-    /// packs and chunks, and where every file's bytes are stored.
+    #[command(after_long_help = cli_help::GC)]
+    Gc {
+        /// The store (default: this repository's).
+        store: Option<String>,
+        /// Keep unreachable objects younger than this.
+        #[arg(long, default_value_t = 168.0)]
+        grace_hours: f64,
+        /// Report what would be deleted.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Browse the physical data model in a browser: commits, pages, packs, chunks.
+    #[command(after_long_help = cli_help::INSPECT)]
     Inspect {
+        /// Address to serve on.
         #[arg(long, default_value = "127.0.0.1:7777")]
         addr: String,
         /// Don't open a browser.
         #[arg(long)]
         no_open: bool,
     },
-    /// Fill the local content cache, as `git fetch` fills a bare repository: every file of
-    /// the given commits (default HEAD), or with --history every version along their history.
+    /// Fill the local content cache (every file of the given commits, default HEAD).
+    #[command(after_long_help = cli_help::FETCH)]
     Fetch {
+        /// Revisions whose files to fetch (default: HEAD).
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
         revs: Vec<String>,
         /// Also every file version introduced along the history of the revisions.
         #[arg(long)]
@@ -207,13 +290,32 @@ enum Cmd {
         all: bool,
     },
     /// Inspect or trim the local content cache.
-    #[command(subcommand)]
+    #[command(subcommand, arg_required_else_help = true, after_long_help = cli_help::CACHE)]
     Cache(CacheCmd),
     /// Extra working copies that share file contents and build output copy-on-write.
-    #[command(subcommand)]
+    #[command(subcommand, arg_required_else_help = true, after_long_help = cli_help::WORKTREE)]
     Worktree(WtCmd),
     /// Print a file from a commit: `<path>` (HEAD) or `<rev>:<path>`.
-    Cat { path: String, #[arg(long)] rev: Option<String> },
+    #[command(after_long_help = cli_help::CAT)]
+    Cat {
+        /// `<path>` in HEAD, or `<rev>:<path>`.
+        path: String,
+        /// The revision (or write `<rev>:<path>`).
+        #[arg(long, add = ArgValueCandidates::new(complete::branches))]
+        rev: Option<String>,
+    },
+    /// Print a shell completion script that completes branch names live.
+    #[command(after_long_help = cli_help::COMPLETION)]
+    Completion {
+        /// The shell to complete for.
+        #[arg(value_parser = ["bash", "zsh", "fish", "elvish", "powershell"])]
+        shell: String,
+    },
+    /// Print a command's full help and examples.
+    Help {
+        /// The command (and subcommand), e.g. `land` or `worktree add`.
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -257,12 +359,13 @@ fn dir_size(p: &std::path::Path) -> (u64, u64) {
 enum WtCmd {
     /// Add a working copy of this one's base (or another branch), seeded with its build output.
     Add {
+        /// Directory for the new working copy.
         path: PathBuf,
         /// Create this branch at the current base and check it out.
         #[arg(short = 'b', long = "create")]
         create: Option<String>,
         /// Check out this existing branch at its head (default: this working copy's branch and base).
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(complete::branches))]
         branch: Option<String>,
         /// Clone ignored files (build output, dependencies) from this directory (default: here).
         #[arg(long)]
@@ -274,14 +377,19 @@ enum WtCmd {
     /// List working copies of this store on this machine.
     List,
     /// Delete a working copy (refuses if it has uncommitted changes unless --force).
-    Remove { path: PathBuf, #[arg(long)] force: bool },
+    Remove {
+        /// The working copy to delete.
+        path: PathBuf,
+        /// Delete even with uncommitted changes.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn cwd() -> Result<PathBuf> {
     Ok(std::fs::canonicalize(std::env::current_dir()?)?)
 }
 
-/// Resolve a branch name, commit hash or unique hash prefix.
 fn checkout_summary(co: &Checkout) -> String {
     use std::sync::atomic::Ordering::Relaxed;
     let s = &co.stats;
@@ -297,9 +405,21 @@ fn fmt_bytes(n: u64) -> String {
     if n >= 1e9 { format!("{:.2} GB", n / 1e9) } else if n >= 1e6 { format!("{:.1} MB", n / 1e6) } else { format!("{:.0} KB", n / 1e3) }
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = run(Cli::parse()).await {
+fn main() {
+    // Shell completion requests (COMPLETE=<shell> pail …) are answered here and exit.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+    let cli = Cli::parse();
+    if cli.skill {
+        print!("{}", include_str!("skill.md"));
+        return;
+    }
+    let Some(cmd) = cli.cmd else {
+        Cli::command().print_help().expect("help");
+        return;
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let cli = Cli { cmd: Some(cmd), ..cli };
+    if let Err(e) = rt.block_on(run(cli)) {
         if let Some(io) = e.downcast_ref::<std::io::Error>() {
             if io.kind() == std::io::ErrorKind::BrokenPipe {
                 std::process::exit(0);
@@ -312,6 +432,11 @@ async fn main() {
         if let Some(h) = e.downcast_ref::<pail::hooks::HookRefused>() {
             eprintln!("error: {h}");
             std::process::exit(pail::hooks::REFUSED_EXIT);
+        }
+        if let Some(c) = e.downcast_ref::<pail::repo::ConflictError>() {
+            eprintln!("error: {c}");
+            eprintln!("hint: another writer changed the same paths; `pail sync`, then try again");
+            std::process::exit(4);
         }
         eprintln!("error: {e:#}");
         std::process::exit(1);
@@ -438,7 +563,25 @@ async fn run(cli: Cli) -> Result<()> {
         IdsArg::Pail => Ids::Pail,
         IdsArg::Git => Ids::Git,
     };
-    match cli.cmd {
+    let cmd = cli.cmd.expect("a command");
+    // The Git-compatible commands parse their own arguments; `--help` (or a lone `-h`) still
+    // means pail's help for them.
+    let passthrough = match &cmd {
+        Cmd::Log { args } => Some(("log", args)),
+        Cmd::Show { args } => Some(("show", args)),
+        Cmd::CatFile { args } => Some(("cat-file", args)),
+        Cmd::LsTree { args } => Some(("ls-tree", args)),
+        Cmd::RevParse { args } => Some(("rev-parse", args)),
+        _ => None,
+    };
+    if let Some((name, args)) = passthrough {
+        if args.iter().any(|a| a == "--help") || args.as_slice() == ["-h"] {
+            return print_help(&[name.to_string()]);
+        }
+    }
+    match cmd {
+        Cmd::Completion { shell } => complete::registration(&shell)?,
+        Cmd::Help { command } => print_help(&command)?,
         Cmd::Log { args } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let mut out = Output::open_with(cli.no_pager, Some(&ctx.config));
@@ -1138,5 +1281,40 @@ fn publish_hook<'a>(hooks: &'a pail::hooks::Hooks, mode: &'a str) -> impl Fn(&pa
     move |p| {
         let line = format!("{} {} {}\n", p.branch, pail::hooks::id(p.old), p.new.hex());
         hooks.run("pre-publish", &[&p.branch, mode], Some(line.as_bytes())).map(|_| ())
+    }
+}
+
+/// A command's long help: `pail help worktree add`.
+fn print_help(command: &[String]) -> Result<()> {
+    let mut c = Cli::command();
+    c.build(); // full names in usage lines ("pail worktree add")
+    let mut cur = &mut c;
+    for name in command {
+        cur = cur.find_subcommand_mut(name).with_context(|| format!("no command `{}`", command.join(" ")))?;
+    }
+    cur.print_long_help()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    /// The grouped top-level help is written by hand: every command must be in it.
+    #[test]
+    fn top_help_lists_every_command() {
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            let listed = cli_help::TOP.lines().any(|l| {
+                l.starts_with("  ") && l.split_whitespace().next().is_some_and(|w| w.trim_end_matches(',') == name)
+                    || l.trim_start().starts_with(&format!("{name},")) || l.contains(&format!(", {name} "))
+            });
+            assert!(listed, "`{name}` is missing from the top-level help");
+        }
     }
 }

@@ -781,3 +781,55 @@ done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
     pail(&a, &["add", "bad.txt"]);
     pail(&a, &["commit", "-m", "hooks off"]);
 }
+
+/// Help, the agent skill, shell completion (with live branch names) and exit codes.
+#[test]
+fn help_skill_completion_and_exit_codes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "a"]);
+    let a = t.join("a");
+    pail(&a, &["branch", "feature-x"]);
+
+    let top = pail(&t, &["--help"]);
+    assert!(top.contains("Branches and landing") && top.contains("Exit codes:"), "{top}");
+    assert_eq!(pail(&t, &[]), top, "bare `pail` prints the help");
+    let land = pail(&t, &["land", "--help"]);
+    assert!(land.contains("Examples:") && land.contains("pail land feature --stack"), "{land}");
+    assert!(pail(&t, &["help", "worktree", "add"]).contains("Usage: pail worktree add"));
+    assert!(pail(&a, &["log", "--help"]).contains("Usage: pail log"));
+    let bare_group = cmd(&t, &["worktree"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&bare_group.stderr).contains("Commands:"));
+
+    let skill = pail(&t, &["--skill"]);
+    assert!(skill.starts_with("---\nname: pail\ndescription: "), "{skill}");
+    assert!(skill.contains("Commit = publish"));
+
+    for sh in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        assert!(pail(&t, &["completion", sh]).contains("COMPLETE"), "{sh}");
+    }
+    // What the registered script runs on <TAB>: live branch names with their commits.
+    let out = cmd(&a, &["--", "pail", "switch", "fea"])
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "feature-x");
+    let out = cmd(&a, &["--", "pail", "config", "core.ho"]).env("COMPLETE", "bash").env("_CLAP_COMPLETE_INDEX", "2").env("_CLAP_IFS", "\n").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "core.hooksPath");
+
+    // Exit code 4: another writer changed the same path since our base.
+    pail(&t, &["clone", &store, "b"]);
+    let b = t.join("b");
+    write(&a.join("f.txt"), "a");
+    pail(&a, &["add", "f.txt"]);
+    pail(&a, &["commit", "-m", "a"]);
+    write(&b.join("f.txt"), "b");
+    pail(&b, &["add", "f.txt"]);
+    let out = cmd(&b, &["commit", "-m", "b"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("pail sync"));
+}
