@@ -85,6 +85,9 @@ pub struct CommitOutcome {
 pub struct Repo {
     pub store: Store,
     cache_dir: Option<PathBuf>,
+    /// Local content cache (read-through): file contents by content hash, shared with
+    /// working copies. None reads every file from the store.
+    pub blobs: Option<crate::blobs::Blobs>,
     pages: Mutex<HashMap<Hash, Arc<Page>>>,
     commits: Mutex<HashMap<Hash, Arc<Commit>>>,
 }
@@ -98,11 +101,13 @@ pub fn default_cache_dir() -> Option<PathBuf> {
 
 impl Repo {
     pub fn open(url: &str) -> Result<Repo> {
-        Ok(Repo::with_store(Store::open(url)?, default_cache_dir()))
+        let mut r = Repo::with_store(Store::open(url)?, default_cache_dir());
+        r.blobs = crate::blobs::Blobs::default_store();
+        Ok(r)
     }
 
     pub fn with_store(store: Store, cache_dir: Option<PathBuf>) -> Repo {
-        Repo { store, cache_dir, pages: Mutex::default(), commits: Mutex::default() }
+        Repo { store, cache_dir, blobs: None, pages: Mutex::default(), commits: Mutex::default() }
     }
 
     fn cache_path(&self, kind: &str, h: &Hash) -> Option<PathBuf> {
@@ -496,6 +501,12 @@ impl Repo {
         let mut by_pack: BTreeMap<Hash, Vec<usize>> = BTreeMap::new();
         let mut chunked: Vec<usize> = vec![];
         for (i, e) in entries.iter().enumerate() {
+            if !matches!(e.loc, Loc::Inline(_)) {
+                if let Some(d) = self.blobs.as_ref().and_then(|b| b.read(&e.hash)) {
+                    out[i] = Some(d);
+                    continue;
+                }
+            }
             match &e.loc {
                 Loc::Inline(b) => out[i] = Some(Bytes::from(b.clone())),
                 Loc::Pack { pack, .. } => by_pack.entry(*pack).or_default().push(i),
@@ -510,10 +521,12 @@ impl Repo {
             }));
         let results: Vec<Vec<(usize, Bytes)>> =
             run_unordered(jobs.collect(), PARALLELISM).await?;
+        let mut fetched = vec![false; entries.len()];
         for (i, b) in results.into_iter().flatten() {
+            fetched[i] = true;
             out[i] = Some(b);
         }
-        entries
+        let verified: Vec<Bytes> = entries
             .iter()
             .zip(out)
             .map(|(e, b)| {
@@ -525,7 +538,16 @@ impl Repo {
                 );
                 Ok(b)
             })
-            .collect()
+            .collect::<Result<_>>()?;
+        // Cache what came from the store, now that it is verified.
+        if let Some(blobs) = &self.blobs {
+            for (i, b) in verified.iter().enumerate() {
+                if fetched[i] {
+                    blobs.put(&entries[i].hash, b)?;
+                }
+            }
+        }
+        Ok(verified)
     }
 
     async fn read_pack_group(&self, entries: &[Entry], pack: Hash, mut idxs: Vec<usize>) -> Result<Vec<(usize, Bytes)>> {

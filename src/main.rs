@@ -99,11 +99,65 @@ enum Cmd {
     },
     /// Delete unreachable objects older than the grace period.
     Gc { store: Option<String>, #[arg(long, default_value_t = 168.0)] grace_hours: f64, #[arg(long)] dry_run: bool },
+    /// Fill the local content cache, as `git fetch` fills a bare repository: every file of
+    /// the given commits (default HEAD), or with --history every version along their history.
+    Fetch {
+        revs: Vec<String>,
+        /// Also every file version introduced along the history of the revisions.
+        #[arg(long)]
+        history: bool,
+        /// Stop the history walk after this many commits.
+        #[arg(short = 'n', long)]
+        max_count: Option<usize>,
+        /// Every branch.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Inspect or trim the local content cache.
+    #[command(subcommand)]
+    Cache(CacheCmd),
     /// Extra working copies that share file contents and build output copy-on-write.
     #[command(subcommand)]
     Worktree(WtCmd),
     /// Print a file from a commit: `<path>` (HEAD) or `<rev>:<path>`.
     Cat { path: String, #[arg(long)] rev: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum CacheCmd {
+    /// Where the caches live and how much they hold.
+    Stats,
+    /// Delete least recently used file contents until the cache fits (e.g. `10G`, `500M`).
+    Prune {
+        #[arg(long)]
+        max_size: String,
+    },
+}
+
+fn parse_size(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last().map(|c| c.to_ascii_uppercase()) {
+        Some('K') => (&s[..s.len() - 1], 1u64 << 10),
+        Some('M') => (&s[..s.len() - 1], 1 << 20),
+        Some('G') => (&s[..s.len() - 1], 1 << 30),
+        Some('T') => (&s[..s.len() - 1], 1 << 40),
+        _ => (s, 1),
+    };
+    Ok((num.trim().parse::<f64>().with_context(|| format!("bad size {s}"))? * mult as f64) as u64)
+}
+
+fn dir_size(p: &std::path::Path) -> (u64, u64) {
+    let mut files = 0;
+    let mut bytes = 0;
+    for e in ignore::WalkBuilder::new(p).standard_filters(false).build().flatten() {
+        if let Ok(md) = e.metadata() {
+            if md.is_file() {
+                files += 1;
+                bytes += md.len();
+            }
+        }
+    }
+    (files, bytes)
 }
 
 #[derive(Subcommand)]
@@ -603,6 +657,106 @@ async fn run(cli: Cli) -> Result<()> {
                 fmt_bytes(r.bytes_freed),
                 r.kept_young
             );
+        }
+        Cmd::Fetch { revs, history, max_count, all } => {
+            let ctx = Ctx::open(cli.store, ids).await?;
+            let blobs = ctx.repo.blobs.as_ref().context("the content cache is off (PAIL_BLOBS=off)")?;
+            let t = std::time::Instant::now();
+            let mut tips = vec![];
+            for r in &revs {
+                tips.push(ctx.resolve(r).await?);
+            }
+            if all {
+                tips.extend(ctx.refs().await?.into_iter().map(|(_, h)| h));
+            }
+            if tips.is_empty() {
+                tips.push(ctx.head.context("empty history")?);
+            }
+            // Snapshots of the tips, plus every version introduced along their history.
+            let mut want: std::collections::HashMap<Hash, pail::manifest::Entry> = Default::default();
+            let mut commits = 0;
+            let mut seen = std::collections::HashSet::new();
+            for tip in &tips {
+                let root = ctx.repo.root_of(Some(*tip)).await?;
+                for e in ctx.repo.entries(root).await? {
+                    want.entry(e.hash).or_insert(e);
+                }
+                if history {
+                    let mut cur = Some(*tip);
+                    while let Some(h) = cur {
+                        if max_count.is_some_and(|m| commits >= m) || !seen.insert(h) {
+                            break;
+                        }
+                        commits += 1;
+                        let c = ctx.commit(&h).await?;
+                        let from = ctx.repo.root_of(c.parent).await?;
+                        for ch in ctx.repo.diff(from, c.root).await? {
+                            if let Some(e) = ch.new {
+                                want.entry(e.hash).or_insert(e);
+                            }
+                        }
+                        cur = c.parent;
+                    }
+                }
+            }
+            let missing: Vec<pail::manifest::Entry> = want
+                .into_values()
+                .filter(|e| !matches!(e.loc, pail::manifest::Loc::Inline(_)) && !blobs.has(&e.hash))
+                .collect();
+            let total: u64 = missing.iter().map(|e| e.size).sum();
+            let mut start = 0;
+            while start < missing.len() {
+                let mut end = start;
+                let mut bytes = 0;
+                while end < missing.len() && (end == start || bytes < 256 << 20) {
+                    bytes += missing[end].size;
+                    end += 1;
+                }
+                ctx.repo.read_files(&missing[start..end]).await?;
+                start = end;
+            }
+            let (_, _, down, _) = ctx.repo.store.stats.snapshot();
+            println!(
+                "fetched {} file version(s), {} ({} transferred) in {:.1}s{}",
+                missing.len(),
+                fmt_bytes(total),
+                fmt_bytes(down),
+                t.elapsed().as_secs_f64(),
+                if history { format!(" across {commits} commit(s)") } else { String::new() }
+            );
+        }
+        Cmd::Cache(CacheCmd::Stats) => {
+            let home = pail::blobs::pail_home();
+            if let Some(b) = pail::blobs::Blobs::default_store() {
+                let (n, bytes) = dir_size(&b.dir);
+                println!("contents  {:>9} files  {:>10}  {}", n, fmt_bytes(bytes), b.dir.display());
+            } else {
+                println!("contents  off (PAIL_BLOBS=off)");
+            }
+            if let Some(d) = pail::repo::default_cache_dir() {
+                let (n, bytes) = dir_size(&d);
+                println!("metadata  {:>9} files  {:>10}  {}", n, fmt_bytes(bytes), d.display());
+            }
+            println!("home      {}", home.display());
+        }
+        Cmd::Cache(CacheCmd::Prune { max_size }) => {
+            let max = parse_size(&max_size)?;
+            let b = pail::blobs::Blobs::default_store().context("the content cache is off (PAIL_BLOBS=off)")?;
+            let all = b.list();
+            let mut total: u64 = all.iter().map(|x| x.1).sum();
+            let before = total;
+            let mut removed = 0;
+            // Oldest first. Working copies hold their own clones, so nothing they use breaks.
+            for (p, size, _) in all {
+                if total <= max {
+                    break;
+                }
+                if std::fs::remove_file(&p).is_ok() {
+                    total -= size;
+                    removed += 1;
+                }
+            }
+            println!("removed {removed} file(s), {} → {}", fmt_bytes(before), fmt_bytes(total));
         }
         Cmd::Worktree(WtCmd::Add { path, create, branch, seed_from, no_seed }) => {
             let here = Worktree::open(&cwd()?)?;

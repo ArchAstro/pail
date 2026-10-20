@@ -52,21 +52,47 @@ pub struct GitObjects<'a> {
     blob_ids: std::sync::Mutex<HashMap<Hash, String>>,
 }
 
-fn cache_file(h: &Hash) -> Option<std::path::PathBuf> {
-    let dir = crate::repo::default_cache_dir()?;
-    let hex = h.hex();
-    Some(dir.join("gitblob").join(&hex[..2]).join(hex))
+/// Git blob ids by content hash, kept in one append-only file (`<blake3> <sha1>` lines) and
+/// loaded whole: far cheaper than a file per blob when a listing needs tens of thousands.
+fn blob_index_path() -> Option<std::path::PathBuf> {
+    Some(crate::repo::default_cache_dir()?.join("gitblob.idx"))
+}
+
+fn load_blob_index() -> HashMap<Hash, String> {
+    let Some(p) = blob_index_path() else { return HashMap::new() };
+    let Ok(text) = std::fs::read_to_string(p) else { return HashMap::new() };
+    text.lines()
+        .filter_map(|l| {
+            let (h, g) = l.split_once(' ')?;
+            (g.len() == 40).then(|| Some((Hash::from_hex(h).ok()?, g.to_string()))).flatten()
+        })
+        .collect()
+}
+
+fn append_blob_index(new: &[(Hash, String)]) {
+    use std::io::Write;
+    let Some(p) = blob_index_path() else { return };
+    let _ = std::fs::create_dir_all(p.parent().unwrap());
+    let mut buf = String::new();
+    for (h, g) in new {
+        buf.push_str(&format!("{} {g}\n", h.hex()));
+    }
+    // O_APPEND: concurrent writers interleave whole writes, never partial lines of one batch.
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let _ = f.write_all(buf.as_bytes());
+    }
 }
 
 impl<'a> GitObjects<'a> {
     pub fn new(ctx: &'a Ctx) -> GitObjects<'a> {
-        GitObjects { ctx, blob_ids: Default::default() }
+        GitObjects { ctx, blob_ids: std::sync::Mutex::new(load_blob_index()) }
     }
 
     /// Git blob ids for entries, reading content only for ids not cached.
     pub async fn blob_ids(&self, entries: &[Entry]) -> Result<HashMap<Hash, String>> {
         let mut out = HashMap::new();
         let mut missing: Vec<Entry> = vec![];
+        let mut queued = std::collections::HashSet::new();
         {
             let mem = self.blob_ids.lock().unwrap();
             for e in entries {
@@ -75,9 +101,7 @@ impl<'a> GitObjects<'a> {
                 }
                 if let Some(id) = mem.get(&e.hash) {
                     out.insert(e.hash, id.clone());
-                } else if let Some(id) = cache_file(&e.hash).and_then(|p| std::fs::read_to_string(p).ok()).filter(|s| s.len() == 40) {
-                    out.insert(e.hash, id);
-                } else if !missing.iter().any(|m| m.hash == e.hash) {
+                } else if queued.insert(e.hash) {
                     missing.push(e.clone());
                 }
             }
@@ -91,14 +115,13 @@ impl<'a> GitObjects<'a> {
                 end += 1;
             }
             let data = self.ctx.repo.read_files(&missing[start..end]).await?;
+            let mut new = vec![];
             for (e, d) in missing[start..end].iter().zip(data) {
                 let id = object_id("blob", &d);
-                if let Some(p) = cache_file(&e.hash) {
-                    let _ = std::fs::create_dir_all(p.parent().unwrap());
-                    let _ = std::fs::write(&p, &id);
-                }
+                new.push((e.hash, id.clone()));
                 out.insert(e.hash, id);
             }
+            append_blob_index(&new);
             start = end;
         }
         self.blob_ids.lock().unwrap().extend(out.iter().map(|(k, v)| (*k, v.clone())));

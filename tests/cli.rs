@@ -292,3 +292,42 @@ fn bare_store_inspection() {
     let err = pail_fails(&t, &["--store", bare_s, "log", "nope"]);
     assert!(err.starts_with("fatal: ambiguous argument 'nope'"), "{err}");
 }
+
+/// Bare reads keep a local content cache (as a bare Git repository keeps its objects):
+/// `fetch` fills it, reads are served from it, and `cache prune` trims it.
+#[test]
+fn content_cache_serves_bare_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let bare = t.join("bare");
+    let bare_s = bare.to_str().unwrap();
+    pail(&t, &["init", bare_s]);
+    pail(&t, &["clone", bare_s, "w"]);
+    let w = t.join("w");
+    write(&w.join("a.txt"), &"alpha ".repeat(100));
+    write(&w.join("b.txt"), &"beta ".repeat(100));
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "one"]);
+    write(&w.join("a.txt"), &"alpha two ".repeat(100));
+    pail(&w, &["commit", "-a", "-m", "two"]);
+
+    // A private cache so this test sees only its own content.
+    let home = t.join("home");
+    let run = |args: &[&str]| -> std::process::Output {
+        let mut full = vec!["--store", bare_s];
+        full.extend_from_slice(args);
+        cmd(&t, &full).env("PAIL_HOME", &home).env("PAIL_BLOBS", home.join("blobs")).output().unwrap()
+    };
+    let out = run(&["fetch", "--history"]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && s.starts_with("fetched 3 file version(s)"), "{s}{}", String::from_utf8_lossy(&out.stderr));
+    // With the store's packs gone, contents still come from the cache.
+    std::fs::remove_dir_all(bare.join("packs")).unwrap();
+    let out = run(&["log", "-p", "--format=%s"]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && s.contains("+alpha two alpha two") && s.contains("+beta beta"), "{s}{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&run(&["cat", "HEAD~1:a.txt"]).stdout), "alpha ".repeat(100));
+    let out = run(&["cache", "prune", "--max-size", "0"]);
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("removed 3 file(s)"), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(!run(&["cat", "a.txt"]).status.success(), "pruned content must be refetched, and the packs are gone");
+}

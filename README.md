@@ -103,6 +103,34 @@ pail --store … ls -l HEAD:src  |  pail --store … cat HEAD~2:README.md
 3. `snapshot::Snapshot` is the library API behind it: `stat`, `list_dir`, `walk`, `read`,
    `read_range` for any commit, reading only the manifest pages and packs it needs.
 
+### Local content cache
+
+Like a bare Git repository's object database, reads keep what they fetch: file contents go
+into `~/.cache/pail/blobs/<blake3>` (the same store working copies clone from), commits and
+manifest pages into `~/.cache/pail/objects`. Everything is content-addressed and verified on
+read, so the cache never goes stale.
+
+```sh
+pail --store s3://bucket/repo fetch                 # every file at HEAD
+pail --store s3://bucket/repo fetch --history       # every version along HEAD's history
+pail --store … fetch --all --history -n 500         # all branches, last 500 commits each
+pail cache stats                                    # sizes and locations
+pail cache prune --max-size 20G                     # drop least recently used contents
+```
+
+`PAIL_HOME` moves it; `PAIL_BLOBS=off` turns content caching off.
+
+On firstlanding (2,203 commits), `fetch --history` pulled 8,092 file versions (259 MB) in 22s.
+With the cache warm:
+
+| | pail | git |
+|---|---|---|
+| `log --oneline` (all) | 0.12s | 0.28s |
+| `log -p -n 200` | 0.47s | 0.18s |
+| `log --name-status -- <dir>` (all) | 1.5s | 0.45s |
+| `ls-tree -r HEAD` | 0.19s | 0.08s |
+| `cat-file -p HEAD` | 0.15s | 0.05s |
+
 Proof: `scripts/gitlog-compat.sh` and `scripts/gitinspect-compat.sh` run each command with the
 same arguments through `git` and `pail` on mirrored history and compare bytes. On firstlanding
 (2,192 commits; a second window with 139 merges): 55/55 `log` cases, including `-p` over

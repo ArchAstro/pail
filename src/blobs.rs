@@ -156,6 +156,43 @@ impl Blobs {
         usable(mount_root(root)?.join(".pail-blobs")).map(|dir| Blobs { dir })
     }
 
+    /// The machine-wide store bare reads use as their content cache: `PAIL_BLOBS` (`off`
+    /// disables), else `<pail home>/blobs`.
+    pub fn default_store() -> Option<Blobs> {
+        let dir = match std::env::var("PAIL_BLOBS") {
+            Ok(v) if v == "off" || v.is_empty() => return None,
+            Ok(v) => PathBuf::from(v),
+            Err(_) => pail_home().join("blobs"),
+        };
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(Blobs { dir })
+    }
+
+    /// Cached content, if present. Touches the file so pruning keeps recently used content.
+    pub fn read(&self, h: &Hash) -> Option<bytes::Bytes> {
+        let p = self.path(h);
+        let data = std::fs::read(&p).ok()?;
+        let _ = std::fs::File::open(&p).and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now())));
+        Some(data.into())
+    }
+
+    /// Every cached blob with its size and last use, oldest first.
+    pub fn list(&self) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+        let mut out = vec![];
+        for d in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
+                if let Ok(md) = f.metadata() {
+                    let used = md.accessed().or_else(|_| md.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                    if md.is_file() && !f.file_name().to_string_lossy().contains(".tmp") {
+                        out.push((f.path(), md.len(), used));
+                    }
+                }
+            }
+        }
+        out.sort_by_key(|x| x.2);
+        out
+    }
+
     pub fn path(&self, h: &Hash) -> PathBuf {
         let hex = h.hex();
         self.dir.join(&hex[..2]).join(hex)
