@@ -465,7 +465,7 @@ impl<'a> DiffPrinter<'a> {
     }
 
     fn blob_id(&self, e: &Entry, data: &HashMap<Hash, Bytes>) -> String {
-        crate::gitobj::blob_id_of(&e.hash, data.get(&e.hash).map(|b| &b[..]).unwrap_or(b""))
+        crate::gitobj::blob_id_of(&self.ctx.repo, &e.hash, data.get(&e.hash).map(|b| &b[..]).unwrap_or(b""))
     }
 
     fn abbrev_id(&self, id: &str) -> String {

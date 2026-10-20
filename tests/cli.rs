@@ -1,21 +1,14 @@
 use std::path::Path;
 use std::process::Command;
 
-/// One machine-local pail home (blob store, worktree registry) shared by this test process.
-fn home() -> &'static Path {
-    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| tempfile::tempdir().unwrap()).path()
-}
-
 fn cmd(dir: &Path, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_pail"));
     c.args(args)
         .current_dir(dir)
         .env("PAIL_AUTHOR", "Tester <t@example.com>")
-        .env("PAIL_CACHE", "off")
-        .env("PAIL_HOME", home())
-        .env("PAIL_BLOBS", home().join("blobs"))
-        .env_remove("PAIL_CLONE");
+        .env_remove("PAIL_CLONE")
+        .env_remove("PAIL_STORE")
+        .env_remove("PAIL_DIR");
     c
 }
 
@@ -134,9 +127,10 @@ fn gc_removes_only_unreachable() {
     assert!(!t.join("after/doomed.txt").exists());
 }
 
-fn blob_path(content: &[u8]) -> std::path::PathBuf {
+/// Where a repository keeps a file's contents.
+fn blob_path(repo: &Path, content: &[u8]) -> std::path::PathBuf {
     let hex = pail::hash::Hash::of(content).hex();
-    home().join("blobs").join(&hex[..2]).join(hex)
+    repo.join("blobs").join(&hex[..2]).join(hex)
 }
 
 fn mtime(p: &Path) -> std::time::SystemTime {
@@ -191,7 +185,9 @@ fn worktrees_share_content_and_build_output() {
     assert!(!b.join("scratch").exists(), "only build output and env files are seeded by default");
     assert_eq!(mtime(&b.join("src/lib.rs")), old, "identical file keeps the donor's mtime");
     assert!(mtime(&b.join("README.md")) >= started, "differing file gets a fresh mtime");
-    assert!(blob_path(lib.as_bytes()).exists() && blob_path(&big).exists());
+    let repo = a.join(".pail");
+    assert!(blob_path(&repo, lib.as_bytes()).exists() && blob_path(&repo, &big).exists());
+    assert_eq!(std::fs::read_to_string(b.join(".pail/repo")).unwrap(), repo.to_str().unwrap(), "linked to a's repository");
     if cfg!(target_vendor = "apple") {
         assert!(out.contains("MB cloned"), "APFS should clone: {out}");
     }
@@ -208,7 +204,7 @@ fn worktrees_share_content_and_build_output() {
     drop(f);
     assert_eq!(std::fs::read_to_string(a.join("src/lib.rs")).unwrap(), lib);
     assert_eq!(std::fs::read_to_string(a.join("target/debug/app")).unwrap(), "binary".repeat(1000));
-    let stored = blob_path(lib.as_bytes());
+    let stored = blob_path(&repo, lib.as_bytes());
     assert_eq!(pail::hash::Hash::of(&std::fs::read(&stored).unwrap()), pail::hash::Hash::of(lib.as_bytes()));
     assert!(pail(&b, &["status"]).contains("M src/lib.rs"));
 
@@ -216,7 +212,7 @@ fn worktrees_share_content_and_build_output() {
     write(&b.join("new.txt"), &"fresh content ".repeat(10));
     pail(&b, &["add", "new.txt"]);
     pail(&b, &["commit", "-m", "new"]);
-    assert!(blob_path("fresh content ".repeat(10).as_bytes()).exists());
+    assert!(blob_path(&repo, "fresh content ".repeat(10).as_bytes()).exists());
 
     // Without clone support, the same result by copying.
     let out = cmd(&a, &["worktree", "add", "../c", "--branch", "feat"]).env("PAIL_CLONE", "off").output().unwrap();
@@ -311,12 +307,13 @@ fn content_cache_serves_bare_reads() {
     write(&w.join("a.txt"), &"alpha two ".repeat(100));
     pail(&w, &["commit", "-a", "-m", "two"]);
 
-    // A private cache so this test sees only its own content.
-    let home = t.join("home");
+    // A bare repository holds the local copies; nothing is cached anywhere else.
+    pail(&t, &["clone", "--bare", bare_s, "r.pail"]);
+    let r = t.join("r.pail");
     let run = |args: &[&str]| -> std::process::Output {
-        let mut full = vec!["--store", bare_s];
+        let mut full = vec!["--repo", r.to_str().unwrap()];
         full.extend_from_slice(args);
-        cmd(&t, &full).env("PAIL_HOME", &home).env("PAIL_BLOBS", home.join("blobs")).output().unwrap()
+        cmd(&t, &full).output().unwrap()
     };
     let out = run(&["fetch", "--history"]);
     let s = String::from_utf8_lossy(&out.stdout);
@@ -330,6 +327,9 @@ fn content_cache_serves_bare_reads() {
     let out = run(&["cache", "prune", "--max-size", "0"]);
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("removed 3 file(s)"), "{}", String::from_utf8_lossy(&out.stdout));
     assert!(!run(&["cat", "a.txt"]).status.success(), "pruned content must be refetched, and the packs are gone");
+    // Direct store reads keep nothing locally.
+    let out = cmd(&t, &["--store", bare_s, "fetch"]).output().unwrap();
+    assert!(!out.status.success(), "fetch needs a local repository");
 }
 
 /// With the commit graph on, history reads print exactly what they print without it, and
@@ -351,15 +351,13 @@ fn commit_graph_matches_uncached_reads() {
     for i in 0..6 {
         commit(i);
     }
-    let cache = t.join("meta");
-    let read = |cached: bool, args: &[&str]| -> String {
-        let mut full = vec!["--store", bare_s];
+    pail(&t, &["clone", "--bare", bare_s, "r.pail"]);
+    let r = t.join("r.pail");
+    // Through the bare repository (commit graph, caches) vs straight from the store.
+    let read = |local: bool, args: &[&str]| -> String {
+        let mut full = if local { vec!["--repo", r.to_str().unwrap()] } else { vec!["--store", bare_s] };
         full.extend_from_slice(args);
-        let mut c = cmd(&t, &full);
-        if cached {
-            c.env("PAIL_CACHE", &cache);
-        }
-        let out = c.output().unwrap();
+        let out = cmd(&t, &full).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
@@ -367,8 +365,7 @@ fn commit_graph_matches_uncached_reads() {
     for args in cases {
         assert_eq!(read(true, args), read(false, args), "{args:?}");
     }
-    let graphs: Vec<_> = std::fs::read_dir(cache.join("graph")).unwrap().flatten().collect();
-    assert!(graphs.len() == 1 && graphs[0].path().join("commits2.idx").exists(), "one graph, for this store");
+    assert!(r.join("graph/commits2.idx").exists(), "the repository's commit graph was built");
     // New commits after the graph exists.
     commit(6);
     commit(7);
@@ -378,4 +375,38 @@ fn commit_graph_matches_uncached_reads() {
     // Abbreviated ids resolve through the graph.
     let short = read(true, &["log", "-1", "--format=%h", "HEAD~3"]);
     assert_eq!(read(true, &["log", "-1", "--format=%s", short.trim()]), "c4\n");
+}
+
+/// Working copies attach to a repository: a bare one, or the first clone's `.pail/`.
+#[test]
+fn worktrees_attach_to_a_repository() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = t.join("store");
+    let store_s = store.to_str().unwrap();
+    pail(&t, &["init", store_s]);
+    pail(&t, &["clone", store_s, "w"]);
+    write(&t.join("w/a.txt"), &"aaaa".repeat(50));
+    pail(&t.join("w"), &["add", "-A"]);
+    pail(&t.join("w"), &["commit", "-m", "a"]);
+
+    // Bare repository with a linked working copy.
+    pail(&t, &["clone", "--bare", store_s, "r.pail"]);
+    let r = t.join("r.pail");
+    pail(&r, &["worktree", "add", "../from-bare"]);
+    assert_eq!(std::fs::read_to_string(t.join("from-bare/a.txt")).unwrap(), "aaaa".repeat(50));
+    assert_eq!(std::fs::read_to_string(t.join("from-bare/.pail/repo")).unwrap(), r.to_str().unwrap());
+    assert!(blob_path(&r, "aaaa".repeat(50).as_bytes()).exists(), "contents live in the bare repository");
+    let list = pail(&r, &["worktree", "list"]);
+    assert!(list.contains("(bare)") && list.contains("from-bare"), "{list}");
+    // Commands inside the linked copy use the shared repository.
+    assert!(pail(&t.join("from-bare"), &["log", "--format=%s"]).starts_with("a\n"));
+
+    // The first clone holds the repository its linked copies use: it can't go first.
+    pail(&t.join("w"), &["worktree", "add", "../linked"]);
+    let err = pail_fails(&t, &["worktree", "remove", "w"]);
+    assert!(err.contains("holds the repository"), "{err}");
+    pail(&t.join("w"), &["worktree", "remove", "../linked"]);
+    pail(&r, &["worktree", "remove", "../from-bare"]);
+    assert!(!pail(&r, &["worktree", "list"]).contains("from-bare"));
 }

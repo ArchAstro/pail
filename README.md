@@ -7,40 +7,90 @@ directly. There is no server.
   `ifGenerationMatch`). There are no merge commits; landing a branch squashes it.
 - **Git-style stage.** `add`, `add -A`, `commit -a` and `restore` behave as in Git. The stage
   stores only the staged delta, so its size depends on the change, not the repo.
-- **Five-prefix layout.** Everything except `refs/` is immutable and content-addressed.
+- **Local repositories like `.git`.** Everything kept on a machine lives in a repository
+  directory: a bare `name.pail/`, or a working copy's `.pail/`. Nothing is global.
+
+## Data model
+
+### The store (authoritative, shared)
 
 ```
 <store>/
+├─ HEAD                  {"branch": "main"}: the default branch
+├─ refs/<branch>         {"commit": "<id>"}: the only mutable objects, moved by CAS
+├─ reflog/<branch>/…     written only when a branch is force-moved
+├─ commits/<blake3>      commit objects (JSON)
+├─ pages/<blake3>        manifest pages: a prolly tree over sorted full paths
 ├─ packs/<blake3>.pack   small files, concatenated, read with range GETs
-├─ chunks/<blake3>       large files, FastCDC chunks, deduped globally
-├─ pages/<blake3>        manifest pages (prolly tree over sorted paths)
-├─ commits/<blake3>      JSON commit objects, each with its change list
-├─ refs/<branch>         {"commit": "<hash>"}, updated only by CAS
-└─ reflog/<branch>/…     written only when a branch is force-moved
+└─ chunks/<blake3>       large files (≥1 MB) as FastCDC chunks, deduped globally
 ```
+
+Everything but `HEAD`, `refs/` and `reflog/` is immutable and named by the BLAKE3 hash of its
+bytes, so any copy of it anywhere is valid forever.
+
+A **commit** is:
+
+```
+parent        previous commit id (linear history: one parent at most)
+root          manifest root page: the full snapshot
+generation    depth from the first commit (fast ancestor checks)
+files, bytes  snapshot totals
+author, author_date, committer, committer_date, message     (Git's exact bytes)
+meta          free-form; mirrored commits keep git.commit, git.parents, git.tree, …
+changes       the change list: path → {old: kind/size/hash, new: kind/size/hash/location}
+              (Mononoke's Bonsai model), computed against the parent it lands on
+```
+
+A **manifest** maps every path to its entry `(kind, size, content hash, location)`, where the
+location is inline bytes (≤64 B, symlinks), a pack range, or a chunk list. Pages split at
+key-derived boundaries, so identical subtrees share pages across commits and diffs skip them.
+
+### The local repository (derived, per machine)
+
+```
+name.pail/                 bare: pail clone --bare <store> name.pail
+work/.pail/                or the first working copy's .pail/
+├─ config.json             {"store": "s3://bucket/repo", "bare": true}
+├─ HEAD                    the store's default branch, remembered
+├─ objects/{commits,pages} verified copies of store objects
+├─ blobs/<hh>/<blake3>     file contents: read cache and the source checkouts clone from
+├─ graph/                  commit graph: metadata, changed paths, id index (mmap)
+├─ index/                  Git blob ids by content hash, Git tree ids by manifest root
+└─ worktrees.json          working copies attached to this repository
+
+work/.pail/                a working copy's own state, next to (or instead of) the repository:
+├─ HEAD.json               {"branch", "base"}
+├─ stage.json, pending/    the stage: staged delta + snapshotted contents
+├─ statcache.json          stat cache for fast status
+└─ repo                    linked working copies only: path of the shared repository
+```
+
+Everything in it is derived from immutable store objects and verified on read, so it never
+goes stale and any part can be deleted. Reading a store with `--store <url>` keeps nothing.
 
 ## CLI
 
 ```sh
-pail init file:///tmp/bucket                  # or s3://bucket/prefix, gs://bucket/prefix
-pail clone file:///tmp/bucket work && cd work
+pail init s3://bucket/repo                        # or gs://…, file://…, a directory
+pail clone s3://bucket/repo work && cd work       # working copy; its .pail/ is the repository
 echo hi > a.txt && pail add -A && pail commit -m "first"
 pail status | pail diff [--staged] | pail log | pail ls | pail cat <path>
 pail switch -c feature … pail commit -a -m wip
 pail land feature --onto main && pail sync
+pail clone --bare s3://bucket/repo repo.pail      # repository without a working copy
+pail --repo repo.pail log --oneline               # or cd repo.pail; or PAIL_DIR
 ```
 
 A commit that loses the CAS race is replayed on the new head when the paths don't overlap.
 If they overlap, the commit stops with a conflict.
 
 S3 settings come from the usual `AWS_*` variables (`AWS_ENDPOINT`, `AWS_ALLOW_HTTP` for
-emulators). GCS settings come from `GOOGLE_*`. `PAIL_CACHE` sets the local cache of
-immutable pages and commits (`off` disables it).
+emulators). GCS settings come from `GOOGLE_*`.
 
 ## Worktrees: many checkouts, one copy on disk
 
 ```
-             bucket ──fetch once──▶ ~/.cache/pail/blobs/<blake3>   (read-only, one copy per content)
+             bucket ──fetch once──▶ <repo>/blobs/<blake3>   (read-only, one copy per content)
                                          │ clone   │ clone   │ clone      APFS clonefile / Linux FICLONE
                                          ▼         ▼         ▼
                                        wt/a      wt/b      wt/c           share blocks until edited
@@ -50,18 +100,21 @@ seed: wt/a/target, node_modules … ──clone──▶ wt/b/…               
 ```sh
 pail worktree add ../feature -b feature      # new branch at this base, seeded from here
 pail worktree add ../review --branch main --seed-from ~/src/other-checkout
+pail --repo repo.pail worktree add ../wt     # from a bare repository
 pail worktree list | pail worktree remove ../feature
 ```
 
-1. Files are copy-on-write clones of a machine-local blob store, so extra worktrees cost
-   inodes, not bytes. Editing a file in place is safe: the clone gets its own blocks. The store
-   is a plain cache (no refcounts), and it lives on the worktree's volume
-   (`PAIL_BLOBS`, `PAIL_HOME`). If the filesystem can't clone, files are copied.
+1. Working copies attach to one repository and their files are copy-on-write clones of its
+   `blobs/`, so extra worktrees cost inodes, not bytes. Editing a file in place is safe: the
+   clone gets its own blocks. A working copy on another volume (or a filesystem without
+   clones) gets copies.
 2. `--seed-from` (default: the current worktree) clones ignored build output into the new
    worktree: `target/`, `node_modules/`, `_build/`, `.next/`, `.env*` … (override with a
    `.pailseed` file in gitignore syntax). Nested checkouts and other ignored paths are skipped.
 3. Files identical to the seed source get its mtimes, so cargo/make see the seeded build as up
    to date. Files that differ get a fresh mtime and rebuild normally.
+4. The first clone's `.pail/` holds the repository, so it can't be removed while linked
+   working copies use it (as Git's main worktree).
 
 Measured on firstlanding (28,877 files, 459 MB; APFS):
 
@@ -74,21 +127,21 @@ Measured on firstlanding (28,877 files, 459 MB; APFS):
 | same, but target cloned without mtime matching | 5.6 GB, 8 crates | 112s |
 | seeded from a real checkout: 140 `node_modules`/`_build`/`.next`, 5.3 GB apparent | 157 MB | 15s |
 
-## Reading history: Git's interface, any commit, bare or not
+## Reading history: Git's interface, any commit
 
-Every read command runs against a working copy or straight against a store (a bare
-repository): `--store <url>`, `PAIL_STORE`, or a directory path. A bare store's HEAD is its
-default branch (set by `pail init`).
+Read commands run in a working copy, in a bare repository (`--repo`, `PAIL_DIR`, or from
+inside it), or straight against a store (`--store <url>`, `PAIL_STORE`; nothing is kept). A
+bare read's HEAD is the store's default branch.
 
 ```sh
-pail --store s3://bucket/repo log --oneline -20 -- services/rust
-pail --store s3://bucket/repo log -p --stat main~10..main
-pail --store ./repo.pail show HEAD~3 --name-status
-pail --store gs://bucket/repo ls-tree -r -l HEAD:src
-pail --store gs://bucket/repo cat-file -p HEAD:package.json
-printf 'HEAD:Cargo.toml\nHEAD:src\n' | pail --store … cat-file --batch
-pail --store … rev-parse --short=12 HEAD HEAD:src
-pail --store … ls -l HEAD:src  |  pail --store … cat HEAD~2:README.md
+pail --repo repo.pail log --oneline -20 -- services/rust
+pail --repo repo.pail log -p --stat main~10..main
+pail --repo repo.pail show HEAD~3 --name-status
+pail --repo repo.pail ls-tree -r -l HEAD:src
+pail --repo repo.pail cat-file -p HEAD:package.json
+printf 'HEAD:Cargo.toml\nHEAD:src\n' | pail --repo repo.pail cat-file --batch
+pail --repo repo.pail rev-parse --short=12 HEAD HEAD:src
+pail --store s3://bucket/repo ls -l HEAD:src  |  pail --store … cat HEAD~2:README.md
 ```
 
 1. `log`, `show`, `cat-file`, `ls-tree`, `rev-parse` take Git's arguments and print Git's
@@ -103,46 +156,25 @@ pail --store … ls -l HEAD:src  |  pail --store … cat HEAD~2:README.md
 3. `snapshot::Snapshot` is the library API behind it: `stat`, `list_dir`, `walk`, `read`,
    `read_range` for any commit, reading only the manifest pages and packs it needs.
 
-### Commits carry their change lists
+### Filling a repository
 
-Like Mononoke's Bonsai changesets, every commit records the files it changed against its
-parent: path → old (kind, size, content hash) and new (kind, size, content hash, location),
-or a deletion. It is computed at commit time against the parent the commit actually lands on
-(so replayed commits are right), covered by the commit hash, and checked by pail-mirror's
-proof against the manifest diff for every commit. `log`, `show` and `fetch --history` read
-it instead of diffing manifests; commits written before change lists fall back to diffing.
-The list stays raw JSON until read, so walking history doesn't parse it.
-
-| (warm, median ms) | manifest diffs | change lists | git |
-|---|---|---|---|
-| `log --name-status -n 200` | 169 | 24 | 33 |
-| `log -- services/rust` (2,221 commits) | 1,623 | 122 | 308 |
-| `log --stat -n 200` | 343 | 187 | 124 |
-
-### Local content cache
-
-Like a bare Git repository's object database, reads keep what they fetch: file contents go
-into `~/.cache/pail/blobs/<blake3>` (the same store working copies clone from), commits and
-manifest pages into `~/.cache/pail/objects`. Everything is content-addressed and verified on
-read, so the cache never goes stale.
+Like `git fetch` into a bare repository: reads keep what they fetch, and `fetch` fills ahead.
 
 ```sh
-pail --store s3://bucket/repo fetch                 # every file at HEAD
-pail --store s3://bucket/repo fetch --history       # every version along HEAD's history
-pail --store … fetch --all --history -n 500         # all branches, last 500 commits each
-pail cache stats                                    # sizes and locations
-pail cache prune --max-size 20G                     # drop least recently used contents
+pail --repo repo.pail fetch                    # every file at HEAD
+pail --repo repo.pail fetch --history          # every version along HEAD's history
+pail --repo repo.pail fetch --all --history -n 500
+pail --repo repo.pail cache stats              # what the repository holds
+pail --repo repo.pail cache prune --max-size 20G   # drop least recently used contents
 ```
 
-`PAIL_HOME` moves it; `PAIL_BLOBS=off` turns content caching off.
-
-On firstlanding (2,203 commits), `fetch --history` pulled 8,092 file versions (259 MB) in 22s.
+On firstlanding (2,231 commits), `fetch --history` pulled 36,664 file versions (313 MB) in 27s.
 
 ### Local indexes
 
 Derived, rebuildable, never stale (everything they index is immutable):
 
-1. Commit graph (per store, like Git's commit-graph): every commit's metadata and changed
+1. Commit graph (per repository, like Git's commit-graph): every commit's metadata and changed
    paths in one append-only file plus a sorted, memory-mapped index by pail id and Git id.
    Walks, `A..B`, id/prefix lookups and abbreviation lengths read it, never commit objects;
    `log -- <path>` filters on its changed paths.

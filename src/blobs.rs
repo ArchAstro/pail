@@ -1,18 +1,20 @@
-//! Machine-local, content-addressed file store that working copies clone from.
+//! A local repository's content store (`<repo>/blobs/`): file contents by hash, used as
+//! the read cache and as the source working copies clone from.
 //!
 //! ```text
-//! <blobs>/<hh>/<blake3>   one read-only copy per distinct file content
+//! <repo>/blobs/<hh>/<blake3>   one read-only copy per distinct file content
 //! ```
 //!
 //! Files are materialized as copy-on-write clones (APFS `clonefile`, Linux `FICLONE`), so every
 //! working copy shares the store's blocks until a file is edited. A clone never aliases the
 //! store copy (unlike a hardlink), so editing in place is safe and the store is a plain cache:
-//! deleting from it never affects a working copy. Clones only work within one volume, so the
-//! store lives on the working copy's volume; without clone support, files are copied.
+//! deleting from it never affects a working copy. Clones only work within one volume; a
+//! working copy on another volume than its repository (or a filesystem without clones) gets
+//! copies.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,13 +22,7 @@ use anyhow::{Context, Result};
 
 use crate::hash::Hash;
 
-/// Machine-local pail state (blob store, worktree registry): `PAIL_HOME`, default `~/.cache/pail`.
-pub fn pail_home() -> PathBuf {
-    std::env::var_os("PAIL_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache/pail"))
-}
-
+#[derive(Clone)]
 pub struct Blobs {
     pub dir: PathBuf,
 }
@@ -124,50 +120,7 @@ mod imp {
     }
 }
 
-/// The topmost directory on the same device as `p`.
-fn mount_root(p: &Path) -> Option<PathBuf> {
-    let dev = std::fs::metadata(p).ok()?.dev();
-    let mut cur = p.to_path_buf();
-    while let Some(parent) = cur.parent() {
-        if std::fs::metadata(parent).ok()?.dev() != dev {
-            break;
-        }
-        cur = parent.to_path_buf();
-    }
-    Some(cur)
-}
-
 impl Blobs {
-    /// The store for a working copy at `root`: `PAIL_BLOBS` (`off` disables), else
-    /// `<pail home>/blobs` if it is on the same volume, else `<volume>/.pail-blobs`.
-    pub fn for_root(root: &Path) -> Option<Blobs> {
-        let dev = std::fs::metadata(root).ok()?.dev();
-        let usable = |d: PathBuf| std::fs::create_dir_all(&d).ok().map(|_| d);
-        match std::env::var("PAIL_BLOBS") {
-            Ok(v) if v == "off" => return None,
-            Ok(v) => return usable(PathBuf::from(v)).map(|dir| Blobs { dir }),
-            Err(_) => {}
-        }
-        if let Some(d) = usable(pail_home().join("blobs")) {
-            if std::fs::metadata(&d).map(|m| m.dev() == dev).unwrap_or(false) {
-                return Some(Blobs { dir: d });
-            }
-        }
-        usable(mount_root(root)?.join(".pail-blobs")).map(|dir| Blobs { dir })
-    }
-
-    /// The machine-wide store bare reads use as their content cache: `PAIL_BLOBS` (`off`
-    /// disables), else `<pail home>/blobs`.
-    pub fn default_store() -> Option<Blobs> {
-        let dir = match std::env::var("PAIL_BLOBS") {
-            Ok(v) if v == "off" || v.is_empty() => return None,
-            Ok(v) => PathBuf::from(v),
-            Err(_) => pail_home().join("blobs"),
-        };
-        std::fs::create_dir_all(&dir).ok()?;
-        Some(Blobs { dir })
-    }
-
     /// Cached content, if present. Marks it used (at most daily) so pruning keeps it.
     pub fn read(&self, h: &Hash) -> Option<bytes::Bytes> {
         use std::io::Read;

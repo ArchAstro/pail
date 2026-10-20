@@ -5,12 +5,15 @@
 set -uo pipefail
 PAIL=${PAIL:-$(dirname "$0")/../target/release/pail}
 : "${GIT_DIR:?}" "${STORE:?}"
+# pail reads through a local bare repository for the store (REPO, else one made under OUT).
 N=${N:-}           # limit commits for slow (patch) cases
 OUT=${OUT:-$(mktemp -d)}; mkdir -p "$OUT"
+REPO=${REPO:-$OUT/repo.pail}
+[[ -d $REPO ]] || "$PAIL" clone --bare "$STORE" "$REPO" >/dev/null
 export GIT_PAGER=cat PAGER=cat COLUMNS=80 TZ=${TZ:-America/Los_Angeles}
 unset GIT_CONFIG_GLOBAL; export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-tip=$("$PAIL" --store "$STORE" --ids git log -1 --format=%H main)
-root=$("$PAIL" --store "$STORE" --ids git log --reverse --format=%H main | head -1)
+tip=$("$PAIL" --repo "$REPO" --ids git log -1 --format=%H main)
+root=$("$PAIL" --repo "$REPO" --ids git log --reverse --format=%H main | head -1)
 range="$root..$tip"
 pass=0; fail=0; failed=()
 run() {
@@ -20,7 +23,7 @@ run() {
   local opts=() paths=() seen=0
   for a in "$@"; do if [[ $seen == 1 ]]; then paths+=("$a"); elif [[ $a == -- ]]; then seen=1; else opts+=("$a"); fi; done
   git --git-dir="$GIT_DIR" log --first-parent "${opts[@]}" "$range" ${paths[@]+-- "${paths[@]}"} > "$OUT/$name.git" 2>&1
-  "$PAIL" --store "$STORE" --ids git log "${opts[@]}" "$range" ${paths[@]+-- "${paths[@]}"} > "$OUT/$name.pail" 2>&1
+  "$PAIL" --repo "$REPO" --ids git log "${opts[@]}" "$range" ${paths[@]+-- "${paths[@]}"} > "$OUT/$name.pail" 2>&1
   if cmp -s "$OUT/$name.git" "$OUT/$name.pail"; then
     pass=$((pass+1)); printf '  ok    %-28s %8s bytes\n' "$name" "$(wc -c < "$OUT/$name.git" | tr -d ' ')"
   else

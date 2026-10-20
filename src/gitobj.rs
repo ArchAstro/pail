@@ -51,82 +51,64 @@ pub struct GitObjects<'a> {
     pub ctx: &'a Ctx,
 }
 
-/// Git blob ids by content hash, kept in one append-only file (`<blake3> <sha1>` lines) and
-/// loaded whole: far cheaper than a file per blob when a listing needs tens of thousands.
-fn blob_index_path() -> Option<std::path::PathBuf> {
-    Some(crate::repo::default_cache_dir()?.join("gitblob.idx"))
+/// Ids keyed by content hash (`<blake3> <sha1>` lines) in one append-only file of the local
+/// repository, loaded whole on first use: far cheaper than a file per id when a listing needs
+/// tens of thousands. Without a local repository it only lives in memory.
+pub struct IdIndex {
+    path: Option<std::path::PathBuf>,
+    map: std::sync::OnceLock<std::sync::Mutex<HashMap<Hash, String>>>,
 }
 
-fn load_blob_index() -> HashMap<Hash, String> {
-    let Some(p) = blob_index_path() else { return HashMap::new() };
-    let Ok(text) = std::fs::read_to_string(p) else { return HashMap::new() };
-    text.lines()
-        .filter_map(|l| {
-            let (h, g) = l.split_once(' ')?;
-            (g.len() == 40).then(|| Some((Hash::from_hex(h).ok()?, g.to_string()))).flatten()
+impl IdIndex {
+    pub fn new(path: Option<std::path::PathBuf>) -> IdIndex {
+        IdIndex { path, map: std::sync::OnceLock::new() }
+    }
+
+    fn map(&self) -> &std::sync::Mutex<HashMap<Hash, String>> {
+        self.map.get_or_init(|| {
+            let text = self.path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+            let m = text
+                .lines()
+                .filter_map(|l| {
+                    let (h, g) = l.split_once(' ')?;
+                    (g.len() == 40).then(|| Some((Hash::from_hex(h).ok()?, g.to_string()))).flatten()
+                })
+                .collect();
+            std::sync::Mutex::new(m)
         })
-        .collect()
-}
+    }
 
-/// Git blob ids by content hash for this process, loaded from the index on first use.
-fn blob_index() -> &'static std::sync::Mutex<HashMap<Hash, String>> {
-    static IDX: std::sync::OnceLock<std::sync::Mutex<HashMap<Hash, String>>> = std::sync::OnceLock::new();
-    IDX.get_or_init(|| std::sync::Mutex::new(load_blob_index()))
+    pub fn get(&self, h: &Hash) -> Option<String> {
+        self.map().lock().unwrap().get(h).cloned()
+    }
+
+    pub fn insert_all(&self, new: &[(Hash, String)]) {
+        use std::io::Write;
+        if new.is_empty() {
+            return;
+        }
+        self.map().lock().unwrap().extend(new.iter().cloned());
+        let Some(p) = &self.path else { return };
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        let mut buf = String::new();
+        for (h, g) in new {
+            buf.push_str(&format!("{} {g}\n", h.hex()));
+        }
+        // O_APPEND: concurrent writers interleave whole writes.
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let _ = f.write_all(buf.as_bytes());
+        }
+    }
 }
 
 /// The Git blob id of content already in hand: from the index, else hashed and recorded.
-pub fn blob_id_of(h: &Hash, data: &[u8]) -> String {
-    if let Some(id) = blob_index().lock().unwrap().get(h) {
-        return id.clone();
+pub fn blob_id_of(repo: &crate::repo::Repo, h: &Hash, data: &[u8]) -> String {
+    if let Some(id) = repo.git_blobs.get(h) {
+        return id;
     }
     let id = object_id("blob", data);
-    blob_index().lock().unwrap().insert(*h, id.clone());
-    append_blob_index(&[(*h, id.clone())]);
+    repo.git_blobs.insert_all(&[(*h, id.clone())]);
     id
-}
-
-fn append_blob_index(new: &[(Hash, String)]) {
-    use std::io::Write;
-    let Some(p) = blob_index_path() else { return };
-    let _ = std::fs::create_dir_all(p.parent().unwrap());
-    let mut buf = String::new();
-    for (h, g) in new {
-        buf.push_str(&format!("{} {g}\n", h.hex()));
-    }
-    // O_APPEND: concurrent writers interleave whole writes, never partial lines of one batch.
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-        let _ = f.write_all(buf.as_bytes());
-    }
-}
-
-/// Git tree ids by manifest root (both immutable), in one append-only file.
-fn tree_cache() -> &'static std::sync::Mutex<HashMap<Hash, String>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Hash, String>>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        let map = crate::repo::default_cache_dir()
-            .and_then(|d| std::fs::read_to_string(d.join("gittree.idx")).ok())
-            .map(|t| {
-                t.lines()
-                    .filter_map(|l| {
-                        let (r, g) = l.split_once(' ')?;
-                        (g.len() == 40).then(|| Some((Hash::from_hex(r).ok()?, g.to_string()))).flatten()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        std::sync::Mutex::new(map)
-    })
-}
-
-fn tree_cache_put(root: Hash, tree: &str) {
-    use std::io::Write;
-    tree_cache().lock().unwrap().insert(root, tree.to_string());
-    if let Some(d) = crate::repo::default_cache_dir() {
-        let _ = std::fs::create_dir_all(&d);
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("gittree.idx")) {
-            let _ = f.write_all(format!("{} {tree}\n", root.hex()).as_bytes());
-        }
-    }
 }
 
 impl<'a> GitObjects<'a> {
@@ -140,13 +122,12 @@ impl<'a> GitObjects<'a> {
         let mut missing: Vec<Entry> = vec![];
         let mut queued = std::collections::HashSet::new();
         {
-            let mem = blob_index().lock().unwrap();
             for e in entries {
                 if out.contains_key(&e.hash) {
                     continue;
                 }
-                if let Some(id) = mem.get(&e.hash) {
-                    out.insert(e.hash, id.clone());
+                if let Some(id) = self.ctx.repo.git_blobs.get(&e.hash) {
+                    out.insert(e.hash, id);
                 } else if queued.insert(e.hash) {
                     missing.push(e.clone());
                 }
@@ -167,10 +148,9 @@ impl<'a> GitObjects<'a> {
                 new.push((e.hash, id.clone()));
                 out.insert(e.hash, id);
             }
-            append_blob_index(&new);
+            self.ctx.repo.git_blobs.insert_all(&new);
             start = end;
         }
-        blob_index().lock().unwrap().extend(out.iter().map(|(k, v)| (*k, v.clone())));
         Ok(out)
     }
 
@@ -242,11 +222,11 @@ impl<'a> GitObjects<'a> {
             if let Some(t) = c.meta.get("git.tree") {
                 return Ok(t.clone());
             }
-            if let Some(t) = tree_cache().lock().unwrap().get(&c.root) {
-                return Ok(t.clone());
+            if let Some(t) = self.ctx.repo.git_trees.get(&c.root) {
+                return Ok(t);
             }
             let t = self.compute_tree_id(commit, "").await?;
-            tree_cache_put(c.root, &t);
+            self.ctx.repo.git_trees.insert_all(&[(c.root, t.clone())]);
             return Ok(t);
         }
         self.compute_tree_id(commit, dir).await

@@ -1,11 +1,13 @@
 //! A checked-out working copy: `.pail/` state, the Git-style stage, and the stat cache.
+//! Its repository (store, caches, indexes; see `local`) is `.pail/` itself, or for a linked
+//! working copy the one `.pail/repo` names.
 //!
 //! ```text
-//! .pail/config.json     {"store": "<url>"}
 //! .pail/HEAD.json       {"branch": "...", "base": "<commit>"}
 //! .pail/stage.json      staged delta only: path → put|del (size O(changes), not O(repo))
 //! .pail/pending/<hash>  staged file contents, snapshotted at `add` time
 //! .pail/statcache.json  path → (mtime, size, inode, hash) — a cache, safe to delete
+//! .pail/repo            linked working copies: path of the shared repository
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -16,18 +18,14 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::blobs::{Blobs, CloneStats, clone_path, pail_home};
+use crate::blobs::{Blobs, CloneStats, clone_path};
+use crate::local::LocalRepo;
 use crate::hash::Hash;
 use crate::manifest::{Change, Entry, Kind, Loc};
 use crate::objects::now_date;
 use crate::repo::{CommitRequest, Delta, FileInput, Repo};
 
-pub const DOT: &str = ".pail";
-
-#[derive(Serialize, Deserialize)]
-pub struct Config {
-    pub store: String,
-}
+pub const DOT: &str = crate::local::DOT;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Head {
@@ -105,6 +103,8 @@ impl Status {
 pub struct Worktree {
     pub root: PathBuf,
     pub repo: Repo,
+    /// The repository this working copy belongs to.
+    pub local: LocalRepo,
     pub head: Head,
     pub stage: BTreeMap<String, Staged>,
 }
@@ -237,8 +237,9 @@ pub struct Checkout {
 }
 
 impl Checkout {
-    pub fn for_root(root: &Path) -> Checkout {
-        Checkout { blobs: Blobs::for_root(root), ..Default::default() }
+    /// Clone from the repository's content store.
+    pub fn for_repo(repo: &Repo) -> Checkout {
+        Checkout { blobs: repo.blobs.clone(), ..Default::default() }
     }
 
     /// The donor's mtime for `path` if the donor holds the same content.
@@ -420,38 +421,6 @@ fn ignore_walker(root: &Path) -> ignore::Walk {
         .build()
 }
 
-/// Working copies on this machine: path → store. Kept so `pail worktree list` can find them.
-pub fn registered() -> BTreeMap<PathBuf, String> {
-    read_json(&pail_home().join("worktrees.json")).unwrap_or_default()
-}
-
-fn registry_lock() -> Result<std::fs::File> {
-    use fs2::FileExt;
-    let f = std::fs::File::create(pail_home().join("worktrees.lock"))?;
-    f.lock_exclusive()?;
-    Ok(f)
-}
-
-fn edit_registry(f: impl FnOnce(&mut BTreeMap<PathBuf, String>)) -> Result<()> {
-    std::fs::create_dir_all(pail_home())?;
-    let _lock = registry_lock()?;
-    let mut r = registered();
-    f(&mut r);
-    write_json(&pail_home().join("worktrees.json"), &r)
-}
-
-pub fn register(root: &Path, store: &str) -> Result<()> {
-    edit_registry(|r| {
-        r.insert(root.to_path_buf(), store.to_string());
-    })
-}
-
-pub fn unregister(root: &Path) -> Result<()> {
-    edit_registry(|r| {
-        r.remove(root);
-    })
-}
-
 pub fn find_root(start: &Path) -> Result<PathBuf> {
     let mut p = start.to_path_buf();
     loop {
@@ -485,42 +454,56 @@ pub fn author() -> String {
 impl Worktree {
     pub fn open(start: &Path) -> Result<Worktree> {
         let root = find_root(start)?;
-        let cfg: Config = read_json(&dot(&root).join("config.json"))?;
+        let local = LocalRepo::for_worktree(&dot(&root))?;
         let head: Head = read_json(&dot(&root).join("HEAD.json"))?;
         let stage_path = dot(&root).join("stage.json");
         let stage = if stage_path.exists() { read_json(&stage_path)? } else { BTreeMap::new() };
-        Ok(Worktree { root, repo: Repo::open(&cfg.store)?, head, stage })
+        Ok(Worktree { root, repo: local.repo()?, local, head, stage })
     }
 
-    /// Check out `branch` (at its head, or at commit `at`) from `store` into a new directory.
-    /// `co` decides how bytes reach the disk; its blob store is filled in when None.
-    pub async fn clone(store: &str, dir: &Path, branch: &str, at: Option<Hash>, co: &mut Checkout) -> Result<Worktree> {
-        let repo = Repo::open(store)?;
-        let commit = match at {
-            Some(h) => h,
-            None => repo.read_ref(branch).await?.with_context(|| format!("branch {branch} not found"))?.0,
-        };
+    /// Check out `branch` (at its head, or at commit `at`) into a new directory. With
+    /// `shared`, the working copy attaches to that repository (a linked worktree); otherwise
+    /// its `.pail/` becomes a new repository for `store`.
+    pub async fn clone(
+        store: &str,
+        shared: Option<&LocalRepo>,
+        dir: &Path,
+        branch: &str,
+        at: Option<Hash>,
+        co: &mut Checkout,
+    ) -> Result<Worktree> {
         if dir.exists() && std::fs::read_dir(dir)?.next().is_some() {
             bail!("{} exists and is not empty", dir.display());
         }
         std::fs::create_dir_all(dot(dir).join("pending"))?;
         let root = std::fs::canonicalize(dir)?;
+        let local = match shared {
+            Some(r) => {
+                std::fs::write(dot(&root).join("repo"), r.dir.to_string_lossy().as_bytes())?;
+                r.clone()
+            }
+            None => LocalRepo::create(&dot(&root), store, false)?,
+        };
+        let repo = local.repo()?;
+        let commit = match at {
+            Some(h) => h,
+            None => repo.read_ref(branch).await?.with_context(|| format!("branch {branch} not found"))?.0,
+        };
         if co.blobs.is_none() {
-            co.blobs = Blobs::for_root(&root);
+            co.blobs = repo.blobs.clone();
         }
         let c = repo.commit_obj(&commit).await?;
         let entries = repo.entries(c.root).await?;
         co.materialize(&repo, &root, &entries).await?;
-        write_json(&dot(&root).join("config.json"), &Config { store: store.to_string() })?;
         let head = Head { branch: branch.to_string(), base: Some(commit) };
         write_json(&dot(&root).join("HEAD.json"), &head)?;
-        let wt = Worktree { root, repo, head, stage: BTreeMap::new() };
+        local.attach(&root)?;
+        let wt = Worktree { root, repo, local, head, stage: BTreeMap::new() };
         let mut cache = HashMap::new();
         for e in &entries {
             wt.cache_stat(&mut cache, &e.path, e.kind, e.hash);
         }
         wt.save_statcache(&cache)?;
-        register(&wt.root, store)?;
         Ok(wt)
     }
 
@@ -785,7 +768,7 @@ impl Worktree {
         let staged: Vec<String> = self.stage.keys().cloned().collect();
         // The committed snapshots are now shared content: hand them to the blob store so other
         // working copies clone them instead of fetching.
-        if let Some(blobs) = Blobs::for_root(&self.root) {
+        if let Some(blobs) = &self.repo.blobs {
             for s in self.stage.values() {
                 if let Staged::Put { hash, .. } = s {
                     let f = pending.join(hash.hex());
@@ -816,7 +799,7 @@ impl Worktree {
             remove_disk(&self.root, &c.path)?;
             cache.remove(&c.path);
         }
-        Checkout::for_root(&self.root).materialize(&self.repo, &self.root, &writes).await?;
+        Checkout::for_repo(&self.repo).materialize(&self.repo, &self.root, &writes).await?;
         for e in &writes {
             self.cache_stat(&mut cache, &e.path, e.kind, e.hash);
         }
@@ -891,7 +874,7 @@ impl Worktree {
                 n += 1;
             }
         }
-        Checkout::for_root(&self.root).materialize(&self.repo, &self.root, &fetch).await?;
+        Checkout::for_repo(&self.repo).materialize(&self.repo, &self.root, &fetch).await?;
         Ok(n)
     }
 }

@@ -2,7 +2,7 @@
 //! and the compare-and-swap commit protocol.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -84,10 +84,15 @@ pub struct CommitOutcome {
 
 pub struct Repo {
     pub store: Store,
-    cache_dir: Option<PathBuf>,
+    /// The local repository directory holding this client's caches and indexes (see
+    /// `local`). None: a pure remote client that keeps nothing on disk.
+    pub local: Option<PathBuf>,
     /// Local content cache (read-through): file contents by content hash, shared with
     /// working copies. None reads every file from the store.
     pub blobs: Option<crate::blobs::Blobs>,
+    /// Git blob ids by content hash, and Git root tree ids by manifest root.
+    pub git_blobs: crate::gitobj::IdIndex,
+    pub git_trees: crate::gitobj::IdIndex,
     pages: Mutex<HashMap<Hash, Arc<Page>>>,
     commits: Mutex<HashMap<Hash, Arc<Commit>>>,
     /// Commit metadata (no change lists) served by the local commit graph.
@@ -95,24 +100,26 @@ pub struct Repo {
     graph: std::sync::OnceLock<Option<crate::graph::Graph>>,
 }
 
-pub fn default_cache_dir() -> Option<PathBuf> {
-    if let Ok(d) = std::env::var("PAIL_CACHE") {
-        return if d.is_empty() || d == "off" { None } else { Some(PathBuf::from(d)) };
-    }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/pail/objects"))
-}
-
 impl Repo {
-    pub fn open(url: &str) -> Result<Repo> {
-        let mut r = Repo::with_store(Store::open(url)?, default_cache_dir());
-        r.blobs = crate::blobs::Blobs::default_store();
-        Ok(r)
+    /// A client that talks to the store only and keeps nothing locally.
+    pub fn remote(url: &str) -> Result<Repo> {
+        Ok(Repo::with_store(Store::open(url)?, None))
     }
 
-    pub fn with_store(store: Store, cache_dir: Option<PathBuf>) -> Repo {
+    /// A client whose caches and indexes live in the local repository directory `dir`.
+    pub fn with_local(store: Store, dir: &Path) -> Repo {
+        let mut r = Repo::with_store(store, Some(dir.to_path_buf()));
+        r.blobs = Some(crate::blobs::Blobs { dir: dir.join("blobs") });
+        r
+    }
+
+    pub fn with_store(store: Store, local: Option<PathBuf>) -> Repo {
+        let index = |name: &str| crate::gitobj::IdIndex::new(local.as_ref().map(|d| d.join("index").join(name)));
         Repo {
             store,
-            cache_dir,
+            git_blobs: index("gitblob.idx"),
+            git_trees: index("gittree.idx"),
+            local,
             blobs: None,
             pages: Mutex::default(),
             commits: Mutex::default(),
@@ -123,7 +130,7 @@ impl Repo {
 
     fn cache_path(&self, kind: &str, h: &Hash) -> Option<PathBuf> {
         let hex = h.hex();
-        self.cache_dir.as_ref().map(|d| d.join(kind).join(&hex[..2]).join(&hex))
+        self.local.as_ref().map(|d| d.join("objects").join(kind).join(&hex[..2]).join(&hex))
     }
 
     fn cache_read(&self, kind: &str, h: &Hash) -> Option<Vec<u8>> {
@@ -213,7 +220,7 @@ impl Repo {
 
     /// The local commit graph (None when the metadata cache is off).
     pub fn graph(&self) -> Option<&crate::graph::Graph> {
-        self.graph.get_or_init(|| self.cache_dir.as_ref().and_then(|d| crate::graph::Graph::open(d, &self.store.url).ok())).as_ref()
+        self.graph.get_or_init(|| self.local.as_ref().and_then(|d| crate::graph::Graph::open(&d.join("graph")).ok())).as_ref()
     }
 
     /// Make the graph hold `tips` and all their ancestors: walk each tip down to the first

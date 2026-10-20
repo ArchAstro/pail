@@ -3,11 +3,11 @@
 //! opening, verifying and parsing one commit object per commit.
 //!
 //! ```text
-//! One graph per store, under <cache>/graph/<store key>/:
-//! <cache>/graph/commits2.dat  append-only records, ancestors before descendants:
+//! In the local repository's graph/:
+//! commits2.dat                append-only records, ancestors before descendants:
 //!                             [u32 len][32 pail id][20 git id or zeros]
 //!                             [{"c": commit without its change list, "p": changed paths}]
-//! <cache>/graph/commits2.idx  header, then (pail id, offset) sorted by id,
+//! commits2.idx                header, then (pail id, offset) sorted by id,
 //!                             then (git id, row) sorted by git id; memory-mapped
 //! ```
 //!
@@ -189,11 +189,10 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// The graph of one store: Git-id lookups and abbreviation lengths are per repository
-    /// (two stores can hold the same Git commits under different pail ids).
-    pub fn open(cache_dir: &Path, store_url: &str) -> Result<Graph> {
-        let key = Hash::of(store_url.as_bytes()).hex();
-        let dir = cache_dir.join("graph").join(&key[..16]);
+    /// The graph in a local repository's `graph/` (one per repository: Git-id lookups and
+    /// abbreviation lengths are per repository).
+    pub fn open(dir: &Path) -> Result<Graph> {
+        let dir = dir.to_path_buf();
         std::fs::create_dir_all(&dir)?;
         let view = GraphView::open(&dir);
         Ok(Graph { dir, view: std::sync::RwLock::new(Arc::new(view)) })

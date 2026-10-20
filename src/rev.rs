@@ -1,8 +1,9 @@
 //! Where read commands run (a working copy or a bare store) and how revisions resolve.
 //!
-//! A bare repository is just the store: `pail --store s3://bucket/repo log`, `PAIL_STORE`, or
-//! a plain directory path. Its HEAD is the store's default branch (the `HEAD` object written
-//! by `pail init`, else `main`). In a working copy, HEAD is the checked-out base.
+//! Three places to read from: a working copy (HEAD is its checked-out base), a local bare
+//! repository (`pail clone --bare`, found from the current directory or `--repo`/`PAIL_DIR`),
+//! or a store directly (`--store`/`PAIL_STORE`: nothing is kept locally). A bare read's HEAD
+//! is the store's default branch (the `HEAD` object written by `pail init`, else `main`).
 //!
 //! Revisions follow Git: `HEAD`/`@`, branch names (`refs/heads/<b>` too), full or unique
 //! abbreviated ids, `<rev>~<n>`, `<rev>^`, `<rev>^0`, `<rev>^{commit}`. For mirrored history,
@@ -45,6 +46,8 @@ pub struct Ctx {
     head: OnceCell<Option<Hash>>,
     /// Root of the working copy, None when bare.
     pub worktree: Option<PathBuf>,
+    /// The local repository (None when reading a store directly).
+    pub local: Option<crate::local::LocalRepo>,
     pub ids: Ids,
     git_index: OnceCell<GitIndex>,
 }
@@ -66,32 +69,48 @@ pub fn store_url(s: &str) -> Result<String> {
 }
 
 impl Ctx {
-    /// A bare store if one is named (flag or `PAIL_STORE`), else the working copy around `cwd`.
-    pub async fn open(store: Option<String>, ids: Ids) -> Result<Ctx> {
+    /// A store read directly (`store`, `PAIL_STORE`), a local repository (`repo`,
+    /// `PAIL_DIR`), or whatever the current directory is in.
+    pub async fn open(store: Option<String>, repo: Option<PathBuf>, ids: Ids) -> Result<Ctx> {
         let store = store.or_else(|| std::env::var("PAIL_STORE").ok().filter(|s| !s.is_empty()));
-        if let Some(s) = store {
-            // Nothing is read until a command needs HEAD: naming commits directly costs no
-            // round trips.
-            let repo = Repo::open(&store_url(&s)?)?;
-            return Ok(Ctx { repo, branch: OnceCell::new(), head: OnceCell::new(), worktree: None, ids, git_index: OnceCell::new() });
-        }
-        let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
-        let wt = Worktree::open(&cwd).context("not in a working copy (use --store <url> for a bare repository)")?;
-        Ok(Ctx {
-            repo: wt.repo,
-            branch: OnceCell::new_with(Some(wt.head.branch)),
-            head: OnceCell::new_with(Some(wt.head.base)),
-            worktree: Some(wt.root),
+        let bare = |repo: Repo, local: Option<crate::local::LocalRepo>| Ctx {
+            repo,
+            branch: OnceCell::new(),
+            head: OnceCell::new(),
+            worktree: None,
+            local,
             ids,
             git_index: OnceCell::new(),
-        })
+        };
+        if let Some(s) = store {
+            // Nothing is read until a command needs HEAD, and nothing is kept on disk.
+            return Ok(bare(Repo::remote(&store_url(&s)?)?, None));
+        }
+        let start = match repo.or_else(|| std::env::var_os("PAIL_DIR").map(PathBuf::from)) {
+            Some(d) => std::fs::canonicalize(&d).with_context(|| format!("{} not found", d.display()))?,
+            None => std::fs::canonicalize(std::env::current_dir()?)?,
+        };
+        match crate::local::discover(&start)? {
+            crate::local::Found::Bare(local) => Ok(bare(local.repo()?, Some(local))),
+            crate::local::Found::Worktree(root, _) => {
+                let wt = Worktree::open(&root)?;
+                Ok(Ctx {
+                    repo: wt.repo,
+                    branch: OnceCell::new_with(Some(wt.head.branch)),
+                    head: OnceCell::new_with(Some(wt.head.base)),
+                    worktree: Some(wt.root),
+                    local: Some(wt.local),
+                    ids,
+                    git_index: OnceCell::new(),
+                })
+            }
+        }
     }
 
     /// Where the store's default branch is remembered (it rarely changes, so HEAD costs one
     /// read instead of two).
     fn head_memo(&self) -> Option<PathBuf> {
-        let dir = crate::repo::default_cache_dir()?;
-        Some(dir.join("heads").join(Hash::of(self.repo.store.url.as_bytes()).hex()))
+        Some(self.local.as_ref()?.dir.join("HEAD"))
     }
 
     async fn store_default_branch(&self) -> Result<String> {

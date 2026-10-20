@@ -7,7 +7,8 @@ use pail::hash::Hash;
 use pail::objects::now_date;
 use pail::repo::{CommitRequest, Delta, Repo};
 use pail::rev::{Ctx, Ids};
-use pail::worktree::{Checkout, Worktree, author, registered, seed_ignored, unregister};
+use pail::local::LocalRepo;
+use pail::worktree::{Checkout, Worktree, author, seed_ignored};
 
 #[derive(Parser)]
 #[command(name = "pail", version, about = "Version control that lives in a bucket")]
@@ -16,6 +17,10 @@ struct Cli {
     /// file:// or a directory path. Also `PAIL_STORE`.
     #[arg(long)]
     store: Option<String>,
+    /// Use this local repository (a bare `*.pail` directory or a working copy), as
+    /// `git --git-dir`. Also `PAIL_DIR`.
+    #[arg(long)]
+    repo: Option<PathBuf>,
     /// Commit ids to print: pail's, or the Git ids of mirrored commits.
     #[arg(long, value_enum, default_value = "pail")]
     ids: IdsArg,
@@ -37,7 +42,16 @@ enum Cmd {
     /// Create a repository in a store (s3://, gs://, file://) with an empty `main`.
     Init { store: String, #[arg(long, default_value = "main")] branch: String },
     /// Check out a branch into a new directory.
-    Clone { store: String, dir: Option<PathBuf>, #[arg(short, long, default_value = "main")] branch: String },
+    Clone {
+        store: String,
+        dir: Option<PathBuf>,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+        /// Create a bare repository (no working copy): local caches and indexes for reading
+        /// the store, and a home for linked worktrees.
+        #[arg(long)]
+        bare: bool,
+    },
     /// Show staged, unstaged and untracked changes.
     Status,
     /// Stage changes (`-A` for everything).
@@ -349,38 +363,38 @@ async fn run(cli: Cli) -> Result<()> {
     };
     match cli.cmd {
         Cmd::Log { args } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let mut out = Output::open(cli.no_pager);
             let r = cmd_log(&ctx, &args, &mut out).await;
             done(out, r)?;
         }
         Cmd::Show { args } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let mut out = Output::open(cli.no_pager);
             let r = pail::gitcmd::show(&ctx, &args, &mut *out.w, out.tty).await;
             done(out, r)?;
         }
         Cmd::CatFile { args } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let mut out = Output::open(true);
             let r = pail::gitcmd::cat_file(&ctx, &args, &mut *out.w).await;
             done(out, r)?;
         }
         Cmd::LsTree { args } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let mut out = Output::open(true);
             let r = pail::gitcmd::ls_tree(&ctx, &args, &mut *out.w).await;
             done(out, r)?;
         }
         Cmd::RevParse { args } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let mut out = Output::open(true);
             let r = pail::gitcmd::rev_parse(&ctx, &args, &mut *out.w).await;
             done(out, r)?;
         }
         Cmd::Init { store, branch } => {
             let store = pail::rev::store_url(&store)?;
-            let repo = Repo::open(&store)?;
+            let repo = Repo::remote(&store)?;
             if repo.read_ref(&branch).await?.is_some() {
                 bail!("{store} already has branch {branch}");
             }
@@ -404,14 +418,28 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             println!("initialized {store} ({branch} @ {})", out.commit.short());
         }
-        Cmd::Clone { store, dir, branch } => {
+        Cmd::Clone { store, dir, branch, bare } => {
             let store = pail::rev::store_url(&store)?;
-            let dir = dir.unwrap_or_else(|| {
-                PathBuf::from(store.trim_end_matches('/').rsplit('/').next().unwrap_or("repo"))
-            });
+            let name = store.trim_end_matches('/').rsplit('/').next().unwrap_or("repo").to_string();
+            if bare {
+                let dir = dir.unwrap_or_else(|| PathBuf::from(format!("{name}.pail")));
+                if dir.exists() && std::fs::read_dir(&dir)?.next().is_some() {
+                    bail!("{} exists and is not empty", dir.display());
+                }
+                let local = LocalRepo::create(&dir, &store, true)?;
+                let repo = local.repo()?;
+                let tip = repo.read_ref(&branch).await?;
+                println!(
+                    "bare repository {} for {store}{}",
+                    local.dir.display(),
+                    tip.map(|(h, _)| format!(" ({branch} @ {})", h.short())).unwrap_or_default()
+                );
+                return Ok(());
+            }
+            let dir = dir.unwrap_or_else(|| PathBuf::from(&name));
             let t = std::time::Instant::now();
             let mut co = Checkout::default();
-            let wt = Worktree::clone(&store, &dir, &branch, None, &mut co).await?;
+            let wt = Worktree::clone(&store, None, &dir, &branch, None, &mut co).await?;
             let c = wt.repo.commit_obj(&wt.head.base.unwrap()).await?;
             let (gets, _, down, _) = wt.repo.store.stats.snapshot();
             println!(
@@ -597,7 +625,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Ls { target, recursive, long } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let (rev, dir) = match target.as_deref() {
                 Some(t) if t.contains(':') => t.split_once(':').map(|(r, d)| (r.to_string(), d.to_string())).unwrap(),
                 Some(t) if ctx.try_resolve(t).await.unwrap_or(None).is_some() => (t.to_string(), String::new()),
@@ -643,8 +671,8 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Gc { store, grace_hours, dry_run } => {
             let repo = match store {
-                Some(s) => Repo::open(&s)?,
-                None => Worktree::open(&cwd()?)?.repo,
+                Some(s) => Repo::remote(&pail::rev::store_url(&s)?)?,
+                None => Ctx::open(None, cli.repo, ids).await?.repo,
             };
             let r = pail::gc::gc(&repo, (grace_hours * 3600.0) as i64, dry_run).await?;
             println!(
@@ -660,8 +688,8 @@ async fn run(cli: Cli) -> Result<()> {
             );
         }
         Cmd::Fetch { revs, history, max_count, all } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
-            let blobs = ctx.repo.blobs.as_ref().context("the content cache is off (PAIL_BLOBS=off)")?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let blobs = ctx.repo.blobs.as_ref().context("fetch fills a local repository; make one with `pail clone --bare <store>`")?;
             let t = std::time::Instant::now();
             let mut tips = vec![];
             for r in &revs {
@@ -733,22 +761,18 @@ async fn run(cli: Cli) -> Result<()> {
             );
         }
         Cmd::Cache(CacheCmd::Stats) => {
-            let home = pail::blobs::pail_home();
-            if let Some(b) = pail::blobs::Blobs::default_store() {
-                let (n, bytes) = dir_size(&b.dir);
-                println!("contents  {:>9} files  {:>10}  {}", n, fmt_bytes(bytes), b.dir.display());
-            } else {
-                println!("contents  off (PAIL_BLOBS=off)");
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let local = ctx.local.as_ref().context("not in a local repository")?;
+            println!("repository {} ({})", local.dir.display(), local.config.store);
+            for (name, what) in [("blobs", "file contents"), ("objects", "commits, pages"), ("graph", "commit graph"), ("index", "Git ids")] {
+                let (n, bytes) = dir_size(&local.dir.join(name));
+                println!("  {name:8} {:>9} files  {:>10}  {what}", n, fmt_bytes(bytes));
             }
-            if let Some(d) = pail::repo::default_cache_dir() {
-                let (n, bytes) = dir_size(&d);
-                println!("metadata  {:>9} files  {:>10}  {}", n, fmt_bytes(bytes), d.display());
-            }
-            println!("home      {}", home.display());
         }
         Cmd::Cache(CacheCmd::Prune { max_size }) => {
             let max = parse_size(&max_size)?;
-            let b = pail::blobs::Blobs::default_store().context("the content cache is off (PAIL_BLOBS=off)")?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let b = ctx.repo.blobs.as_ref().context("not in a local repository")?;
             let all = b.list();
             let mut total: u64 = all.iter().map(|x| x.1).sum();
             let before = total;
@@ -766,24 +790,28 @@ async fn run(cli: Cli) -> Result<()> {
             println!("removed {removed} file(s), {} → {}", fmt_bytes(before), fmt_bytes(total));
         }
         Cmd::Worktree(WtCmd::Add { path, create, branch, seed_from, no_seed }) => {
-            let here = Worktree::open(&cwd()?)?;
-            let store = std::fs::read_to_string(here.root.join(".pail/config.json"))?;
-            let store: serde_json::Value = serde_json::from_str(&store)?;
-            let store = store["store"].as_str().context("bad config")?.to_string();
+            // From a working copy or a bare repository: the new one links to the same repository.
+            let ctx = Ctx::open(None, cli.repo, ids).await?;
+            let local = ctx.local.clone().context("not in a local repository")?;
+            let (cur_branch, cur_base) = (ctx.branch().await?.to_string(), ctx.head().await?);
             let (br, at) = match (create, branch) {
                 (Some(_), Some(_)) => bail!("use either -b or --branch"),
                 (Some(n), None) => {
-                    let base = here.head.base.context("nothing to branch from")?;
-                    here.repo.create_branch(&n, base).await?;
+                    let base = cur_base.context("nothing to branch from")?;
+                    ctx.repo.create_branch(&n, base).await?;
                     (n, Some(base))
                 }
                 (None, Some(b)) => (b, None),
-                (None, None) => (here.head.branch.clone(), here.head.base),
+                (None, None) => (cur_branch, cur_base),
             };
-            let donor = if no_seed { None } else { Some(std::fs::canonicalize(seed_from.unwrap_or(here.root.clone()))?) };
+            let donor = match (no_seed, seed_from, &ctx.worktree) {
+                (true, _, _) => None,
+                (false, Some(d), _) => Some(std::fs::canonicalize(d)?),
+                (false, None, here) => here.clone(),
+            };
             let t = std::time::Instant::now();
             let mut co = Checkout { donor: donor.clone(), ..Default::default() };
-            let wt = Worktree::clone(&store, &path, &br, at, &mut co).await?;
+            let wt = Worktree::clone(&local.config.store, Some(&local), &path, &br, at, &mut co).await?;
             let files_s = t.elapsed().as_secs_f64();
             println!(
                 "added {} on {br} @ {}: files in {files_s:.1}s ({})",
@@ -811,18 +839,13 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Worktree(WtCmd::List) => {
-            let here = Worktree::open(&cwd()?).ok();
-            let store = here.as_ref().map(|w| {
-                let c: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(w.root.join(".pail/config.json")).unwrap_or_default())
-                        .unwrap_or_default();
-                c["store"].as_str().unwrap_or_default().to_string()
-            });
-            for (p, s) in registered() {
-                if store.as_ref().is_some_and(|st| *st != s) {
-                    continue;
-                }
-                let mark = if here.as_ref().is_some_and(|w| w.root == p) { "*" } else { " " };
+            let ctx = Ctx::open(None, cli.repo, ids).await?;
+            let local = ctx.local.clone().context("not in a local repository")?;
+            if local.config.bare {
+                println!("  {:50} (bare)", local.dir.display());
+            }
+            for p in local.worktrees().into_keys() {
+                let mark = if ctx.worktree.as_ref() == Some(&p) { "*" } else { " " };
                 match Worktree::open(&p) {
                     Ok(w) if w.root == p => println!(
                         "{mark} {:50} {} @ {}",
@@ -846,12 +869,19 @@ async fn run(cli: Cli) -> Result<()> {
             if cwd()?.starts_with(&root) {
                 bail!("can't remove the working copy you are in");
             }
+            // The first working copy's .pail/ is the repository others link to.
+            let holds_repo = wt.local.dir == root.join(".pail");
+            if holds_repo && wt.local.worktrees().keys().any(|p| *p != root) {
+                bail!("{} holds the repository other working copies use; remove those first", root.display());
+            }
             std::fs::remove_dir_all(&root)?;
-            unregister(&root)?;
+            if !holds_repo {
+                wt.local.detach(&root)?;
+            }
             println!("removed {}", root.display());
         }
         Cmd::Cat { path, rev } => {
-            let ctx = Ctx::open(cli.store, ids).await?;
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let (rev, path) = match (rev, path.split_once(':')) {
                 (Some(r), _) => (r, path),
                 (None, Some((r, p))) => (r.to_string(), p.to_string()),

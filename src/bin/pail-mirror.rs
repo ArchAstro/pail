@@ -412,9 +412,6 @@ async fn deep_check(git: &Git, store: &str, branch: &str, git_sha: &str, state: 
     let bin = std::env::current_exe()?.with_file_name("pail");
     let out = std::process::Command::new(&bin)
         .args(["clone", store, pail_dir.to_str().unwrap(), "--branch", branch])
-        .env("PAIL_CACHE", "off")
-        .env("PAIL_BLOBS", "off")
-        .env("PAIL_HOME", work.path())
         .output()
         .with_context(|| format!("running {}", bin.display()))?;
     if !out.status.success() {
@@ -546,7 +543,7 @@ async fn run(args: RunArgs) -> Result<()> {
     fetch(&c.git_dir)?;
     let git = Git::open(&c.git_dir)?;
     let tip_ref = format!("refs/remotes/origin/{}", args.branch);
-    let repo = Repo::open(&c.store)?;
+    let repo = Repo::remote(&c.store)?;
     // The verifier has no disk cache: everything it proves was read from the store.
     let verifier = Repo::with_store(Store::open(&c.store)?, None);
     let mut ids = BlobIds::open(&c.state_dir)?;
