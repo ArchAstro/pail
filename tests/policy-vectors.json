@@ -105,6 +105,22 @@
   "empty": {
    "version": 1
   },
+  "case_sensitive": {
+   "version": 1,
+   "Readers": [
+    "user:nobody-else"
+   ],
+   "Admins": [
+    "*"
+   ],
+   "branches": {
+    "*": {
+     "Writers": [
+      "*"
+     ]
+    }
+   }
+  },
   "closed_readers": {
    "version": 1,
    "readers": [],
@@ -1379,9 +1395,88 @@
    "key": "refs/release/",
    "allow": true,
    "note": "branch 'release/' matches release/* (prefix)"
+  },
+  {
+   "policy": "case_sensitive",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": true,
+   "note": "field names are case-sensitive: Readers is ignored, readers defaults to everyone"
+  },
+  {
+   "policy": "case_sensitive",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": false,
+   "note": "Admins is ignored"
+  },
+  {
+   "policy": "case_sensitive",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": false,
+   "note": "Writers is ignored: the rule has no writers"
   }
  ],
  "invalid_policies": [
+  {
+   "version": 1,
+   "readers": null
+  },
+  {
+   "version": 1,
+   "admins": null
+  },
+  {
+   "version": 1,
+   "gc": null
+  },
+  {
+   "version": 1,
+   "branches": null
+  },
+  {
+   "version": 1,
+   "branches": {
+    "main": {
+     "writers": null
+    }
+   }
+  },
+  {
+   "version": 1,
+   "branches": {
+    "main": null
+   }
+  },
+  {
+   "version": 1,
+   "branches": {
+    "main": {
+     "writers": [
+      null
+     ]
+    }
+   }
+  },
+  {
+   "Version": 1
+  },
+  {
+   "branches": {}
+  },
   {
    "version": 1,
    "branches": {
