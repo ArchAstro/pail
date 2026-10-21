@@ -4,171 +4,29 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
-<style>
-/* Layout: a single left-aligned column of sections on galvanized steel; the hero pairs the
-   thesis with a live bucket listing where a commit lands. */
-:root {
-  --steel: #e9eef0;      /* page: galvanized sheet */
-  --sheet: #f7f9fa;      /* raised surfaces */
-  --ink: #12181b;
-  --muted: #5a6870;
-  --rule: #cdd6da;
-  --water: #0a6a86;      /* accent */
-  --water-soft: #d6eaf0;
-  --amber: #b97806;      /* the moment a ref swaps */
-  --amber-soft: #fbedd0;
-  --code-bg: #10171a;
-  --code-fg: #d9e4e8;
-  --code-dim: #7d9099;
-  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
-  --body: "Archivo", "Helvetica Neue", Arial, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --steel: #0e1417; --sheet: #151d21; --ink: #e5ecef; --muted: #93a5ad; --rule: #263238;
-    --water: #55b8d4; --water-soft: #13313b; --amber: #f0b43c; --amber-soft: #3a2c10;
-    --code-bg: #0a0f11; --code-fg: #d9e4e8; --code-dim: #6d818a; color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --steel: #0e1417; --sheet: #151d21; --ink: #e5ecef; --muted: #93a5ad; --rule: #263238;
-  --water: #55b8d4; --water-soft: #13313b; --amber: #f0b43c; --amber-soft: #3a2c10;
-  --code-bg: #0a0f11; --code-fg: #d9e4e8; --code-dim: #6d818a; color-scheme: dark;
-}
-* { box-sizing: border-box; }
-body {
-  background: var(--steel); color: var(--ink); font: 400 17px/1.6 var(--body);
-  font-variation-settings: "wdth" 100;
-  padding-left: max(16px, env(safe-area-inset-left, 0px));
-  padding-right: max(16px, env(safe-area-inset-right, 0px));
-}
-a { color: var(--water); text-underline-offset: 3px; }
-a:focus-visible, button:focus-visible { outline: 2px solid var(--water); outline-offset: 3px; border-radius: 3px; }
-.wrap { max-width: 1120px; margin: 0 auto; }
-code, .mono { font-family: var(--mono); font-size: 0.88em; }
-p code, li code, td code { background: var(--water-soft); padding: 1px 5px; border-radius: 4px; }
-
-/* top bar */
-.bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 22px 0; }
-.mark { display: flex; align-items: baseline; gap: 10px; font: 800 26px/1 var(--display); font-variation-settings: "wdth" 125; letter-spacing: -0.02em; color: var(--ink); text-decoration: none; }
-.mark small { font: 500 13px/1 var(--mono); color: var(--muted); letter-spacing: 0; }
-.bar nav { display: flex; gap: 20px; flex-wrap: wrap; font-size: 15px; }
-.bar nav a { color: var(--muted); text-decoration: none; }
-.bar nav a:hover { color: var(--ink); }
-
-/* hero */
-.hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 48px; align-items: center; padding-block: 64px 72px; }
-.hero h1 {
-  font: 800 clamp(40px, 6.2vw, 76px)/0.98 var(--display); font-variation-settings: "wdth" 118;
-  letter-spacing: -0.03em; margin: 0 0 22px; text-wrap: balance;
-}
-.lede { font-size: 20px; line-height: 1.55; color: var(--muted); max-width: 34em; margin: 0 0 28px; }
-.lede strong { color: var(--ink); font-weight: 600; }
-.install { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.cmd { display: inline-flex; align-items: center; gap: 12px; background: var(--code-bg); color: var(--code-fg); font: 500 15px/1 var(--mono); padding: 14px 16px; border-radius: 8px; min-width: 0; max-width: 100%; overflow-x: auto; }
-.cmd span { color: var(--code-dim); }
-.btn { font: 600 14px/1 var(--body); border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); padding: 12px 14px; border-radius: 8px; cursor: pointer; }
-.btn:hover { border-color: var(--muted); }
-
-/* the bucket */
-.bucket { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--rule); border-radius: 14px; padding: 20px 20px 18px; font: 13.5px/1.75 var(--mono); min-width: 0; box-shadow: 0 30px 60px -30px rgba(10, 30, 40, 0.45); }
-.bucket .head { display: flex; justify-content: space-between; gap: 12px; color: var(--code-dim); font-size: 12.5px; margin-bottom: 10px; flex-wrap: wrap; }
-.bucket .head b { color: var(--code-fg); font-weight: 600; }
-.rows { overflow-x: auto; }
-.row { display: grid; grid-template-columns: 1.6em minmax(0, 1fr) auto; gap: 10px; padding: 1px 8px; border-radius: 5px; white-space: nowrap; transition: background 400ms, color 400ms; }
-.row .k { overflow: hidden; text-overflow: ellipsis; }
-.row .t { color: var(--code-dim); }
-.row .i { color: var(--code-dim); }
-.row.dir .k { color: var(--code-dim); }
-.row.new { background: rgba(85, 184, 212, 0.16); }
-.row.new .i { color: #55b8d4; }
-.row.ref { color: #f3d58c; }
-.row.swap { background: rgba(240, 180, 60, 0.22); }
-.row.swap .i { color: #f0b43c; }
-.bucket .foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #22313a; color: var(--code-dim); font-size: 12.5px; flex-wrap: wrap; }
-.bucket .foot output { color: #f3d58c; }
-@media (prefers-reduced-motion: reduce) { .row { transition: none; } }
-
-/* sections */
-section { padding-block: 72px; border-top: 1px solid var(--rule); }
-.eyebrow { font: 600 13px/1 var(--mono); color: var(--water); letter-spacing: 0.02em; margin: 0 0 14px; }
-h2 { font: 800 clamp(30px, 4vw, 46px)/1.04 var(--display); font-variation-settings: "wdth" 112; letter-spacing: -0.025em; margin: 0 0 18px; max-width: 18em; text-wrap: balance; }
-h3 { font: 700 20px/1.25 var(--display); font-variation-settings: "wdth" 105; margin: 0 0 8px; }
-.prose { max-width: 40em; color: var(--muted); }
-.prose p { margin: 0 0 14px; }
-.prose strong { color: var(--ink); font-weight: 600; }
-.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: start; margin-top: 36px; }
-.split > * { min-width: 0; }
-
-pre.code { margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 12px; padding: 18px 20px; font: 13.5px/1.7 var(--mono); overflow-x: auto; }
-pre.code .c { color: var(--code-dim); }
-pre.code .k { color: #55b8d4; }
-pre.code .a { color: #f3d58c; }
-
-.layout { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 20px; font: 14px/1.9 var(--mono); overflow-x: auto; }
-.layout .mut { color: var(--amber); font-weight: 600; }
-.layout .imm { color: var(--water); }
-.layout .note { color: var(--muted); font-family: var(--body); font-size: 13.5px; }
-
-.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 16px; counter-reset: s; }
-.steps li { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: start; }
-.steps li::before { counter-increment: s; content: counter(s); font: 700 15px/34px var(--mono); text-align: center; background: var(--water-soft); color: var(--water); border-radius: 50%; width: 34px; height: 34px; }
-.steps p { margin: 0; color: var(--muted); }
-.steps b { color: var(--ink); }
-
-/* numbers */
-.numbers { margin-top: 36px; overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; min-width: 560px; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--rule); vertical-align: top; }
-th { font: 600 13px/1.3 var(--mono); color: var(--muted); }
-td.p { font-weight: 700; color: var(--ink); }
-td .sub { display: block; font-size: 13.5px; color: var(--muted); font-weight: 400; }
-.bar-cell { display: grid; gap: 6px; min-width: 200px; }
-.meter { height: 8px; background: var(--rule); border-radius: 4px; overflow: hidden; }
-.meter i { display: block; height: 100%; border-radius: 4px; }
-.meter.g i { background: var(--muted); }
-.meter.p i { background: var(--water); }
-.fine { font-size: 14px; color: var(--muted); max-width: 46em; margin-top: 16px; }
-
-/* features */
-.features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px 40px; margin-top: 36px; }
-.features div { min-width: 0; }
-.features p { margin: 0; color: var(--muted); }
-
-/* conventions */
-.conv { margin-top: 28px; overflow-x: auto; }
-.conv table { min-width: 620px; }
-.conv td:first-child { font-family: var(--mono); font-size: 14px; white-space: nowrap; color: var(--water); }
-.flow { margin-top: 36px; }
-
-.cta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: center; }
-footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-
-@media (max-width: 900px) {
-  .hero, .split, .cta { grid-template-columns: minmax(0, 1fr); }
-  .features { grid-template-columns: minmax(0, 1fr); }
-  .hero { padding-block: 40px 56px; gap: 36px; }
-  section { padding-block: 56px; }
-}
-</style>
-
+<link rel="stylesheet" href="site.css">
+<!-- /head -->
 <div class="wrap">
   <header class="bar">
-    <a class="mark" href="#top">pail <small>pail.build</small></a>
+    <a class="mark" href="index.html">pail <small>pail.build</small></a>
     <nav aria-label="Sections">
-      <a href="#how">How it works</a>
+      <a href="how-it-works.html">How it works</a>
       <a href="#numbers">Numbers</a>
-      <a href="#extend">Extend</a>
-      <a href="#protect">Protect</a>
-      <a href="#start">Get started</a>
+      <a href="#hosts">Hosts</a>
+      <a href="#security">Security</a>
+      <a href="https://github.com/ArchAstro/pail">GitHub</a>
     </nav>
   </header>
 
   <div class="hero" id="top">
     <div>
       <h1>Version control that lives in your bucket.</h1>
-      <p class="lede">A pail repository is just a folder in S3, GCS or any other object store. <strong>There's no server, and there's no push.</strong> When you commit, pail uploads a few new files and does one conditional write to the branch, and everyone sees the commit right away. <code>pail log</code> and <code>pail show</code> print exactly what Git would.</p>
+      <p class="lede">pail keeps your repository in S3 or GCS and lets every person and agent commit straight to it.</p>
+      <ul class="points">
+        <li><b>Your repo is just a bucket.</b> There's no server to run, and the data never leaves your cloud account.</li>
+        <li><b>A commit is one write.</b> No push and no merge queue. Everyone sees the commit as soon as it lands.</li>
+        <li><b>Git can read it.</b> <code>pail log</code>, <code>show</code> and <code>cat-file</code> print exactly what Git would.</li>
+      </ul>
       <div class="install">
         <div class="cmd" id="cmd"><span>$</span> curl -fsSL https://pail.build/install.sh | sh</div>
         <button class="btn" id="copy" type="button">Copy</button>
@@ -183,33 +41,14 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
   </div>
 
   <section id="how">
-    <p class="eyebrow">How it works</p>
-    <h2>Nothing in the bucket changes except the branch pointers.</h2>
+    <h2>A commit, start to finish</h2>
     <div class="prose">
-      <p>File contents go into packs. The file tree of each commit is a <strong>prolly tree</strong>, split into small pages named by their BLAKE3 hash. Change three files and you write three or four small pages, whether the repository has a hundred files or a million. Commits, pages and packs are never modified after they're written, so you can cache them anywhere.</p>
-      <p>The only thing that ever changes is <code>refs/&lt;branch&gt;</code>, and only through compare-and-swap. Every major object store supports that kind of conditional write now. That one write is the commit.</p>
-    </div>
-    <div class="split">
-      <div class="layout" role="img" aria-label="Repository layout in the bucket">
-        <div><span class="mut">refs/main</span> <span class="note">the branch: {commit, version}, only moved by CAS</span></div>
-        <div><span class="mut">refs/pr/hello</span></div>
-        <div><span class="imm">commits/7f3a…</span> <span class="note">parent, root, author, message, changed paths</span></div>
-        <div><span class="imm">pages/c684…</span> <span class="note">manifest: path → size, hash, location</span></div>
-        <div><span class="imm">packs/91be….pack</span> <span class="note">file contents, zstd</span></div>
-        <div><span class="imm">chunks/…</span> <span class="note">large files, content-defined chunks</span></div>
-        <div><span class="mut">intents/main/…</span> <span class="note">commits waiting to be combined</span></div>
-      </div>
-      <ol class="steps">
-        <li><p><b>Prepare locally.</b> pail hashes the changed files, rebuilds the few pages above them and writes the commit object. It knows the name of everything it's going to upload before it sends a byte.</p></li>
-        <li><p><b>Upload everything at once.</b> Packs, pages and the commit go up in parallel, so that's one round trip.</p></li>
-        <li><p><b>Move the branch.</b> One conditional write, from the version your working copy last saw. That's the second round trip. If someone else got there first and touched different files, pail replays your commit on top of theirs.</p></li>
-        <li><p><b>When it's busy, batch.</b> A writer that loses the race leaves an intent instead of retrying. The oldest waiting writer lands all pending intents in one write, each as its own commit, in order. This matters on GCS, which only allows about one write per second to the same object.</p></li>
-      </ol>
+      <p>pail hashes your changed files, uploads them next to a new commit object, and then does one conditional write to <code>refs/main</code>. That last write is the whole commit. If someone else got there first and touched different files, pail replays yours on top and tries again.</p>
+      <p><a href="how-it-works.html">Follow one commit through the bucket, object by object.</a></p>
     </div>
   </section>
 
   <section id="numbers">
-    <p class="eyebrow">Numbers</p>
     <h2>How it compares to pushing to GitHub</h2>
     <div class="prose">
       <p>We ran the same edits through both CLIs from the same laptop. Each writer made 20 commits to one shared branch: <code>git add/commit/push</code> to a private GitHub repository, and <code>pail add/commit</code> to a GCS bucket. After each pail run we checked that every commit actually made it onto main.</p>
@@ -231,7 +70,6 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
   </section>
 
   <section id="agents">
-    <p class="eyebrow">Agents</p>
     <h2>Built for lots of agents committing to the same branch</h2>
     <div class="features">
       <div><h3>Land a whole stack at once</h3><p><code>pail land feature --stack</code> puts every commit on a branch onto main in one write. If it fails partway, run it again. It picks up where it left off.</p></div>
@@ -243,105 +81,62 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
     </div>
   </section>
 
-  <section id="extend">
-    <p class="eyebrow">Extend</p>
-    <h2>PRs and CI are just programs that read and write branches</h2>
-    <div class="prose">
-      <p>You don't need a server for pull requests or CI. Every commit is a write to <code>refs/&lt;branch&gt;</code>, and object stores already send a notification when something is written. A tool listens for those, reads what it needs, and saves its results as commits on a <code>_meta</code> branch. That way every record gets history and conflict checks for free.</p>
+  <section id="hosts">
+    <h2>Where your repository lives, and how people sign in</h2>
+    <div class="prose"><p>A repository is a URL. Point it at whatever storage you already have, and install the credential provider that matches how your people sign in. Providers are small programs in their own GitHub repos, like <code>gh</code> extensions.</p></div>
+    <div class="hosts">
+      <div class="host-list">
+        <h3>Hosts</h3>
+        <dl>
+          <dt><code>gs://bucket/repo</code></dt><dd>Google Cloud Storage</dd>
+          <dt><code>s3://bucket/repo</code></dt><dd>Amazon S3, or anything that speaks S3 with conditional writes</dd>
+          <dt><code>file:///path/repo</code></dt><dd>A local folder, for tests and laptops</dd>
+          <dt><code>https://host/repo</code></dt><dd>Any <code>pail serve</code> proxy, for people with no bucket access at all</dd>
+          <dt><code>https://pail.archdev.ai/org/repo</code></dt><dd>Hosted on ArchDev <span class="soon">coming</span></dd>
+        </dl>
+      </div>
+      <div class="host-list">
+        <h3>Sign-in</h3>
+        <dl>
+          <dt><code>pail auth install gcloud</code></dt><dd>Your gcloud login. <a href="https://github.com/ArchAstro/pail-credential-gcloud">pail-credential-gcloud</a></dd>
+          <dt><code>pail auth install gcs-downscoped</code></dt><dd>Your gcloud login, narrowed to one repository. <a href="https://github.com/ArchAstro/pail-credential-gcs-downscoped">pail-credential-gcs-downscoped</a></dd>
+          <dt><code>pail auth install archdev</code></dt><dd>Your ArchDev login. <a href="https://github.com/ArchAstro/pail-credential-archdev">pail-credential-archdev</a></dd>
+          <dt>No provider</dt><dd>S3 and GCS use the credentials your cloud SDK already has.</dd>
+          <dt><code>pail auth install you/pail-credential-sso</code></dt><dd>Your own provider for your SSO or token broker. Pin it with <code>@v1.2</code>.</dd>
+        </dl>
+      </div>
     </div>
-    <div class="conv">
-      <table>
-        <thead><tr><th>Name</th><th>Meaning</th></tr></thead>
-        <tbody>
-          <tr><td>pr/*</td><td>Branches proposed for review.</td></tr>
-          <tr><td>_meta:prs/12.json</td><td>A pull request: title, head, base, author, state. Claimed once with <code>pail put --if-absent</code>.</td></tr>
-          <tr><td>_meta:prs/12/reviews/bob.json</td><td>A review: approve or request changes.</td></tr>
-          <tr><td>_meta:checks/&lt;commit&gt;/test.json</td><td>A check result for one commit, written by CI.</td></tr>
-          <tr><td>main:pail.ci.json</td><td>The checks a commit declares, and which are required to merge.</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="split flow">
-      <pre class="code" aria-label="CI driven by bucket events"><span class="c"># wire the bucket's notifications once</span>
-<span class="k">gcloud</span> storage buckets notifications create gs://acme-vcs \
-  --topic=pail-refs --object-prefix=app/refs/
-
-<span class="c"># CI: follow ref events, build the exact commit,</span>
-<span class="c"># record each check on _meta</span>
-<span class="k">pail-ci</span> run --branch <span class="a">'pr/*'</span> \
-  --gcs-subscription projects/acme/subscriptions/pail-ci
-
-<span class="c"># under the hood: plain pail commands</span>
-<span class="k">pail</span> events --branch <span class="a">'pr/*'</span>
-<span class="k">pail</span> clone gs://acme-vcs/app src --at 126ebf48
-<span class="k">pail</span> put _meta --file checks/126ebf48/test.json=-</pre>
-      <pre class="code" aria-label="A pull request from open to merge"><span class="k">pail</span> switch -c pr/hello
-<span class="k">pail</span> commit -am <span class="a">"Say hello"</span>
-<span class="k">pail-pr</span> open pr/hello --title <span class="a">"Say hello"</span>
-<span class="c">opened PR 1: pr/hello → main</span>
-
-<span class="k">pail-pr</span> review 1 --approve       <span class="c"># as Bob</span>
-<span class="k">pail-pr</span> merge 1
-<span class="c">landed 1 commit(s) from pr/hello onto main</span>
-<span class="c">merged PR 1 into main @ 126ebf48d9dc</span></pre>
-    </div>
-    <p class="fine">Both are short scripts that only call the pail CLI. On GCS, the notification showed up 1.2 to 1.6 seconds after the commit started. Notifications can arrive twice or out of order, so <code>pail events</code> re-reads the branch and drops duplicates, and CI files every result under the commit it tested.</p>
   </section>
 
-  <section id="protect">
-    <p class="eyebrow">Protect branches</p>
-    <h2>The bucket itself enforces branch protection</h2>
+  <section id="extend">
+    <h2>PRs and CI are just programs that read and write branches</h2>
     <div class="prose">
-      <p>There's no server in the middle, so a rule only means something if the object store enforces it. That's where pail puts it. <strong>Only a lander can write a protected branch.</strong> Everyone else can add history but never delete or rewrite it, and the lander only moves <code>refs/main</code> once the reviews and checks pass.</p>
+      <p>You don't need a server for pull requests or CI. The bucket already sends a notification whenever a branch moves. A CI runner listens for those, builds the exact commit, and saves its result as a commit on a <code>_meta</code> branch. Our <code>pail-pr</code> and <code>pail-ci</code> prototypes are short scripts that only call the pail CLI.</p>
+      <p><a href="how-it-works.html#extend">See the naming conventions and a full PR flow.</a></p>
     </div>
-    <div class="conv">
-      <table>
-        <thead><tr><th>Object</th><th>People and agents</th><th>Lander</th><th>Why</th></tr></thead>
-        <tbody>
-          <tr><td>refs/main, refs/release/*</td><td>read</td><td>write</td><td>Protected branches only move after review.</td></tr>
-          <tr><td>refs/pr/*, refs/&lt;you&gt;/*</td><td>write</td><td>write</td><td>Work in progress doesn't wait on anyone.</td></tr>
-          <tr><td>commits/ pages/ packs/</td><td>create only</td><td>create only</td><td>Nobody can delete or rewrite history. Only garbage collection deletes.</td></tr>
-          <tr><td>intents/main/*</td><td>none</td><td>write</td><td>No batching on protected branches (more below).</td></tr>
-          <tr><td>_policy</td><td>read</td><td>admins only</td><td>Only admins can change the rules.</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="split flow">
-      <pre class="code" aria-label="Branch policy"><span class="c"># _policy:policy.json  (pail policy set)</span>
-{ <span class="a">"version"</span>: 1, <span class="a">"admins"</span>: [<span class="a">"role:admin"</span>], <span class="a">"branches"</span>: {
-  <span class="a">"main"</span>: {
-    <span class="a">"writers"</span>: [<span class="a">"lander"</span>],
-    <span class="a">"approvals"</span>: 1,
-    <span class="a">"required_checks"</span>: [<span class="a">"test"</span>, <span class="a">"lint"</span>]
-  },
-  <span class="a">"release/*"</span>: { <span class="a">"writers"</span>: [<span class="a">"lander"</span>], <span class="a">"approvals"</span>: 2 },
-  <span class="a">"_policy"</span>: { <span class="a">"writers"</span>: [<span class="a">"role:admin"</span>] },
-  <span class="a">"*"</span>: { <span class="a">"writers"</span>: [<span class="a">"*"</span>] }
-} }</pre>
-      <ol class="steps">
-        <li><p><b>Sign in and get a token.</b> A broker checks who you are and runs <code>pail policy token --as you</code>. The token it hands back is short-lived and only allows what the policy allows, so committing straight to main fails at the bucket.</p></li>
-        <li><p><b>Commit to a PR branch.</b> Commits to <code>pr/*</code> work like any other commit. CI hears about them from the bucket's notifications and records its checks.</p></li>
-        <li><p><b>Get a review.</b> An approval is a record for one exact commit. A review tool writes it and stamps who actually signed in, so you can't approve in someone else's name.</p></li>
-        <li><p><b>The lander merges.</b> The lander is the only identity that can write <code>refs/main</code>. It reads <code>pail policy requirements main</code>, makes sure someone other than the author approved and the required checks passed on that exact commit, and then lands the stack in one write.</p></li>
-      </ol>
-    </div>
-    <div class="features">
-      <div><h3>Where the rules are checked</h3><p>The same policy file works three ways. <code>pail serve</code> checks every request, on any backend. A broker runs <code>pail policy token</code> so GCS enforces it directly. The lander checks reviews and CI before it moves a branch.</p></div>
-      <div><h3>No batching on protected branches</h3><p>When pail batches commits, the writer doing the batching lands everyone else's changes too. On main, that would be a way to sneak in unreviewed work. So only the lander writes there, and it only batches changes it has already approved.</p></div>
-      <div><h3>The author field isn't trusted</h3><p>A commit's author is whatever the writer typed in. Policy decisions only look at who actually authenticated, or at records a trusted tool wrote. They never look at the author field.</p></div>
-    </div>
-    <p class="fine">We tested this on GCS. A token built from these rules can read the repository, add history and write <code>refs/pr/*</code>. It gets a 403 when it tries to write <code>refs/main</code> or <code>refs/release/*</code>, delete or overwrite history, or touch another repository. One requirement: people can't have bucket permissions of their own. They only get tokens from the broker. <code>docs/protecting-branches.md</code> explains how to build the broker and the lander.</p>
+  </section>
+
+  <section id="security">
+    <h2>Security</h2>
+    <div class="prose"><p>pail has no server of its own to break into. What's left is your bucket's permissions and the tokens people carry, so that's where the work goes.</p></div>
+    <ul class="sec">
+      <li><b>Your data stays in your cloud account.</b> pail talks to your bucket directly. Nothing is copied anywhere else.</li>
+      <li><b>Tokens are short-lived and scoped to one repository.</b> People don't need bucket keys, and a token for one repo can't touch another.</li>
+      <li><b>History can only be added to.</b> Commits, file contents and manifest pages are create-only. Nobody can delete or rewrite them except garbage collection.</li>
+      <li><b>Protected branches are enforced by the store.</b> On GCS, a token's access boundary simply doesn't include <code>refs/main</code>, so a direct commit gets a 403 from Google. Or put <code>pail serve</code> in front and it checks every request.</li>
+      <li><b>Installs are pinned and checked.</b> <code>install.sh</code> verifies the release checksum, and credential providers are installed from an exact commit with its sha256 recorded.</li>
+    </ul>
+    <p class="fine"><a href="how-it-works.html#protect">How branch protection works</a><br><a href="https://github.com/ArchAstro/pail/blob/main/docs/protecting-branches.md">Building a token broker and a lander</a></p>
   </section>
 
   <section id="start">
     <div class="cta">
       <div>
-        <p class="eyebrow">Get started</p>
         <h2>All you need is a bucket</h2>
-        <div class="prose"><p>Any S3 or GCS bucket works, or a local folder with <code>file://</code>. People who don't have bucket credentials can sign in through a credential provider, or go through <code>pail serve</code>.</p></div>
+        <div class="prose"><p>Any S3 or GCS bucket works, or a local folder with <code>file://</code>.</p></div>
       </div>
       <pre class="code" aria-label="Getting started">curl -fsSL https://pail.build/install.sh | sh
-<span class="k">pail</span> auth install gcloud            <span class="c"># S3 uses your AWS credentials as is</span>
+<span class="k">pail</span> auth install gcloud
 <span class="k">pail</span> init gs://acme-vcs/app
 <span class="k">pail</span> clone gs://acme-vcs/app && cd app
 <span class="k">pail</span> add -A
@@ -351,8 +146,8 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
   </section>
 
   <footer>
-    <span>pail: version control that lives in your bucket</span>
-    <span>Built at ArchAstro</span>
+    <span>pail: version control that lives in your bucket. MIT licensed.</span>
+    <span><a href="https://github.com/ArchAstro/pail">GitHub</a> &nbsp; Built at ArchAstro</span>
   </footer>
 </div>
 
