@@ -160,6 +160,7 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
       <a href="#how">How it works</a>
       <a href="#numbers">Numbers</a>
       <a href="#extend">Extend</a>
+      <a href="#protect">Protect</a>
       <a href="#start">Get started</a>
     </nav>
   </header>
@@ -285,6 +286,51 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
 <span class="c">merged PR 1 into main @ 126ebf48d9dc</span></pre>
     </div>
     <p class="fine">Both extensions are short programs that only call the pail CLI. Measured on GCS, a ref event reached the subscriber 1.2 to 1.6 seconds after the commit started. Notifications are at-least-once and unordered, so <code>pail events</code> re-reads the ref and drops duplicates, and CI keys every result by commit.</p>
+  </section>
+
+  <section id="protect">
+    <p class="eyebrow">Protect branches</p>
+    <h2>The bucket's permissions are the rule book.</h2>
+    <div class="prose">
+      <p>With no server in the write path, a rule only holds if the store enforces it. So pail puts protection where the bytes are: <strong>nobody but a lander can write a protected ref</strong>, content is create-only, and the lander moves <code>refs/main</code> only after the policy is met.</p>
+    </div>
+    <div class="conv">
+      <table>
+        <thead><tr><th>Object</th><th>People and agents</th><th>Lander</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>refs/main, refs/release/*</td><td>read</td><td>write</td><td>Protected branches move only through review.</td></tr>
+          <tr><td>refs/pr/*, refs/&lt;you&gt;/*</td><td>write</td><td>write</td><td>Work in progress stays fast and unreviewed.</td></tr>
+          <tr><td>commits/ pages/ packs/</td><td>create only</td><td>create only</td><td>History cannot be deleted or overwritten. Only GC deletes.</td></tr>
+          <tr><td>intents/main/*</td><td>none</td><td>write</td><td>No combining on a protected branch (see below).</td></tr>
+          <tr><td>_policy</td><td>read</td><td>admins only</td><td>The rules themselves are protected.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="split flow">
+      <pre class="code" aria-label="Branch policy"><span class="c"># _policy:branches.json</span>
+{
+  <span class="a">"main"</span>: {
+    <span class="a">"writers"</span>: [<span class="a">"lander"</span>],
+    <span class="a">"approvals"</span>: 1,
+    <span class="a">"required_checks"</span>: [<span class="a">"test"</span>, <span class="a">"lint"</span>],
+    <span class="a">"code_owners"</span>: <span class="a">"main:CODEOWNERS"</span>
+  },
+  <span class="a">"release/*"</span>: { <span class="a">"writers"</span>: [<span class="a">"lander"</span>], <span class="a">"approvals"</span>: 2 },
+  <span class="a">"pr/*"</span>: { <span class="a">"writers"</span>: [<span class="a">"*"</span>] }
+}</pre>
+      <ol class="steps">
+        <li><p><b>Sign in, get a narrow token.</b> Your credential provider mints a short-lived token for one repository. Its access boundary leaves out protected refs and every delete, so a direct push to main fails at the bucket.</p></li>
+        <li><p><b>Push to a PR branch.</b> Commits land on <code>pr/*</code> as usual; CI records checks from the bucket's events.</p></li>
+        <li><p><b>Reviews are signed.</b> An approval is an attestation signed by the identity service ("bob approved 126ebf48"), so no one can write a review in someone else's name.</p></li>
+        <li><p><b>The lander merges.</b> A merge request is an event. The lander, the only identity allowed to write <code>refs/main</code>, checks approvals from people other than the author, required checks on the exact head commit and code owners, then lands the stack with one swap.</p></li>
+      </ol>
+    </div>
+    <div class="features">
+      <div><h3>Three places to enforce</h3><p>Bucket IAM for the floor (create-only content, no deletes). A token broker plus lander for repositories in your own bucket, with no server in the path. Or a gateway such as ArchDev's, which checks every request against the branch rules.</p></div>
+      <div><h3>No combining across trust</h3><p>Combining lands other writers' changes with the combiner's permissions. On a protected branch that would let a privileged writer land unreviewed work, so only the lander writes there, and it batches only changes it approved.</p></div>
+      <div><h3>Authors are claims, signatures are proof</h3><p>A commit's author field says who the writer typed in. Policy decisions rely only on authenticated writers or signed records, never on that field.</p></div>
+    </div>
+    <p class="fine">Status: today, credential providers already mint tokens scoped to one repository prefix (verified on GCS), and the PR prototype checks approvals and required checks before landing. Next: the policy file, the lander, signed reviews, and per-ref token boundaries.</p>
   </section>
 
   <section id="start">
