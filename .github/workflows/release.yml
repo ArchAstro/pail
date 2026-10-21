@@ -1,0 +1,51 @@
+# Tag vX.Y.Z (matching Cargo.toml) to publish binaries as a GitHub release.
+# https://pail.build/install.sh installs them.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest, platform: darwin-arm64 }
+          - { target: x86_64-apple-darwin, os: macos-latest, platform: darwin-amd64 }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, platform: linux-amd64 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, platform: linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml $v"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --bin pail --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          d=pail-${{ matrix.platform }}
+          mkdir $d && cp target/${{ matrix.target }}/release/pail README.md $d/
+          tar czf $d.tar.gz $d
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pail-${{ matrix.platform }}
+          path: pail-${{ matrix.platform }}.tar.gz
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: sha256sum pail-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes pail-*.tar.gz SHA256SUMS

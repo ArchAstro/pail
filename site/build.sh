@@ -12,4 +12,5 @@ mkdir -p "$here/dist"
   cat "$here/index.html"
   printf '\n</body>\n</html>\n'
 } > "$here/dist/index.html"
-echo "wrote $here/dist/index.html"
+cp "$here/install.sh" "$here/dist/install.sh"
+echo "wrote $here/dist/index.html and install.sh"

@@ -3,6 +3,15 @@
 Version control that lives in a bucket. Clients talk to S3, GCS or a local directory
 directly. There is no server.
 
+```sh
+curl -fsSL https://pail.build/install.sh | sh      # macOS and Linux, arm64 and x86_64
+pail auth install gcloud                           # a credential provider (see Auth below)
+```
+
+Or build from source: `cargo install --git https://github.com/ArchAstro/pail pail`.
+Releases: tag `vX.Y.Z` (matching `Cargo.toml`) and `.github/workflows/release.yml` builds the
+four binaries, `SHA256SUMS` and the GitHub release that `install.sh` downloads from.
+
 - **Linear history.** Branches move only by compare-and-swap (S3 `If-Match`, GCS
   `ifGenerationMatch`). There are no merge commits; landing a branch squashes it.
 - **Git-style stage.** `add`, `add -A`, `commit -a` and `restore` behave as in Git. The stage
