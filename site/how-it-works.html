@@ -1,0 +1,376 @@
+<title>How pail works</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Follow one pail commit through the bucket, object by object: hashing, the manifest page, the commit object, the upload, the compare-and-swap, a race, and reading it back as Git.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="site.css">
+<!-- /head -->
+<div class="wrap">
+  <header class="bar">
+    <a class="mark" href="index.html">pail <small>pail.build</small></a>
+    <nav aria-label="Sections">
+      <a href="#steps">Tutorial</a>
+      <a href="#layout">Layout</a>
+      <a href="#extend">Extend</a>
+      <a href="#protect">Protect</a>
+      <a href="https://github.com/ArchAstro/pail">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="tut-intro">
+    <h1 class="page-title">How pail works</h1>
+    <p class="lede">We'll make one repository from nothing and watch the bucket as it changes. Every hash, byte and JSON object below came out of a real run. We ran these commands against a local store and copied out what pail wrote. The GCS requests show what the same writes look like on Google Cloud Storage, and the two objects marked example show a shape rather than a recording.</p>
+  </div>
+
+  <div class="tut" id="steps">
+    <ol class="tut-steps">
+
+      <li class="step" id="s-empty" data-state="0">
+        <h2>An empty bucket</h2>
+        <p>A pail repository is a folder in a bucket. Before <code>init</code> it's just an empty prefix. There's no server to start and nothing to provision beyond the bucket you already have.</p>
+        <pre class="term"><span class="p">$</span> gcloud storage ls gs://acme-vcs/app/
+<span class="c">(nothing)</span></pre>
+      </li>
+
+      <li class="step" id="s-init" data-state="1">
+        <h2><code>pail init</code> writes three objects</h2>
+        <p>An empty first commit, a pointer to it, and a note saying which branch is the default. That's a complete repository.</p>
+        <pre class="term"><span class="p">$</span> pail init gs://acme-vcs/app</pre>
+        <div class="obj"><div class="obj-h">commits/419771b4a492…</div><pre>{"parent": null,
+ "root": "229cbf1334af…",
+ "generation": 0, "files": 0, "bytes": 0,
+ "author": "Ada &lt;ada@acme.dev&gt;", "author_date": "1792606331 +0000",
+ "committer": "Ada &lt;ada@acme.dev&gt;", "committer_date": "1792606331 +0000",
+ "message": "Initial empty commit",
+ "changes": {}}</pre></div>
+        <div class="obj ref"><div class="obj-h">refs/main</div><pre>{"commit": "419771b4a492…", "root": "229cbf1334af…", "generation": 0}</pre></div>
+        <div class="obj"><div class="obj-h">HEAD</div><pre>{"branch": "main"}</pre></div>
+        <p>The commit is named by the BLAKE3 hash of its own bytes, so it can never change. <code>refs/main</code> is different. It's the one object pail rewrites, and only with a conditional write, as you'll see in a moment.</p>
+      </li>
+
+      <li class="step" id="s-files" data-state="2">
+        <h2>Write two files and stage them</h2>
+        <p>Ada clones the repository and adds a README and a <code>main.rs</code>. Staging hashes each file locally. Nothing has gone to the bucket yet.</p>
+        <pre class="term"><span class="p">$</span> pail clone gs://acme-vcs/app &amp;&amp; cd app
+<span class="p">$</span> printf '# app\n' &gt; README.md
+<span class="p">$</span> cat src/main.rs
+fn main() {
+    println!("hello from a bucket");
+}
+<span class="p">$</span> pail add -A
+staged 2 change(s)</pre>
+        <table class="kv">
+          <thead><tr><th>Path</th><th>Size</th><th>BLAKE3 of the contents</th></tr></thead>
+          <tbody>
+            <tr><td>README.md</td><td>6 B</td><td class="h">2203daf006dd75de…</td></tr>
+            <tr><td>src/main.rs</td><td>51 B</td><td class="h">5acf4d5be78a652c…</td></tr>
+          </tbody>
+        </table>
+        <p>Both files are 64 bytes or smaller, so their bytes will ride along inside the manifest instead of getting objects of their own.</p>
+      </li>
+
+      <li class="step" id="s-page" data-state="3">
+        <h2>Build the manifest page</h2>
+        <p>The manifest is the commit's table of contents: every path, its size, its hash and where its bytes live. It's stored as a prolly tree, a B-tree whose page boundaries depend only on the paths. Our repo fits on one leaf page. Here it is decompressed, 159 bytes:</p>
+        <pre class="hex"><span class="mg">50 47</span> <span class="vr">01</span> 00 00 02 00 09 <span class="pa">52 45 41 44 4d 45 2e 6d</span>   <span class="mg">PG</span><span class="vr">.</span>....<span class="pa">README.m</span>
+<span class="pa">64</span> 00 06 <span class="hs">22 03 da f0 06 dd 75 de 16 54 6b e5 23</span>   <span class="pa">d</span>..<span class="hs">"....u..Tk.#</span>
+<span class="hs">73 6d 19 72 a7 55 04 0a a5 d6 59 d4 af d3 9f 15</span>   <span class="hs">sm.r.U....Y.....</span>
+<span class="hs">13 2f 2d</span> 00 06 <span class="in">23 20 61 70 70 0a</span> 00 0b <span class="pa">73 72 63</span>   <span class="hs">./-</span>..<span class="in"># app.</span>..<span class="pa">src</span>
+<span class="pa">2f 6d 61 69 6e 2e 72 73</span> 00 33 <span class="hs">5a cf 4d 5b e7 8a</span>   <span class="pa">/main.rs</span>.3<span class="hs">Z.M[..</span>
+<span class="c">… 26 more bytes of hash, then the file itself: fn main() {…</span></pre>
+        <p class="legend"><span class="mg">PG</span> page magic <span class="vr">01</span> format version <span class="pa">paths</span> <span class="hs">content hashes</span> <span class="in">inline file bytes</span></p>
+        <p>The page is named by the hash of those bytes: <code>pages/74a35af9e29b…</code>. In a repository with a million files there are about 2,000 leaf pages. Change one file and only its leaf and the few pages above it get rewritten.</p>
+      </li>
+
+      <li class="step" id="s-commit" data-state="4">
+        <h2>Write the commit object</h2>
+        <p>The commit points at its parent and at the manifest's root page, and it carries its own list of changed files so nobody has to diff manifests to see what changed.</p>
+        <div class="obj"><div class="obj-h">commits/2e853ec8ee4b…</div><pre>{"parent": "419771b4a492…",
+ "root": "74a35af9e29b…",
+ "generation": 1, "files": 2, "bytes": 57,
+ "author": "Ada &lt;ada@acme.dev&gt;", "author_date": "1792606338 +0000",
+ "message": "Say hello",
+ "changes": {
+   "README.md":   {"new": {"k": "f", "s": 6,  "h": "2203daf0…", "l": {"i": "23206170700a"}}},
+   "src/main.rs": {"new": {"k": "f", "s": 51, "h": "5acf4d5b…", "l": {"i": "666e206d61…"}}}}}</pre></div>
+        <p>pail now knows the name of every object it's about to upload, before it has sent a byte.</p>
+      </li>
+
+      <li class="step" id="s-upload" data-state="5">
+        <h2>Upload everything at once</h2>
+        <p>The page and the commit go up in parallel, in one round trip. Each is a create-only write, so it fails if the name already exists. Since names are hashes, an object that already exists is already correct.</p>
+        <pre class="term">PUT gs://acme-vcs/app/pages/74a35af9e29b…    <span class="c">ifGenerationMatch=0</span>   <span class="ok">200</span>
+PUT gs://acme-vcs/app/commits/2e853ec8ee4b…  <span class="c">ifGenerationMatch=0</span>   <span class="ok">200</span></pre>
+        <p>Nobody else can see this commit yet. The objects are in the bucket, but no branch points at them.</p>
+      </li>
+
+      <li class="step" id="s-swap" data-state="6">
+        <h2>Move the branch</h2>
+        <p>This is the commit. pail rewrites <code>refs/main</code> on the condition that it's still the version Ada's clone last saw. On GCS that's the object's generation number, on S3 its ETag.</p>
+        <pre class="term">PUT gs://acme-vcs/app/refs/main  <span class="c">ifGenerationMatch=1792606331804211</span>   <span class="ok">200</span>
+<span class="p">$</span> pail commit -m "Say hello"
+[main 2e853ec8ee4b] Say hello</pre>
+        <div class="obj ref"><div class="obj-h">refs/main</div><pre><span class="del">{"commit": "419771b4a492…", "root": "229cbf1334af…", "generation": 0}</span>
+<span class="add">{"commit": "2e853ec8ee4b…", "root": "74a35af9e29b…", "generation": 1}</span></pre></div>
+        <p>Two round trips in total: the upload and the swap. There's no push and nothing to merge. The next <code>pail log</code> anywhere sees the commit.</p>
+      </li>
+
+      <li class="step" id="s-pack" data-state="7">
+        <h2>A bigger file goes into a pack</h2>
+        <p>Ada grows <code>main.rs</code> to 242 bytes. Files over 64 bytes are compressed into a pack, and the manifest records where they sit in it. (Files over 1 MB are split into content-defined chunks instead.)</p>
+        <pre class="hex"><span class="vr">01</span> <span class="mg">28 b5 2f fd</span> 20 f2 35 05 00 a2 0b 24 1e 60 67   <span class="c">codec 1 = zstd, then the zstd frame</span>
+<span class="c">… 160 more bytes of compressed main.rs …</span>
+01 f2 01 26 00 00 00 <span class="mg">50 41 49 4c 50 4b 31 00</span>   <span class="c">index footer, then</span> <span class="mg">PAILPK1</span></pre>
+        <p>The commit's change list says exactly where to read: pack <code>a4eedf01…</code>, offset 0, 176 bytes.</p>
+        <div class="obj"><div class="obj-h">commits/8280d571df6e… (changes)</div><pre>"src/main.rs": {
+  "old": {"k": "f", "s": 51,  "h": "5acf4d5b…"},
+  "new": {"k": "f", "s": 242, "h": "43c4af5c…", "l": {"p": ["a4eedf0111e0…", 0, 176]}}}</pre></div>
+        <p>Because packs, pages and commits never change, any of them can be cached forever, on your laptop or in a CDN.</p>
+      </li>
+
+      <li class="step" id="s-race" data-state="8">
+        <h2>Two people commit at the same time</h2>
+        <p>Bob cloned back at <code>2e853ec8</code> and added a LICENSE. By the time he commits, Ada has already moved main to <code>8280d571</code>. Bob's swap names an old version, so the store refuses it.</p>
+        <pre class="term">PUT gs://acme-vcs/app/refs/main  <span class="c">ifGenerationMatch=1792606338977102</span>   <span class="no">412 Precondition Failed</span></pre>
+        <p>pail reads the new head and compares. Ada changed <code>src/main.rs</code> and Bob changed <code>LICENSE</code>, so they don't overlap. It rebuilds Bob's commit on top of Ada's and swaps again.</p>
+        <pre class="term"><span class="p">$</span> pail commit -m "Add a license"
+[main 64f6749cb123] Add a license, landed after 2 attempts</pre>
+        <p>Bob's first attempt is still in the bucket as <code>commits/eaaa271dd451…</code>, but nothing points at it, so nobody ever sees it and garbage collection removes it later. If both had changed the same file, Bob would get exit code 4 and the list of paths instead.</p>
+      </li>
+
+      <li class="step" id="s-intents" data-state="9">
+        <h2>When lots of writers collide</h2>
+        <p>With dozens of agents on one branch, retrying gets wasteful. A writer that loses twice leaves an intent instead: its changes and message, filed under <code>intents/main/</code>.</p>
+        <div class="obj"><div class="obj-h">intents/main/01792606347120533000-3f9a2c1e.json <span class="ex">example</span></div><pre>{"id": "01792606347120533000-3f9a2c1e",
+ "base": "8280d571df6e…",
+ "puts": "5047010000…",      <span class="c">// the new entries, as an encoded leaf page</span>
+ "deletes": [],
+ "fields": {"author": "Cy &lt;cy@acme.dev&gt;", "message": "Bump the version", …}}</pre></div>
+        <p>The oldest waiting writer reads every pending intent, builds one commit for each on the current head, uploads them together and lands the whole batch with a single swap. The ref remembers which intents it landed so none lands twice.</p>
+        <div class="obj ref"><div class="obj-h">refs/main <span class="ex">example</span></div><pre>{"commit": "…", "root": "…", "generation": 7,
+ "recent": [{"intent": "01792606347120533000-3f9a2c1e", "commit": "…"},
+            {"intent": "01792606347122810000-a07d55b2", "commit": "…"}]}</pre></div>
+        <p>On GCS, which allows about one write per second to the same object, this is what keeps throughput up: the batches get bigger as load goes up.</p>
+      </li>
+
+      <li class="step" id="s-stack" data-state="10">
+        <h2>Land a whole stack</h2>
+        <p>Ada does two commits of work on a branch and lands both onto main. The branch is just another ref. Landing moves main to the tip of the stack in one swap, so other people see both commits or neither.</p>
+        <pre class="term"><span class="p">$</span> pail switch -c pr/tests
+<span class="p">$</span> pail commit -m "Add a test"
+[pr/tests e72bec753c5b] Add a test
+<span class="p">$</span> pail commit -am "Check the greeting"
+[pr/tests 661d05d47ea7] Check the greeting
+<span class="p">$</span> pail land pr/tests --stack --onto main
+landed 2 commit(s) from pr/tests onto main @ 661d05d47ea7 (fast-forward)</pre>
+        <p>If main had moved in the meantime, pail would replay both commits on top of it, still in one swap. If the land fails halfway, running it again picks up where it left off.</p>
+      </li>
+
+      <li class="step" id="s-read" data-state="10">
+        <h2>Read it back like Git</h2>
+        <p>pail's read commands take Git's flags and print Git's output, down to the byte. Tools that parse <code>git log</code> keep working.</p>
+        <pre class="term"><span class="p">$</span> pail log --oneline
+661d05d Check the greeting
+e72bec7 Add a test
+64f6749 Add a license
+8280d57 Greet by name
+2e853ec Say hello
+419771b Initial empty commit
+<span class="p">$</span> pail cat-file -p 8280d57
+tree e91e4f6a5856271ec67c9093bc1e6700a13f2b12
+parent 2e853ec8ee4be53b4c57faa9d9a1d79ad13761cc49eef23e4e3b8878e99238a5
+author Ada &lt;ada@acme.dev&gt; 1792606347 +0000
+committer Ada &lt;ada@acme.dev&gt; 1792606347 +0000
+
+Greet by name</pre>
+        <p>We check this against a real monorepo: a mirror replays every commit to our own repository into pail and compares the output with Git's, byte for byte.</p>
+      </li>
+    </ol>
+
+    <aside class="tracker" aria-label="The bucket at this step">
+      <div class="bucket">
+        <div class="head"><span>gs://acme-vcs/<b>app</b>/</span><span id="t-step">step 1 of 12</span></div>
+        <div class="rows" id="t-rows"></div>
+        <div class="foot"><span id="t-cap">An empty prefix</span>
+          <span class="t-nav"><button class="tbtn" id="t-prev" type="button" aria-label="Previous step">Back</button><button class="tbtn" id="t-next" type="button" aria-label="Next step">Next</button></span></div>
+      </div>
+    </aside>
+  </div>
+
+  <section id="layout">
+    <h2>Everything in the bucket</h2>
+    <div class="prose"><p>That's every kind of object pail writes. Only the ones in amber ever change.</p></div>
+    <div class="layout" role="img" aria-label="Repository layout in the bucket">
+      <div><span class="mut">refs/main</span> <span class="note">the branch: commit, root page and generation, moved only by compare-and-swap</span></div>
+      <div><span class="mut">refs/pr/tests</span> <span class="note">any other branch</span></div>
+      <div><span class="mut">intents/main/…</span> <span class="note">changes waiting to be batched under heavy load</span></div>
+      <div><span class="imm">commits/2e853ec8…</span> <span class="note">parent, root, author, message, changed paths</span></div>
+      <div><span class="imm">pages/74a35af9…</span> <span class="note">manifest pages: path to size, hash and location</span></div>
+      <div><span class="imm">packs/a4eedf01….pack</span> <span class="note">small files, zstd, with an index footer</span></div>
+      <div><span class="imm">chunks/…</span> <span class="note">files over 1 MB, split by content</span></div>
+      <div><span class="mut">HEAD</span> <span class="note">the default branch</span></div>
+    </div>
+  </section>
+
+  <section id="extend">
+    <h2>PRs and CI are just programs that read and write branches</h2>
+    <div class="prose">
+      <p>You don't need a server for pull requests or CI. Every commit is a write to <code>refs/&lt;branch&gt;</code>, and object stores already send a notification when something is written. A tool listens for those, reads what it needs, and saves its results as commits on a <code>_meta</code> branch. That way every record gets history and conflict checks for free.</p>
+    </div>
+    <div class="conv">
+      <table>
+        <thead><tr><th>Name</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>pr/*</td><td>Branches proposed for review.</td></tr>
+          <tr><td>_meta:prs/12.json</td><td>A pull request: title, head, base, author, state. Claimed once with <code>pail put --if-absent</code>.</td></tr>
+          <tr><td>_meta:prs/12/reviews/bob.json</td><td>A review: approve or request changes.</td></tr>
+          <tr><td>_meta:checks/&lt;commit&gt;/test.json</td><td>A check result for one commit, written by CI.</td></tr>
+          <tr><td>main:pail.ci.json</td><td>The checks a commit declares, and which are required to merge.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="split flow">
+      <pre class="code" aria-label="CI driven by bucket events"><span class="c"># wire the bucket's notifications once</span>
+<span class="k">gcloud</span> storage buckets notifications create gs://acme-vcs \
+  --topic=pail-refs --object-prefix=app/refs/
+
+<span class="c"># CI: follow ref events, build the exact commit,</span>
+<span class="c"># record each check on _meta</span>
+<span class="k">pail-ci</span> run --branch <span class="a">'pr/*'</span> \
+  --gcs-subscription projects/acme/subscriptions/pail-ci
+
+<span class="c"># under the hood: plain pail commands</span>
+<span class="k">pail</span> events --branch <span class="a">'pr/*'</span>
+<span class="k">pail</span> clone gs://acme-vcs/app src --at 126ebf48
+<span class="k">pail</span> put _meta --file checks/126ebf48/test.json=-</pre>
+      <pre class="code" aria-label="A pull request from open to merge"><span class="k">pail</span> switch -c pr/hello
+<span class="k">pail</span> commit -am <span class="a">"Say hello"</span>
+<span class="k">pail-pr</span> open pr/hello --title <span class="a">"Say hello"</span>
+<span class="c">opened PR 1: pr/hello → main</span>
+
+<span class="k">pail-pr</span> review 1 --approve       <span class="c"># as Bob</span>
+<span class="k">pail-pr</span> merge 1
+<span class="c">landed 1 commit(s) from pr/hello onto main</span>
+<span class="c">merged PR 1 into main @ 126ebf48d9dc</span></pre>
+    </div>
+    <p class="fine">Both are short scripts that only call the pail CLI. On GCS, the notification showed up 1.2 to 1.6 seconds after the commit started. Notifications can arrive twice or out of order, so <code>pail events</code> re-reads the branch and drops duplicates, and CI files every result under the commit it tested.</p>
+  </section>
+
+  <section id="protect">
+    <h2>The bucket itself enforces branch protection</h2>
+    <div class="prose">
+      <p>There's no server in the middle, so a rule only means something if the object store enforces it. That's where pail puts it. <strong>Only a lander can write a protected branch.</strong> Everyone else can add history but never delete or rewrite it, and the lander only moves <code>refs/main</code> once the reviews and checks pass.</p>
+    </div>
+    <div class="conv">
+      <table>
+        <thead><tr><th>Object</th><th>People and agents</th><th>Lander</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>refs/main, refs/release/*</td><td>read</td><td>write</td><td>Protected branches only move after review.</td></tr>
+          <tr><td>refs/pr/*, refs/&lt;you&gt;/*</td><td>write</td><td>write</td><td>Work in progress doesn't wait on anyone.</td></tr>
+          <tr><td>commits/ pages/ packs/</td><td>create only</td><td>create only</td><td>Nobody can delete or rewrite history. Only garbage collection deletes.</td></tr>
+          <tr><td>intents/main/*</td><td>none</td><td>write</td><td>No batching on protected branches (more below).</td></tr>
+          <tr><td>_policy</td><td>read</td><td>admins only</td><td>Only admins can change the rules.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="split flow">
+      <pre class="code" aria-label="Branch policy"><span class="c"># _policy:policy.json  (pail policy set)</span>
+{ <span class="a">"version"</span>: 1, <span class="a">"admins"</span>: [<span class="a">"role:admin"</span>], <span class="a">"branches"</span>: {
+  <span class="a">"main"</span>: {
+    <span class="a">"writers"</span>: [<span class="a">"lander"</span>],
+    <span class="a">"approvals"</span>: 1,
+    <span class="a">"required_checks"</span>: [<span class="a">"test"</span>, <span class="a">"lint"</span>]
+  },
+  <span class="a">"release/*"</span>: { <span class="a">"writers"</span>: [<span class="a">"lander"</span>], <span class="a">"approvals"</span>: 2 },
+  <span class="a">"_policy"</span>: { <span class="a">"writers"</span>: [<span class="a">"role:admin"</span>] },
+  <span class="a">"*"</span>: { <span class="a">"writers"</span>: [<span class="a">"*"</span>] }
+} }</pre>
+      <ol class="steps">
+        <li><p><b>Sign in and get a token.</b> A broker checks who you are and runs <code>pail policy token --as you</code>. The token it hands back is short-lived and only allows what the policy allows, so committing straight to main fails at the bucket.</p></li>
+        <li><p><b>Commit to a PR branch.</b> Commits to <code>pr/*</code> work like any other commit. CI hears about them from the bucket's notifications and records its checks.</p></li>
+        <li><p><b>Get a review.</b> An approval is a record for one exact commit. A review tool writes it and stamps who actually signed in, so you can't approve in someone else's name.</p></li>
+        <li><p><b>The lander merges.</b> The lander is the only identity that can write <code>refs/main</code>. It reads <code>pail policy requirements main</code>, makes sure someone other than the author approved and the required checks passed on that exact commit, and then lands the stack in one write.</p></li>
+      </ol>
+    </div>
+    <div class="features">
+      <div><h3>Where the rules are checked</h3><p>The same policy file works three ways. <code>pail serve</code> checks every request, on any backend. A broker runs <code>pail policy token</code> so GCS enforces it directly. The lander checks reviews and CI before it moves a branch.</p></div>
+      <div><h3>No batching on protected branches</h3><p>When pail batches commits, the writer doing the batching lands everyone else's changes too. On main, that would be a way to sneak in unreviewed work. So only the lander writes there, and it only batches changes it has already approved.</p></div>
+      <div><h3>The author field isn't trusted</h3><p>A commit's author is whatever the writer typed in. Policy decisions only look at who actually authenticated, or at records a trusted tool wrote. They never look at the author field.</p></div>
+    </div>
+    <p class="fine">We tested this on GCS. A token built from these rules can read the repository, add history and write <code>refs/pr/*</code>. It gets a 403 when it tries to write <code>refs/main</code> or <code>refs/release/*</code>, delete or overwrite history, or touch another repository. One requirement: people can't have bucket permissions of their own. They only get tokens from the broker. <code>docs/protecting-branches.md</code> explains how to build the broker and the lander.</p>
+  </section>
+
+  <footer>
+    <span>pail: version control that lives in your bucket. MIT licensed.</span>
+    <span><a href="index.html">Home</a> &nbsp; <a href="https://github.com/ArchAstro/pail">GitHub</a></span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  // What the bucket holds after each step. mark: "+" new, "~" rewritten, "?" prepared locally.
+  const R = (k, t, mark) => ({ k, t: t || "", mark: mark || "" });
+  const init = [R("HEAD", "default branch"), R("commits/419771b4…", "commit"), R("refs/main", "→ 419771b4, gen 0")];
+  const after1 = [R("HEAD", "default branch"), R("commits/2e853ec8…", "commit"), R("commits/419771b4…", "commit"), R("pages/74a35af9…", "page 168 B"), R("refs/main", "→ 2e853ec8, gen 1")];
+  const states = [
+    { cap: "An empty prefix", rows: [] },
+    { cap: "Three objects: a repository", rows: init.map((r) => ({ ...r, mark: "+" })) },
+    { cap: "Staged on Ada's laptop", rows: [...init, R("README.md", "6 B, hashed", "?"), R("src/main.rs", "51 B, hashed", "?")] },
+    { cap: "Manifest page built locally", rows: [...init, R("pages/74a35af9…", "page 168 B", "?")] },
+    { cap: "Commit object built locally", rows: [...init, R("commits/2e853ec8…", "commit", "?"), R("pages/74a35af9…", "page 168 B", "?")] },
+    { cap: "Uploaded, not yet visible", rows: [R("HEAD", "default branch"), R("commits/2e853ec8…", "commit", "+"), R("commits/419771b4…", "commit"), R("pages/74a35af9…", "page 168 B", "+"), R("refs/main", "→ 419771b4, gen 0")] },
+    { cap: "One conditional write: committed", rows: after1.map((r) => (r.k === "refs/main" ? { ...r, mark: "~" } : r)) },
+    { cap: "A pack for the bigger file", rows: [R("HEAD"), R("commits/2e853ec8…", "commit"), R("commits/419771b4…", "commit"), R("commits/8280d571…", "commit", "+"), R("packs/a4eedf01….pack", "226 B", "+"), R("pages/19de6382…", "page", "+"), R("pages/74a35af9…", "page"), R("refs/main", "→ 8280d571, gen 2", "~")] },
+    { cap: "Bob lost once, then landed", rows: [R("commits/2e853ec8…", "commit"), R("commits/419771b4…", "commit"), R("commits/64f6749c…", "commit", "+"), R("commits/8280d571…", "commit"), R("commits/eaaa271d…", "unreachable", "+"), R("packs/a4eedf01….pack", "226 B"), R("pages/6774c3d9…", "page", "+"), R("pages/8cbedb5a…", "unreachable", "+"), R("refs/main", "→ 64f6749c, gen 3", "~")] },
+    { cap: "Intents batched into one swap (example)", rows: [R("commits/…", "two new commits", "+"), R("intents/main/0179…-3f9a2c1e.json", "landed", "+"), R("intents/main/0179…-a07d55b2.json", "landed", "+"), R("refs/main", "→ …, recent [2]", "~")] },
+    { cap: "A two-commit stack, one swap", rows: [R("commits/64f6749c…", "commit"), R("commits/661d05d4…", "commit", "+"), R("commits/e72bec75…", "commit", "+"), R("pages/d715234b…", "page", "+"), R("refs/main", "→ 661d05d4, gen 5", "~"), R("refs/pr/tests", "→ 661d05d4", "+")] },
+  ];
+  const steps = [...document.querySelectorAll(".step")];
+  const rowsEl = document.getElementById("t-rows");
+  const cap = document.getElementById("t-cap");
+  const label = document.getElementById("t-step");
+
+  function rowsHTML(st) {
+    if (!st.rows.length) return '<div class="row empty"><span class="i"></span><span class="k">(empty)</span><span class="t"></span></div>';
+    return st.rows.map((r) => {
+      const cls = r.mark === "+" ? "new" : r.mark === "~" ? "swap" : r.mark === "?" ? "local" : "";
+      const ref = r.k.startsWith("refs/") || r.k === "HEAD" ? " ref" : "";
+      const icon = r.mark === "?" ? "·" : r.mark;
+      return `<div class="row ${cls}${ref}"><span class="i">${icon}</span><span class="k">${r.k}</span><span class="t">${r.t}</span></div>`;
+    }).join("");
+  }
+  // Every step also gets its own copy of the listing, for narrow screens.
+  steps.forEach((s) => {
+    const st = states[+s.dataset.state];
+    const fig = document.createElement("div");
+    fig.className = "bucket inline-ls";
+    fig.innerHTML = `<div class="head"><span>gs://acme-vcs/<b>app</b>/</span><span>${st.cap}</span></div><div class="rows">${rowsHTML(st)}</div>`;
+    s.querySelector("h2").after(fig);
+  });
+
+  let cur = -1;
+  function show(i) {
+    if (i === cur) return;
+    cur = i;
+    const st = states[+steps[i].dataset.state];
+    rowsEl.innerHTML = rowsHTML(st);
+    cap.textContent = st.cap;
+    label.textContent = `step ${i + 1} of ${steps.length}`;
+    steps.forEach((s, j) => s.classList.toggle("on", j === i));
+  }
+  show(0);
+  const io = new IntersectionObserver((es) => {
+    const vis = es.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+    if (vis.length) show(steps.indexOf(vis[0].target));
+  }, { rootMargin: "-35% 0px -55% 0px" });
+  steps.forEach((s) => io.observe(s));
+  const go = (d) => {
+    const i = Math.max(0, Math.min(steps.length - 1, cur + d));
+    show(i);
+    steps[i].scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  };
+  document.getElementById("t-prev").addEventListener("click", () => go(-1));
+  document.getElementById("t-next").addEventListener("click", () => go(1));
+})();
+</script>
