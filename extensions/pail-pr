@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""pail-pr: pull requests for pail, as conventions over pail's primitives. No server.
+
+A pull request is a branch plus a record on the `_meta` branch:
+
+    _meta:prs/<n>.json                  {"id","title","body","head","base","author","state",...}
+    _meta:prs/<n>/reviews/<who>.json    {"verdict":"approve"|"changes","comment","at"}
+    _meta:checks/<commit>/<check>.json  written by CI (see pail-ci)
+    <base>:pail.pr.json                 policy: {"approvals": 1, "required_checks": ["test"]}
+
+Every write is a `pail put` (an atomic commit), ids are claimed with `--if-absent`, and
+merging is `pail land --stack` (every commit of the PR lands in one atomic swap).
+
+    pail-pr open [BRANCH] --title T [--base main] [--body B]
+    pail-pr list
+    pail-pr show N
+    pail-pr review N (--approve | --request-changes) [-m COMMENT]
+    pail-pr merge N [--force]
+    pail-pr watch          # react to ref events: report PR heads moving, and PRs merged
+
+The store comes from --store or PAIL_STORE (or the working copy you run it in); the pail
+binary from PAIL_BIN or PATH.
+"""
+
+import argparse
+import getpass
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+
+PAIL = os.environ.get("PAIL_BIN", "pail")
+META = "_meta"
+
+
+class PailError(Exception):
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+
+
+def pail(args, store, data=None, check=True):
+    cmd = [PAIL] + (["--store", store] if store else []) + args
+    r = subprocess.run(cmd, input=data, capture_output=True)
+    if check and r.returncode != 0:
+        raise PailError(r.returncode, r.stderr.decode().strip() or f"{' '.join(args)} failed")
+    return r
+
+
+def text(args, store):
+    return pail(args, store).stdout.decode()
+
+
+def try_cat(store, rev, path):
+    r = pail(["cat", f"{rev}:{path}"], store, check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def read_json(store, rev, path):
+    raw = try_cat(store, rev, path)
+    return json.loads(raw) if raw else None
+
+
+def ls(store, target):
+    r = pail(["ls", "-r", target], store, check=False)
+    if r.returncode != 0:
+        return []
+    return [line.split()[-1] for line in r.stdout.decode().splitlines() if line.strip()]
+
+
+def put(store, message, files=(), if_absent=False):
+    """Commit {path: bytes} to _meta atomically."""
+    with tempfile.TemporaryDirectory() as tmp:
+        args = ["put", META, "-m", message]
+        for i, (path, data) in enumerate(files):
+            src = os.path.join(tmp, f"f{i}")
+            with open(src, "wb") as f:
+                f.write(data)
+            args += ["--file", f"{path}={src}"]
+        if if_absent:
+            args.append("--if-absent")
+        return pail(args, store)
+
+
+def rev_parse(store, rev):
+    r = pail(["rev-parse", rev], store, check=False)
+    return r.stdout.decode().strip() if r.returncode == 0 else None
+
+
+def user():
+    who = os.environ.get("PAIL_AUTHOR")
+    return who.split("<")[0].strip() if who else getpass.getuser()
+
+
+def pr_ids(store):
+    ids = []
+    for p in ls(store, f"{META}:prs"):
+        name = p.rsplit("/", 1)[-1]
+        if name.endswith(".json") and name[:-5].isdigit() and p.count("/") <= 1:
+            ids.append(int(name[:-5]))
+    return sorted(ids)
+
+
+def checks_for(store, commit):
+    out = {}
+    for p in ls(store, f"{META}:checks/{commit}"):
+        if p.endswith(".json"):
+            c = read_json(store, META, p)
+            if c:
+                out[p.rsplit("/", 1)[-1][:-5]] = c
+    return out
+
+
+def reviews_for(store, n):
+    out = {}
+    for p in ls(store, f"{META}:prs/{n}/reviews"):
+        if p.endswith(".json"):
+            out[p.rsplit("/", 1)[-1][:-5]] = read_json(store, META, p)
+    return out
+
+
+def policy(store, base):
+    pol = read_json(store, base, "pail.pr.json") or {}
+    ci = read_json(store, base, "pail.ci.json") or {}
+    return {
+        "approvals": pol.get("approvals", 1),
+        "required_checks": pol.get("required_checks", ci.get("required", sorted((ci.get("checks") or {}).keys()))),
+    }
+
+
+def current_branch(store):
+    r = pail(["rev-parse", "--abbrev-ref", "HEAD"], store, check=False)
+    return r.stdout.decode().strip() if r.returncode == 0 else None
+
+
+def cmd_open(a):
+    head = a.branch or current_branch(a.store)
+    if not head:
+        sys.exit("name the branch to open a pull request for")
+    if not rev_parse(a.store, head):
+        sys.exit(f"no branch {head}")
+    n = (pr_ids(a.store) or [0])[-1] + 1
+    while True:
+        rec = {"id": n, "title": a.title, "body": a.body or "", "head": head, "base": a.base,
+               "author": user(), "state": "open", "created": int(time.time())}
+        try:
+            put(a.store, f"Open PR {n}: {a.title}", [(f"prs/{n}.json", json.dumps(rec, indent=1).encode())], if_absent=True)
+            break
+        except PailError as e:
+            if e.code != 4:  # 4: someone claimed this id first
+                raise
+            n += 1
+    print(f"opened PR {n}: {head} → {a.base}")
+
+
+def summary(store, rec):
+    head = rev_parse(store, rec["head"])
+    checks = checks_for(store, head) if head else {}
+    states = {c.get("state") for c in checks.values()}
+    mark = "—" if not checks else "✗" if "failure" in states else "…" if "pending" in states else "✓"
+    return head, checks, mark
+
+
+def cmd_list(a):
+    for n in pr_ids(a.store):
+        rec = read_json(a.store, META, f"prs/{n}.json")
+        if not rec:
+            continue
+        _, _, mark = summary(a.store, rec) if rec["state"] == "open" else (None, None, " ")
+        print(f"#{n:<4} {rec['state']:7} {mark} {rec['title']}   ({rec['head']} → {rec['base']}, {rec['author']})")
+
+
+def cmd_show(a):
+    rec = read_json(a.store, META, f"prs/{a.n}.json")
+    if not rec:
+        sys.exit(f"no PR {a.n}")
+    head, checks, mark = summary(a.store, rec)
+    print(f"PR #{rec['id']}: {rec['title']}  [{rec['state']}]")
+    print(f"  {rec['head']} → {rec['base']} by {rec['author']}")
+    if rec.get("body"):
+        print("\n  " + rec["body"].replace("\n", "\n  "))
+    if rec["state"] == "open" and head:
+        log = text(["log", "--oneline", f"{rec['base']}..{head}"], a.store)
+        print("\ncommits:\n" + "".join(f"  {l}\n" for l in log.splitlines()))
+        print(f"checks on {head[:12]} {mark}")
+        pol = policy(a.store, rec["base"])
+        for name in sorted(set(checks) | set(pol["required_checks"])):
+            c = checks.get(name, {"state": "missing"})
+            req = " (required)" if name in pol["required_checks"] else ""
+            print(f"  {name:12} {c['state']}{req}" + (f"  {c.get('duration_s', '')}s" if c.get("duration_s") else ""))
+    revs = reviews_for(a.store, a.n)
+    if revs:
+        print("\nreviews:")
+        for who, r in sorted(revs.items()):
+            print(f"  {who:12} {r['verdict']}" + (f": {r['comment']}" if r.get("comment") else ""))
+    if rec.get("merged_commit"):
+        print(f"\nmerged as {rec['merged_commit'][:12]}")
+
+
+def cmd_review(a):
+    if not read_json(a.store, META, f"prs/{a.n}.json"):
+        sys.exit(f"no PR {a.n}")
+    verdict = "approve" if a.approve else "changes"
+    r = {"verdict": verdict, "comment": a.message or "", "at": int(time.time())}
+    put(a.store, f"Review PR {a.n}: {verdict}", [(f"prs/{a.n}/reviews/{user()}.json", json.dumps(r).encode())])
+    print(f"reviewed PR {a.n}: {verdict}")
+
+
+def cmd_merge(a):
+    rec = read_json(a.store, META, f"prs/{a.n}.json")
+    if not rec or rec["state"] != "open":
+        sys.exit(f"PR {a.n} is not open")
+    head = rev_parse(a.store, rec["head"])
+    pol = policy(a.store, rec["base"])
+    checks = checks_for(a.store, head)
+    failing = [c for c in pol["required_checks"] if checks.get(c, {}).get("state") != "success"]
+    approvals = [w for w, r in reviews_for(a.store, a.n).items() if r["verdict"] == "approve" and w != rec["author"]]
+    problems = []
+    if failing:
+        problems.append(f"required checks not passing on {head[:12]}: {', '.join(failing)}")
+    if len(approvals) < pol["approvals"]:
+        problems.append(f"{len(approvals)} of {pol['approvals']} approvals")
+    if problems and not a.force:
+        sys.exit("cannot merge: " + "; ".join(problems) + " (--force overrides)")
+    out = text(["land", rec["head"], "--stack", "--onto", rec["base"]], a.store)
+    tip = rev_parse(a.store, rec["base"])
+    rec.update(state="merged", merged_commit=tip, merged_by=user(), merged_at=int(time.time()))
+    put(a.store, f"Merge PR {a.n}", [(f"prs/{a.n}.json", json.dumps(rec, indent=1).encode())])
+    print(out.strip())
+    print(f"merged PR {a.n} into {rec['base']} @ {tip[:12]}")
+
+
+def cmd_watch(a):
+    """Event-driven: one line per PR event, from the store's ref notifications."""
+    by_head = {}
+    for n in pr_ids(a.store):
+        rec = read_json(a.store, META, f"prs/{n}.json")
+        if rec:
+            by_head[rec["head"]] = rec
+    args = ["events"] + (["--gcs-subscription", a.gcs_subscription] if a.gcs_subscription else [])
+    proc = subprocess.Popen([PAIL] + (["--store", a.store] if a.store else []) + args, stdout=subprocess.PIPE, text=True)
+    for line in proc.stdout:
+        e = json.loads(line)
+        if e["branch"] == META:
+            by_head = {}
+            for n in pr_ids(a.store):
+                rec = read_json(a.store, META, f"prs/{n}.json")
+                if rec:
+                    by_head[rec["head"]] = rec
+            continue
+        rec = by_head.get(e["branch"])
+        if rec and rec["state"] == "open" and e["commit"]:
+            print(f"PR #{rec['id']} ({rec['title']}): {e['branch']} moved to {e['commit'][:12]}; checks pending", flush=True)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="pail-pr", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--store", default=os.environ.get("PAIL_STORE"))
+    sub = p.add_subparsers(dest="cmd", required=True)
+    o = sub.add_parser("open")
+    o.add_argument("branch", nargs="?")
+    o.add_argument("--title", required=True)
+    o.add_argument("--base", default="main")
+    o.add_argument("--body")
+    sub.add_parser("list")
+    s = sub.add_parser("show")
+    s.add_argument("n", type=int)
+    r = sub.add_parser("review")
+    r.add_argument("n", type=int)
+    g = r.add_mutually_exclusive_group(required=True)
+    g.add_argument("--approve", action="store_true")
+    g.add_argument("--request-changes", action="store_true")
+    r.add_argument("-m", "--message")
+    m = sub.add_parser("merge")
+    m.add_argument("n", type=int)
+    m.add_argument("--force", action="store_true")
+    w = sub.add_parser("watch")
+    w.add_argument("--gcs-subscription")
+    a = p.parse_args()
+    try:
+        {"open": cmd_open, "list": cmd_list, "show": cmd_show, "review": cmd_review, "merge": cmd_merge, "watch": cmd_watch}[a.cmd](a)
+    except PailError as e:
+        sys.exit(f"pail-pr: {e}")
+
+
+if __name__ == "__main__":
+    main()

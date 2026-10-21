@@ -4,6 +4,7 @@ pub mod blobs;
 pub mod config;
 pub mod creds;
 pub mod enc;
+pub mod events;
 pub mod gc;
 pub mod gitcmd;
 pub mod gitdate;

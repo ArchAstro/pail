@@ -982,3 +982,105 @@ fn concurrent_cli_writers_lose_nothing() {
     let files = pail(&t.join("check"), &["ls", "-r"]);
     assert_eq!(files.lines().filter(|l| l.contains("/f")).count(), writers * per);
 }
+
+/// `pail put` commits to a branch without a working copy (creating it), `--if-absent` claims
+/// a path once (exit 4 after), and `pail events` reports each ref change once.
+#[test]
+fn put_and_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    let mut events = cmd(&t, &["--store", &store, "events", "--interval-ms", "100", "--branch", "_*"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    write(&t.join("rec.json"), "{\"id\":1}");
+    let src = format!("prs/1.json={}", t.join("rec.json").display());
+    pail(&t, &["--store", &store, "put", "_meta", "-m", "open", "--file", &src, "--if-absent"]);
+    let again = cmd(&t, &["--store", &store, "put", "_meta", "-m", "again", "--file", &src, "--if-absent"]).output().unwrap();
+    assert_eq!(again.status.code(), Some(4));
+    assert_eq!(pail(&t, &["--store", &store, "cat", "_meta:prs/1.json"]), "{\"id\":1}");
+    pail(&t, &["--store", &store, "put", "_meta", "-m", "close", "--delete", "prs/1.json"]);
+    // main changes too, but only _* branches were asked for.
+    pail(&t, &["--store", &store, "put", "main", "-m", "x", "--file", &format!("x.txt={}", t.join("rec.json").display())]);
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    events.kill().unwrap();
+    let out = String::from_utf8(events.wait_with_output().unwrap().stdout).unwrap();
+    let lines: Vec<serde_json::Value> = out.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(!lines.is_empty() && lines.iter().all(|e| e["branch"] == "_meta"), "{out}");
+    let commits: std::collections::BTreeSet<String> = lines.iter().map(|e| e["commit"].to_string()).collect();
+    assert_eq!(commits.len(), lines.len(), "no duplicate events: {out}");
+}
+
+/// The PR and CI extensions (Python, using only pail commands and conventions): CI builds
+/// commits from ref events and records checks on _meta; a PR merges only with an approval
+/// and its required checks passing, by landing its stack.
+#[test]
+fn pr_and_ci_extensions() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("python3 not found; skipping");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    let ext = Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions");
+    let run = |dir: &Path, prog: &str, args: &[&str], author: &str| {
+        let out = Command::new(ext.join(prog))
+            .args(args)
+            .current_dir(dir)
+            .env("PAIL_BIN", env!("CARGO_BIN_EXE_pail"))
+            .env("PAIL_STORE", &store)
+            .env("PAIL_AUTHOR", author)
+            .env("PAIL_CONFIG_GLOBAL", global_config())
+            .output()
+            .unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "w"]);
+    let w = t.join("w");
+    write(&w.join("pail.ci.json"), r#"{"checks":{"test":"grep -q hello hello.txt"},"required":["test"]}"#);
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "ci config"]);
+    let mut ci = Command::new(ext.join("pail-ci"))
+        .args(["run", "--branch", "pr/*"])
+        .env("PAIL_BIN", env!("CARGO_BIN_EXE_pail"))
+        .env("PAIL_STORE", &store)
+        .env("PAIL_AUTHOR", "CI <ci@x>")
+        .env("PAIL_CONFIG_GLOBAL", global_config())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    pail(&w, &["switch", "-c", "pr/hello"]);
+    write(&w.join("hello.txt"), "hello");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "say hello"]);
+    let (ok, out) = run(&w, "pail-pr", &["open", "pr/hello", "--title", "Say hello"], "Alice <a@x>");
+    assert!(ok, "{out}");
+    // CI records the check from the ref event.
+    let mut status = String::new();
+    for _ in 0..100 {
+        status = run(&w, "pail-ci", &["status", "pr/hello"], "Alice <a@x>").1;
+        if status.contains("success") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let _ = ci.kill();
+    assert!(status.contains("test") && status.contains("success"), "{status}");
+    // No approval yet: refused. Self-approval does not count.
+    run(&w, "pail-pr", &["review", "1", "--approve"], "Alice <a@x>");
+    let (ok, out) = run(&w, "pail-pr", &["merge", "1"], "Alice <a@x>");
+    assert!(!ok && out.contains("0 of 1 approvals"), "{out}");
+    let (ok, out) = run(&w, "pail-pr", &["review", "1", "--approve", "-m", "lgtm"], "Bob <b@x>");
+    assert!(ok, "{out}");
+    let (ok, out) = run(&w, "pail-pr", &["merge", "1"], "Alice <a@x>");
+    assert!(ok, "{out}");
+    assert_eq!(pail(&t, &["--store", &store, "cat", "main:hello.txt"]), "hello");
+    let (_, show) = run(&w, "pail-pr", &["show", "1"], "Alice <a@x>");
+    assert!(show.contains("[merged]") && show.contains("Bob"), "{show}");
+}

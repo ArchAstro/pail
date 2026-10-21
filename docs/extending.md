@@ -1,0 +1,79 @@
+# Extending pail: conventions plus events
+
+Pail has no server to host features, and does not need one. A repository is a bucket
+prefix whose only mutable objects are refs, and every change to a ref is announced by the
+object store itself. Features are programs that agree on names:
+
+```
+writes   pail put <branch> --file PATH=SRC     atomic commit to any branch, no working copy
+         pail land <branch> --stack            every commit of a branch, one atomic swap
+reads    pail cat <rev>:<path>, pail ls -r <rev>:<dir>, pail log, pail rev-parse
+events   pail events [--branch GLOB] [--gcs-subscription SUB]
+         one JSON line per ref change: {"branch","commit","old","source","at"}
+```
+
+## Conventions
+
+| Name | Meaning |
+|---|---|
+| `pr/<anything>` | a branch proposed for review (convention only; any branch can be a PR head) |
+| `_meta` | a branch holding records, not code: PRs, reviews, check results. Writes are commits, so they are atomic, versioned and conflict-checked |
+| `_meta:prs/<n>.json` | a pull request: title, body, head, base, author, state |
+| `_meta:prs/<n>/reviews/<who>.json` | a review: approve or request changes |
+| `_meta:checks/<commit>/<check>.json` | a check result for a commit: pending, success or failure, with a log tail |
+| `<branch>:pail.ci.json` | the checks a commit declares: `{"checks": {"test": "cargo test"}, "required": ["test"]}` |
+| `<base>:pail.pr.json` | merge policy for a base branch: `{"approvals": 1, "required_checks": [...]}` |
+| `_*` branches | written by tools; never built by CI (so recording a result cannot trigger a run) |
+
+Because records are commits:
+
+1. **Ids are claimed atomically.** `pail put _meta --file prs/12.json=… --if-absent` fails
+   with exit 4 if another writer claimed 12 first; the PR tool tries 13.
+2. **History is free.** `pail log _meta -- prs/12.json` is the audit log of PR 12.
+3. **Results are keyed by commit.** Events are at-least-once and unordered; a CI runner that
+   sees a commit twice finds its results already recorded and skips it.
+
+## Events from the bucket
+
+Wire a GCS bucket once (per repository prefix):
+
+```sh
+gcloud pubsub topics create pail-refs
+gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \
+    --object-prefix=REPO/refs/ --event-types=OBJECT_FINALIZE,OBJECT_DELETE
+gcloud pubsub subscriptions create pail-ci --topic=pail-refs
+pail --store gs://BUCKET/REPO events --gcs-subscription projects/P/subscriptions/pail-ci
+```
+
+`pail events` treats each notification as a nudge: it re-reads the ref and emits only real
+changes, once. Without notifications (`file://`, emulators) it polls with the same output.
+S3 (EventBridge/SQS), Azure (Event Grid) and R2 (Queues) offer the same prefix-filtered
+create events; adding them is a new source in `src/events.rs`.
+
+Measured on GCS (2026-10-20, residential client): a ref event arrived 1.2–1.6 s after the
+commit started (the commit itself ~0.5 s).
+
+## Two prototypes
+
+Both are short Python programs that know nothing of pail's internals: they only call the
+`pail` CLI and follow the conventions above.
+
+- **`extensions/pail-pr`**: `open`, `list`, `show`, `review`, `merge`, `watch`. Merge checks
+  the base branch's policy (approvals from someone other than the author, required checks
+  passing on the PR's head commit), then lands the PR with `pail land --stack`.
+- **`extensions/pail-ci`**: `run` follows `pail events`, checks out the exact commit of each
+  event (`pail clone --at`), runs the checks `pail.ci.json` declares and records each result
+  on `_meta`; `status <rev>` shows them.
+
+```
+dev:  pail switch -c pr/hello; …; pail commit -m "say hello"     ─┐
+                                                                  │ refs/pr/hello written
+bucket notification ──▶ Pub/Sub ──▶ pail events ──▶ pail-ci ◀─────┘
+pail-ci: clone --at <commit>, run "test", pail put _meta checks/<commit>/test.json
+dev:  pail-pr open pr/hello --title "Say hello"      (_meta:prs/1.json, --if-absent)
+bob:  pail-pr review 1 --approve                     (_meta:prs/1/reviews/bob.json)
+dev:  pail-pr merge 1    → policy ok → pail land pr/hello --stack --onto main
+```
+
+`tests/cli.rs` (`pr_and_ci_extensions`) runs this flow end to end on a local store; the same
+flow ran on GCS driven by bucket notifications.

@@ -42,6 +42,10 @@ Working copies and caches
   fetch [<revs>]            Fill the local content cache (as `git fetch` for a bare repo)
   cache stats|prune         Inspect or trim the local content cache
 
+Extend
+  put <branch> --file P=SRC Commit files to a branch without a working copy
+  events [--branch GLOB]    Stream ref changes (bucket notifications, or polling)
+
 Access
   auth list|install|use     Credential providers (extensions) for stores you can't reach directly
   auth status|logout        Which provider a store uses, and whether it works
@@ -265,3 +269,29 @@ Examples:
   pail serve --store gs://acme-vcs --addr 0.0.0.0:8080 --auth-command 'acme-sso verify'
   pail serve --store file:///srv/pail --addr 127.0.0.1:8787 --allow-anonymous
   pail clone https://vcs.acme.dev/app      # a client, with credential.helper set for it";
+
+pub const PUT: &str = "\
+The write primitive for tools and extensions: an atomic commit straight to a branch, created
+if missing, with the same concurrency as `pail commit` (replay on disjoint paths, exit 4 on a
+conflict).
+
+Examples:
+  pail put _meta -m \"Open PR 12\" --file prs/12.json=pr.json --if-absent   # claim id 12
+  echo ok | pail put _meta -m \"check\" --file checks/9f2c/test.json=-
+  pail put _meta -m \"close\" --delete prs/12/draft.json";
+
+pub const EVENTS: &str = "\
+One JSON line per ref change: {\"branch\",\"commit\",\"old\",\"source\",\"at\"} (commit null:
+deleted). With --gcs-subscription the events are the bucket's own notifications; otherwise
+refs are polled. Notifications are at-least-once and unordered, so each one is checked
+against the ref and duplicates are dropped: consumers should still key work by commit.
+
+Wire a GCS bucket once:
+  gcloud pubsub topics create pail-refs
+  gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \\
+      --object-prefix=REPO/refs/ --event-types=OBJECT_FINALIZE,OBJECT_DELETE
+  gcloud pubsub subscriptions create pail-ci --topic=pail-refs
+
+Examples:
+  pail events --branch 'pr/*' --branch main
+  pail --store gs://acme/app events --gcs-subscription projects/acme/subscriptions/pail-ci";

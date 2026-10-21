@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""pail-ci: continuous integration for pail, driven by the store's own events. No server.
+
+A commit declares its checks in `pail.ci.json`:
+
+    {"checks": {"test": "cargo test", "lint": "cargo clippy"}, "required": ["test"]}
+
+`pail-ci run` follows `pail events` (the bucket's Pub/Sub notifications, or polling). For
+every new commit on a matching branch it checks out exactly that commit (`pail clone --at`),
+runs each check, and records the result on the `_meta` branch with `pail put`:
+
+    _meta:checks/<commit>/<check>.json   {"state": "pending"|"success"|"failure", ...}
+
+Results are keyed by commit, so duplicate or reordered notifications are harmless, and a
+runner that restarts skips commits that already have results. `_meta` itself (and any `_*`
+branch) is never built, so recording a result cannot trigger another run.
+
+    pail-ci run [--branch GLOB ...] [--gcs-subscription SUB] [--once]
+    pail-ci status REV
+
+The store comes from --store or PAIL_STORE; the pail binary from PAIL_BIN or PATH.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+PAIL = os.environ.get("PAIL_BIN", "pail")
+META = "_meta"
+LOG_TAIL = 4000
+
+
+def pail(args, store, check=True, cwd=None):
+    cmd = [PAIL] + (["--store", store] if store else []) + args
+    r = subprocess.run(cmd, capture_output=True, cwd=cwd)
+    if check and r.returncode != 0:
+        raise RuntimeError(r.stderr.decode().strip() or f"{' '.join(args)} failed")
+    return r
+
+
+def read_json(store, rev, path):
+    r = pail(["cat", f"{rev}:{path}"], store, check=False)
+    return json.loads(r.stdout) if r.returncode == 0 and r.stdout else None
+
+
+def recorded(store, commit):
+    r = pail(["ls", "-r", f"{META}:checks/{commit}"], store, check=False)
+    if r.returncode != 0:
+        return {}
+    out = {}
+    for line in r.stdout.decode().splitlines():
+        path = line.split()[-1] if line.strip() else ""
+        if path.endswith(".json"):
+            out[path.rsplit("/", 1)[-1][:-5]] = read_json(store, META, path)
+    return out
+
+
+def record(store, commit, name, result):
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(result, f, indent=1)
+    try:
+        pail(["put", META, "-m", f"ci: {name} {result['state']} on {commit[:12]}",
+              "--file", f"checks/{commit}/{name}.json={f.name}"], store)
+    finally:
+        os.unlink(f.name)
+
+
+def build(store, branch, commit, timeout):
+    """Run the commit's checks once (skipping ones already recorded)."""
+    cfg = read_json(store, commit, "pail.ci.json")
+    if not cfg or not cfg.get("checks"):
+        return
+    done = recorded(store, commit)
+    todo = {n: c for n, c in cfg["checks"].items() if (done.get(n) or {}).get("state") not in ("success", "failure")}
+    if not todo:
+        return
+    runner = socket.gethostname()
+    for name in todo:
+        record(store, commit, name, {"state": "pending", "branch": branch, "runner": runner, "at": int(time.time())})
+    work = tempfile.mkdtemp(prefix="pail-ci-")
+    try:
+        co = os.path.join(work, "src")
+        store_url = store or os.environ.get("PAIL_STORE")
+        pail(["clone", store_url, co, "-b", branch, "--at", commit], None)
+        for name, command in todo.items():
+            t0 = time.time()
+            try:
+                p = subprocess.run(command, shell=True, cwd=co, capture_output=True, timeout=timeout)
+                code, log = p.returncode, (p.stdout + p.stderr).decode(errors="replace")
+            except subprocess.TimeoutExpired as e:
+                code, log = -1, ((e.stdout or b"") + (e.stderr or b"")).decode(errors="replace") + f"\ntimed out after {timeout}s"
+            state = "success" if code == 0 else "failure"
+            record(store, commit, name, {
+                "state": state, "exit": code, "branch": branch, "command": command,
+                "duration_s": round(time.time() - t0, 2), "runner": runner, "at": int(time.time()),
+                "log_tail": log[-LOG_TAIL:],
+            })
+            print(f"{commit[:12]} {branch:20} {name:12} {state} ({time.time() - t0:.1f}s)", flush=True)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def cmd_run(a):
+    if not (a.store or os.environ.get("PAIL_STORE")):
+        sys.exit("pail-ci needs --store or PAIL_STORE")
+    args = ["events", "--initial"] + sum((["--branch", g] for g in a.branch), [])
+    if a.gcs_subscription:
+        args += ["--gcs-subscription", a.gcs_subscription]
+    proc = subprocess.Popen([PAIL, "--store", a.store or os.environ["PAIL_STORE"]] + args, stdout=subprocess.PIPE, text=True)
+    print(f"pail-ci: watching {a.store or os.environ['PAIL_STORE']} ({'gcs notifications' if a.gcs_subscription else 'polling'})", flush=True)
+    for line in proc.stdout:
+        e = json.loads(line)
+        if not e.get("commit") or e["branch"].startswith("_"):
+            continue  # deletions, and the branches CI itself writes
+        try:
+            build(a.store, e["branch"], e["commit"], a.timeout)
+        except Exception as err:  # keep watching: one broken commit must not stop CI
+            print(f"pail-ci: {e['branch']} {e['commit'][:12]}: {err}", file=sys.stderr, flush=True)
+        if a.once and e.get("source") != "initial":
+            proc.terminate()
+            break
+
+
+def cmd_status(a):
+    r = pail(["rev-parse", a.rev], a.store)
+    commit = r.stdout.decode().strip()
+    checks = recorded(a.store, commit)
+    if not checks:
+        print(f"{commit[:12]}: no checks recorded")
+    for name, c in sorted(checks.items()):
+        print(f"{commit[:12]} {name:12} {c['state']}" + (f" ({c['duration_s']}s on {c['runner']})" if "duration_s" in c else ""))
+        if a.verbose and c.get("log_tail"):
+            print("    " + c["log_tail"].strip().replace("\n", "\n    "))
+
+
+def main():
+    p = argparse.ArgumentParser(prog="pail-ci", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--store", default=os.environ.get("PAIL_STORE"))
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--branch", action="append", default=[], help="branch glob to build (default: all but _*)")
+    r.add_argument("--gcs-subscription")
+    r.add_argument("--timeout", type=int, default=1800)
+    r.add_argument("--once", action="store_true", help="stop after the first live event (tests)")
+    s = sub.add_parser("status")
+    s.add_argument("rev")
+    s.add_argument("-v", "--verbose", action="store_true")
+    a = p.parse_args()
+    {"run": cmd_run, "status": cmd_status}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

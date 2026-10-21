@@ -1040,7 +1040,10 @@ impl Repo {
             meta: req.meta.clone(),
         };
         let prefix = intent_prefix(&req.branch);
-        for attempt in 1..=DIRECT_ATTEMPTS {
+        // On a store that rate-limits writes to one object (GCS), racing again after a loss
+        // only adds to the limit: batch at once.
+        let direct_attempts = if self.store.swap_interval().is_zero() { DIRECT_ATTEMPTS } else { 1 };
+        for attempt in 1..=direct_attempts {
             let head: Option<(RefValue, Version)> = match &known_head {
                 Some(k) if attempt == 1 && Some(k.commit) == req.base => {
                     Some((RefValue { commit: k.commit, recent: k.recent.clone(), ..Default::default() }, k.version.clone()))
@@ -1099,7 +1102,7 @@ impl Repo {
                     // Unknown outcome (e.g. timeout): the ref tells us whether we won.
                     match self.read_ref_value(&req.branch).await? {
                         Some((now, v)) if now.commit == ch => return Ok(outcome(v, now.recent)),
-                        _ if attempt == DIRECT_ATTEMPTS => return Err(e),
+                        _ if attempt == direct_attempts => return Err(e),
                         _ => {}
                     }
                 }
@@ -1177,10 +1180,22 @@ impl Repo {
             // watch the ref (one read per poll) unless it stalls; then anyone combines.
             let oldest = pending_intents(&head.recent, listed.clone()).into_iter().next();
             let designated = oldest.as_ref().is_none_or(|o| *o >= mine.id);
-            let stalled = last_seen.is_some_and(|(_, at)| at.elapsed() >= COMBINER_TAKEOVER);
+            // A designated combiner deliberately waits out the swap interval: not a stall.
+            let stalled = last_seen.is_some_and(|(_, at)| at.elapsed() >= COMBINER_TAKEOVER + self.store.swap_interval());
             if !designated && !stalled {
                 tokio::time::sleep(Duration::from_millis(20 + rand::random::<u64>() % 30)).await;
                 continue;
+            }
+            // Adaptive group commit: on a store with a per-object write rate (GCS), swap no
+            // sooner than its interval after the ref last moved. Intents arriving meanwhile
+            // join this batch, so the batch grows with the load instead of the swap rate.
+            let interval = self.store.swap_interval();
+            if let Some((_, since)) = last_seen {
+                let wait = interval.saturating_sub(since.elapsed());
+                if !wait.is_zero() && designated {
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
             }
             match self.combine(&req.branch, head, &version, listed, &mine).await? {
                 Some((tip, version, recent)) => {

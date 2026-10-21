@@ -319,6 +319,14 @@ pail-mirror verify --git-dir … --store … --state-dir ./state   # re-prove th
 The dashboard at `--serve` shows sync state, per-commit import and proof times, upload
 costs, and deep-check results. `state/mirror.jsonl` holds one record per commit.
 
+## Extending pail: conventions plus events
+
+Features like pull requests and CI are programs that agree on names, not server code:
+`pail put` writes records to a `_meta` branch atomically, `pail events` streams ref changes
+from the bucket's own notifications (GCS Pub/Sub) or by polling, and `pail clone --at`
+checks out the exact commit an event names. `extensions/pail-pr` and `extensions/pail-ci`
+are working prototypes; see [docs/extending.md](docs/extending.md).
+
 ## Auth: credential providers are extensions
 
 Most people have no bucket credentials. Pail asks an installed **credential provider** for

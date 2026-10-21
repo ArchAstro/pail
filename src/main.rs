@@ -70,6 +70,10 @@ enum Cmd {
         /// Branch to check out (default: the store's default branch).
         #[arg(short, long)]
         branch: Option<String>,
+        /// Check out this commit (or `<rev>`) instead of the branch's head: e.g. the exact
+        /// commit a CI event named.
+        #[arg(long)]
+        at: Option<String>,
         /// Create a bare repository (no working copy): local caches and indexes for reading
         /// the store, and a home for linked worktrees.
         #[arg(long)]
@@ -322,6 +326,42 @@ enum Cmd {
         /// Allow requests without checking tokens (trusted networks and tests only).
         #[arg(long, conflicts_with = "auth_command")]
         allow_anonymous: bool,
+    },
+    /// Commit files straight to a branch, without a working copy (creates the branch).
+    #[command(after_long_help = cli_help::PUT)]
+    Put {
+        /// The branch to commit to.
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
+        branch: String,
+        /// The commit message.
+        #[arg(short, long)]
+        message: String,
+        /// `PATH=SRC`: store SRC (a file, or `-` for stdin) at PATH in the branch.
+        #[arg(long = "file", value_name = "PATH=SRC")]
+        files: Vec<String>,
+        /// Remove PATH from the branch.
+        #[arg(long = "delete", value_name = "PATH")]
+        deletes: Vec<String>,
+        /// Fail (exit 4) if any PATH already exists: create-only, e.g. to claim an id.
+        #[arg(long)]
+        if_absent: bool,
+    },
+    /// Stream ref changes as JSON lines, from the store's own notifications or by polling.
+    #[command(after_long_help = cli_help::EVENTS)]
+    Events {
+        /// Only branches matching this glob (`*` matches anything; repeatable).
+        #[arg(long = "branch", value_name = "GLOB")]
+        branches: Vec<String>,
+        /// Pull the bucket's GCS notifications from this Pub/Sub subscription
+        /// (projects/<p>/subscriptions/<s>); default: poll.
+        #[arg(long)]
+        gcs_subscription: Option<String>,
+        /// Polling interval in milliseconds.
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        /// Emit every matching branch once at start.
+        #[arg(long)]
+        initial: bool,
     },
     /// Print a shell completion script that completes branch names live.
     #[command(after_long_help = cli_help::COMPLETION)]
@@ -639,6 +679,86 @@ async fn run(cli: Cli) -> Result<()> {
     }
     match cmd {
         Cmd::Completion { shell } => complete::registration(&shell)?,
+        Cmd::Put { branch, message, files, deletes, if_absent } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let repo = &ctx.repo;
+            let base = repo.read_ref(&branch).await?.map(|(h, _)| h);
+            let mut inputs = vec![];
+            for f in &files {
+                let (path, src) = f.split_once('=').with_context(|| format!("--file wants PATH=SRC, got {f}"))?;
+                let data = if src == "-" {
+                    use std::io::Read;
+                    let mut b = vec![];
+                    std::io::stdin().read_to_end(&mut b)?;
+                    b
+                } else {
+                    std::fs::read(src).with_context(|| format!("reading {src}"))?
+                };
+                inputs.push(pail::repo::FileInput { path: path.trim_matches('/').to_string(), kind: pail::manifest::Kind::File, data: data.into() });
+            }
+            if inputs.is_empty() && deletes.is_empty() {
+                bail!("nothing to put: pass --file PATH=SRC or --delete PATH");
+            }
+            if if_absent && base.is_some() {
+                let root = repo.root_of(base).await?;
+                let present: Vec<String> = {
+                    let mut v = vec![];
+                    for i in &inputs {
+                        if repo.get_entry(root, &i.path).await?.is_some() {
+                            v.push(i.path.clone());
+                        }
+                    }
+                    v
+                };
+                if !present.is_empty() {
+                    return Err(pail::repo::ConflictError { branch: branch.clone(), paths: present }.into());
+                }
+            }
+            let mut delta: Delta = BTreeMap::new();
+            for e in repo.write_files(&inputs, &std::collections::HashMap::new()).await? {
+                delta.insert(e.path.clone(), Some(e));
+            }
+            for d in deletes {
+                delta.insert(d.trim_matches('/').to_string(), None);
+            }
+            let who = ctx.config.identity("author")?;
+            let date = now_date();
+            let out = repo
+                .commit(CommitRequest {
+                    branch: branch.clone(),
+                    base,
+                    delta,
+                    author: who.clone(),
+                    author_date: date.clone(),
+                    committer: ctx.config.identity("committer")?,
+                    committer_date: date,
+                    message: message.clone(),
+                    meta: BTreeMap::new(),
+                })
+                .await?;
+            println!("[{branch} {}] {}", out.commit.short(), message.lines().next().unwrap_or(""));
+        }
+        Cmd::Events { branches, gcs_subscription, interval_ms, initial } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let source = match gcs_subscription {
+                Some(sub) => {
+                    let provider = pail::creds::choose(&ctx.repo.store.url, &ctx.config)?.provider;
+                    let token = pail::creds::Source::new(&provider, &ctx.repo.store.url).context(
+                        "GCS events need a credential provider for the store (e.g. `pail auth use gcloud --for <store>`)",
+                    )?;
+                    pail::events::Source::GcsPubSub { subscription: sub, token }
+                }
+                None => pail::events::Source::Poll { interval: std::time::Duration::from_millis(interval_ms) },
+            };
+            use std::io::Write as _;
+            pail::events::watch(&ctx.repo, source, &branches, initial, |e| {
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "{}", serde_json::to_string(&e)?)?;
+                out.flush()?;
+                Ok(())
+            })
+            .await?;
+        }
         Cmd::Auth(AuthCmd::Logout) => println!("forgot {} cached credential(s)", pail::creds::clear_cache()?),
         Cmd::Auth(AuthCmd::List) => {
             let installed = pail::creds::installed();
@@ -731,7 +851,7 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             println!("initialized {store} ({branch} @ {})", out.commit.short());
         }
-        Cmd::Clone { store, dir, branch, bare } => {
+        Cmd::Clone { store, dir, branch, at, bare } => {
             let store = pail::rev::store_url(&store)?;
             // The store's default branch unless one is named.
             let default = match Repo::remote(&store)?.store.get_opt(pail::rev::STORE_HEAD_KEY).await? {
@@ -759,7 +879,11 @@ async fn run(cli: Cli) -> Result<()> {
             let dir = dir.unwrap_or_else(|| PathBuf::from(&name));
             let t = std::time::Instant::now();
             let mut co = Checkout::default();
-            let wt = Worktree::clone(&store, None, &dir, &branch, None, &mut co).await?;
+            let at = match at {
+                Some(rev) => Some(Ctx::open(Some(store.clone()), None, ids).await?.resolve(&rev).await?),
+                None => None,
+            };
+            let wt = Worktree::clone(&store, None, &dir, &branch, at, &mut co).await?;
             std::fs::write(wt.local.dir.join("HEAD"), &default)?;
             let c = wt.repo.commit_obj(&wt.head.base.unwrap()).await?;
             let (gets, _, down, _) = wt.repo.store.stats.snapshot();

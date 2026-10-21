@@ -157,6 +157,20 @@ impl Store {
         }
     }
 
+    /// The shortest sustainable interval between writes to one object: GCS allows about one
+    /// write per second to the same name; S3 and local stores have no per-key limit.
+    /// `PAIL_SWAP_INTERVAL_MS` overrides.
+    pub fn swap_interval(&self) -> std::time::Duration {
+        if let Some(ms) = std::env::var("PAIL_SWAP_INTERVAL_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            return std::time::Duration::from_millis(ms);
+        }
+        if self.url.starts_with("gs://") {
+            std::time::Duration::from_millis(1000)
+        } else {
+            std::time::Duration::ZERO
+        }
+    }
+
     fn path(&self, key: &str) -> Path {
         if self.prefix.is_empty() { Path::from(key) } else { Path::from(format!("{}/{key}", self.prefix)) }
     }
