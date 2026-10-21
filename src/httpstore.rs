@@ -63,6 +63,35 @@ impl fmt::Display for HttpStore {
     }
 }
 
+/// A 401 from a store with no credential provider configured: the one-line message tells the
+/// user how to sign in. Carried as the source of `Unauthenticated` so `main` can print it bare.
+#[derive(Debug)]
+pub struct NeedsSignIn(pub String);
+
+impl fmt::Display for NeedsSignIn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let host = url::Url::parse(&self.0)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        if host == "pail.archdev.ai" {
+            write!(
+                f,
+                "{} needs sign-in (401). Install a credential provider: pail auth install archdev && pail auth use archdev --for https://pail.archdev.ai",
+                self.0
+            )
+        } else {
+            write!(
+                f,
+                "{} needs sign-in (401). Install a credential provider: pail auth install <provider> (see `pail help auth`)",
+                self.0
+            )
+        }
+    }
+}
+
+impl std::error::Error for NeedsSignIn {}
+
 fn generic(msg: impl Into<String>) -> object_store::Error {
     object_store::Error::Generic {
         store: STORE,
@@ -99,6 +128,12 @@ impl HttpStore {
         let status = resp.status();
         if status.is_success() {
             return Ok(resp);
+        }
+        if status == StatusCode::UNAUTHORIZED && self.auth.is_none() {
+            return Err(object_store::Error::Unauthenticated {
+                path: path.to_string(),
+                source: Box::new(NeedsSignIn(self.base.clone())),
+            });
         }
         let body = resp.text().await.unwrap_or_default();
         let source: Box<dyn std::error::Error + Send + Sync> =

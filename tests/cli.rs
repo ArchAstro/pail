@@ -1992,3 +1992,85 @@ fn auth_install_from_github() {
     let (ok, out) = run(&["auth", "remove", "sso"]);
     assert!(ok && !t.join("ext/pail-credential-sso").exists(), "{out}");
 }
+
+/// Anonymous reads over https:// (public repositories): with no credential provider the client
+/// sends no Authorization header; a store that needs sign-in gets a one-line hint, and a missing
+/// (or private) repository says so.
+#[test]
+fn anonymous_https_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let _server = Child(
+        cmd(
+            &t,
+            &[
+                "serve",
+                "--store",
+                &format!("file://{}", t.join("bucket").display()),
+                "--addr",
+                &format!("127.0.0.1:{port}"),
+                "--allow-anonymous",
+            ],
+        )
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap(),
+    );
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let store = format!("http://127.0.0.1:{port}/acme/app");
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "a"]);
+    let a = t.join("a");
+    write(&a.join("f.txt"), "hi");
+    pail(&a, &["add", "-A"]);
+    pail(&a, &["commit", "-m", "first"]);
+
+    // A fresh anonymous clone and log work with no provider configured.
+    pail(&t, &["clone", &store, "b"]);
+    assert_eq!(std::fs::read_to_string(t.join("b/f.txt")).unwrap(), "hi");
+    assert!(pail(&t.join("b"), &["log"]).contains("first"));
+
+    // A repository that is not there (or is private: servers answer 404 on purpose).
+    let err = pail_fails(
+        &t,
+        &["clone", &format!("http://127.0.0.1:{port}/acme/nope"), "c"],
+    );
+    assert!(
+        err.contains("doesn't exist, or you don't have access"),
+        "{err}"
+    );
+    assert!(!t.join("c").exists());
+
+    // A store that wants sign-in: no Authorization sent, one-line hint.
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let sent_auth = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = sent_auth.clone();
+    std::thread::spawn(move || {
+        for req in server.incoming_requests() {
+            if req.headers().iter().any(|h| h.field.equiv("Authorization")) {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let _ = req.respond(tiny_http::Response::from_string("no").with_status_code(401));
+        }
+    });
+    let err = pail_fails(&t, &["clone", &format!("{base}/acme/app"), "d"]);
+    assert!(
+        err.starts_with("error: ")
+            && err.contains("needs sign-in (401)")
+            && err.contains("pail auth install <provider>")
+            && err.trim().lines().count() == 1,
+        "{err}"
+    );
+    assert!(!sent_auth.load(std::sync::atomic::Ordering::SeqCst));
+}
