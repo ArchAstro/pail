@@ -13,13 +13,16 @@ use std::future::Future;
 
 use crate::hash::Hash;
 use crate::manifest::{
-    BuiltPage, Change, Child, ChunkRef, Entry, Kind, Loc, Page, build_leaves, build_page, build_upper,
-    decode_stored_page, diff_sorted, leaf_child, split_runs,
+    BuiltPage, Change, Child, ChunkRef, Entry, Kind, Loc, Page, build_leaves, build_page,
+    build_upper, decode_stored_page, diff_sorted, leaf_child, split_runs,
 };
 use crate::objects::{Commit, Landed, RefValue, commit_key, page_key, ref_key, validate_branch};
-use serde::{Deserialize, Serialize};
-use crate::pack::{CHUNK_THRESHOLD, INLINE_MAX, PACK_MAX, PackBuilder, chunk_key, chunk_spans, decode_blob, encode_blob, pack_key};
+use crate::pack::{
+    CHUNK_THRESHOLD, INLINE_MAX, PACK_MAX, PackBuilder, chunk_key, chunk_spans, decode_blob,
+    encode_blob, pack_key,
+};
 use crate::store::{Cas, Store, Version};
+use serde::{Deserialize, Serialize};
 
 /// Requests in flight per operation.
 pub const PARALLELISM: usize = 64;
@@ -202,12 +205,16 @@ impl Repo {
     /// A client whose caches and indexes live in the local repository directory `dir`.
     pub fn with_local(store: Store, dir: &Path) -> Repo {
         let mut r = Repo::with_store(store, Some(dir.to_path_buf()));
-        r.blobs = Some(crate::blobs::Blobs { dir: dir.join("blobs") });
+        r.blobs = Some(crate::blobs::Blobs {
+            dir: dir.join("blobs"),
+        });
         r
     }
 
     pub fn with_store(store: Store, local: Option<PathBuf>) -> Repo {
-        let index = |name: &str| crate::gitobj::IdIndex::new(local.as_ref().map(|d| d.join("index").join(name)));
+        let index = |name: &str| {
+            crate::gitobj::IdIndex::new(local.as_ref().map(|d| d.join("index").join(name)))
+        };
         Repo {
             store,
             git_blobs: index("gitblob.idx"),
@@ -224,7 +231,9 @@ impl Repo {
 
     fn cache_path(&self, kind: &str, h: &Hash) -> Option<PathBuf> {
         let hex = h.hex();
-        self.local.as_ref().map(|d| d.join("objects").join(kind).join(&hex[..2]).join(&hex))
+        self.local
+            .as_ref()
+            .map(|d| d.join("objects").join(kind).join(&hex[..2]).join(&hex))
     }
 
     fn cache_read(&self, kind: &str, h: &Hash) -> Option<Vec<u8>> {
@@ -232,7 +241,9 @@ impl Repo {
     }
 
     fn cache_write(&self, kind: &str, h: &Hash, data: &[u8]) {
-        let Some(p) = self.cache_path(kind, h) else { return };
+        let Some(p) = self.cache_path(kind, h) else {
+            return;
+        };
         if p.exists() {
             return;
         }
@@ -248,15 +259,24 @@ impl Repo {
     // ---------- refs ----------
 
     pub async fn read_ref(&self, branch: &str) -> Result<Option<(Hash, Version)>> {
-        Ok(self.read_ref_value(branch).await?.map(|(r, v)| (r.commit, v)))
+        Ok(self
+            .read_ref_value(branch)
+            .await?
+            .map(|(r, v)| (r.commit, v)))
     }
 
     /// A ref with everything it records (see [`RefValue`]) and its version.
     pub async fn read_ref_value(&self, branch: &str) -> Result<Option<(RefValue, Version)>> {
-        let Some((b, v)) = self.store.get_opt(&ref_key(branch)).await? else { return Ok(None) };
-        let r: RefValue = serde_json::from_slice(&b).with_context(|| format!("corrupt ref {branch}"))?;
+        let Some((b, v)) = self.store.get_opt(&ref_key(branch)).await? else {
+            return Ok(None);
+        };
+        let r: RefValue =
+            serde_json::from_slice(&b).with_context(|| format!("corrupt ref {branch}"))?;
         if let (Some(root), Some(generation)) = (r.root, r.generation) {
-            self.heads.lock().unwrap().insert(r.commit, (root, generation));
+            self.heads
+                .lock()
+                .unwrap()
+                .insert(r.commit, (root, generation));
         }
         Ok(Some((r, v)))
     }
@@ -286,13 +306,27 @@ impl Repo {
     pub async fn force_ref(&self, name: &str, commit: Hash) -> Result<()> {
         let old = self.read_ref_value(name).await?;
         if let Some((old, _)) = &old {
-            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis();
             let rec = serde_json::json!({"old": old.commit, "new": commit});
-            self.store.put(&format!("reflog/{name}/{ts:015}"), Bytes::from(rec.to_string())).await?;
+            self.store
+                .put(
+                    &format!("reflog/{name}/{ts:015}"),
+                    Bytes::from(rec.to_string()),
+                )
+                .await?;
         }
-        let recent = old.as_ref().map(|(r, _)| r.recent.clone()).unwrap_or_default();
+        let recent = old
+            .as_ref()
+            .map(|(r, _)| r.recent.clone())
+            .unwrap_or_default();
         let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, recent))?);
-        match self.store.cas(&ref_key(name), body, old.as_ref().map(|(_, v)| v)).await? {
+        match self
+            .store
+            .cas(&ref_key(name), body, old.as_ref().map(|(_, v)| v))
+            .await?
+        {
             Cas::Ok(_) => Ok(()),
             Cas::Conflict => bail!("branch {name} moved concurrently; retry"),
         }
@@ -323,7 +357,13 @@ impl Repo {
 
     /// The local commit graph (None when the metadata cache is off).
     pub fn graph(&self) -> Option<&crate::graph::Graph> {
-        self.graph.get_or_init(|| self.local.as_ref().and_then(|d| crate::graph::Graph::open(&d.join("graph")).ok())).as_ref()
+        self.graph
+            .get_or_init(|| {
+                self.local
+                    .as_ref()
+                    .and_then(|d| crate::graph::Graph::open(&d.join("graph")).ok())
+            })
+            .as_ref()
     }
 
     /// Make the graph hold `tips` and all their ancestors: walk each tip down to the first
@@ -356,7 +396,13 @@ impl Repo {
     /// A commit's metadata without its change list: from memory, the commit graph, or the
     /// commit object. Use `commit_obj` when the change list is needed.
     pub async fn commit_meta(&self, h: &Hash) -> Result<Arc<Commit>> {
-        if let Some(c) = self.commits.lock().unwrap().get(h).or(self.metas.lock().unwrap().get(h)) {
+        if let Some(c) = self
+            .commits
+            .lock()
+            .unwrap()
+            .get(h)
+            .or(self.metas.lock().unwrap().get(h))
+        {
             return Ok(c.clone());
         }
         if let Some(c) = self.graph().and_then(|g| g.view().get(h)) {
@@ -391,7 +437,9 @@ impl Repo {
     pub async fn merge_base(&self, a: Hash, b: Hash) -> Result<Option<Hash>> {
         let (mut a, mut b) = (Some(a), Some(b));
         loop {
-            let (Some(x), Some(y)) = (a, b) else { return Ok(None) };
+            let (Some(x), Some(y)) = (a, b) else {
+                return Ok(None);
+            };
             if x == y {
                 return Ok(Some(x));
             }
@@ -443,7 +491,10 @@ impl Repo {
         let page = if *h == empty.hash {
             empty.page
         } else {
-            match self.cache_read("pages", h).and_then(|d| decode_stored_page(h, &d).ok()) {
+            match self
+                .cache_read("pages", h)
+                .and_then(|d| decode_stored_page(h, &d).ok())
+            {
                 Some(p) => p,
                 None => {
                     let d = self.store.get(&page_key(h)).await?;
@@ -464,7 +515,11 @@ impl Repo {
         let mut internal = HashSet::new();
         let top = self.page(&root).await?;
         if let Page::Leaf(_) = &*top {
-            let c = leaf_child(&BuiltPage { hash: root, data: Bytes::new(), page: (*top).clone() });
+            let c = leaf_child(&BuiltPage {
+                hash: root,
+                data: Bytes::new(),
+                page: (*top).clone(),
+            });
             return Ok((if c.files == 0 { vec![] } else { vec![c] }, internal));
         }
         internal.insert(root);
@@ -482,12 +537,20 @@ impl Repo {
                 return Ok((children, internal));
             }
             internal.extend(children.iter().map(|c| c.hash));
-            level_pages = run_ordered(children.iter().map(|c| self.page(&c.hash)).collect(), PARALLELISM).await?;
+            level_pages = run_ordered(
+                children.iter().map(|c| self.page(&c.hash)).collect(),
+                PARALLELISM,
+            )
+            .await?;
         }
     }
 
     async fn leaves(&self, refs: &[Child]) -> Result<Vec<Arc<Page>>> {
-        run_ordered(refs.iter().map(|c| self.page(&c.hash)).collect(), PARALLELISM).await
+        run_ordered(
+            refs.iter().map(|c| self.page(&c.hash)).collect(),
+            PARALLELISM,
+        )
+        .await
     }
 
     /// Every entry in the tree, in path order.
@@ -506,10 +569,17 @@ impl Repo {
     pub async fn get_entry(&self, root: Hash, path: &str) -> Result<Option<Entry>> {
         let (refs, _) = self.leaf_refs(root).await?;
         let i = refs.partition_point(|c| c.key.as_str() < path);
-        let Some(c) = refs.get(i) else { return Ok(None) };
+        let Some(c) = refs.get(i) else {
+            return Ok(None);
+        };
         let p = self.page(&c.hash).await?;
-        let Page::Leaf(es) = &*p else { bail!("expected leaf") };
-        Ok(es.binary_search_by(|e| e.path.as_str().cmp(path)).ok().map(|i| es[i].clone()))
+        let Page::Leaf(es) = &*p else {
+            bail!("expected leaf")
+        };
+        Ok(es
+            .binary_search_by(|e| e.path.as_str().cmp(path))
+            .ok()
+            .map(|i| es[i].clone()))
     }
 
     /// Changes from tree `a` to tree `b`. Leaves shared by hash are never fetched.
@@ -548,7 +618,9 @@ impl Repo {
         } else {
             let mut per_leaf: BTreeMap<usize, Vec<(&String, &Option<Entry>)>> = BTreeMap::new();
             for (k, v) in delta {
-                let i = refs.partition_point(|c| c.key.as_str() < k.as_str()).min(refs.len() - 1);
+                let i = refs
+                    .partition_point(|c| c.key.as_str() < k.as_str())
+                    .min(refs.len() - 1);
                 per_leaf.entry(i).or_default().push((k, v));
             }
             // Prefetch the leaves we know we must rewrite.
@@ -562,13 +634,16 @@ impl Repo {
                     continue;
                 }
                 let page = self.page(&r.hash).await?;
-                let Page::Leaf(es) = &*page else { bail!("expected leaf page") };
+                let Page::Leaf(es) = &*page else {
+                    bail!("expected leaf page")
+                };
                 let merged = match edits {
                     Some(ed) => merge_edits(es, ed),
                     None => es.clone(),
                 };
                 pending.extend(merged);
-                let (groups, tail) = split_runs(std::mem::take(&mut pending), 0, |e| e.path.as_str());
+                let (groups, tail) =
+                    split_runs(std::mem::take(&mut pending), 0, |e| e.path.as_str());
                 for g in groups {
                     let b = build_page(Page::Leaf(g));
                     out.push(leaf_child(&b));
@@ -587,14 +662,23 @@ impl Repo {
         let (root, upper) = build_upper(out);
         let mut pages = new_leaves;
         pages.extend(upper.into_iter().filter(|p| !known.contains(&p.hash)));
-        Ok(NewTree { root, pages, files, bytes })
+        Ok(NewTree {
+            root,
+            pages,
+            files,
+            bytes,
+        })
     }
 
     // ---------- file contents ----------
 
     /// Store file contents and return their manifest entries (same order as `inputs`).
     /// `reuse` maps content hashes to locations already in the store (dedupe).
-    pub async fn write_files(&self, inputs: &[FileInput], reuse: &HashMap<Hash, Loc>) -> Result<Vec<Entry>> {
+    pub async fn write_files(
+        &self,
+        inputs: &[FileInput],
+        reuse: &HashMap<Hash, Loc>,
+    ) -> Result<Vec<Entry>> {
         let (entries, uploads) = self.prepare_files(inputs, reuse);
         self.upload(uploads).await?;
         Ok(entries)
@@ -602,7 +686,11 @@ impl Repo {
 
     /// [`Repo::write_files`] without the uploads: the entries, and the objects to store before
     /// any commit referring to them is published. Everything is computed locally.
-    pub fn prepare_files(&self, inputs: &[FileInput], reuse: &HashMap<Hash, Loc>) -> (Vec<Entry>, Vec<Upload>) {
+    pub fn prepare_files(
+        &self,
+        inputs: &[FileInput],
+        reuse: &HashMap<Hash, Loc>,
+    ) -> (Vec<Entry>, Vec<Upload>) {
         enum Pending {
             Done(Loc),
             InPack { pack: usize, off: u64, len: u64 },
@@ -627,7 +715,10 @@ impl Repo {
                     if chunk_seen.insert(ch) {
                         chunk_uploads.push((ch, Bytes::from(encode_blob(piece))));
                     }
-                    refs.push(ChunkRef { hash: ch, len: len as u64 });
+                    refs.push(ChunkRef {
+                        hash: ch,
+                        len: len as u64,
+                    });
                 }
                 Pending::Done(Loc::Chunks(refs))
             } else if let Some(&(pack, off, len)) = in_push.get(&h) {
@@ -644,14 +735,25 @@ impl Repo {
             slots.push((h, slot));
         }
 
-        let finished: Vec<(Hash, Bytes)> =
-            packs.into_iter().filter(|p| !p.is_empty()).map(|p| p.finish()).collect();
+        let finished: Vec<(Hash, Bytes)> = packs
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .map(|p| p.finish())
+            .collect();
         // Packs are new by construction. Chunks of an edited large file mostly exist already,
         // and a create-if-absent PUT still sends the body, so ask first (a HEAD costs no bytes).
         let uploads: Vec<Upload> = finished
             .iter()
-            .map(|(h, d)| Upload { key: pack_key(h), data: d.clone(), check_first: false })
-            .chain(chunk_uploads.into_iter().map(|(h, d)| Upload { key: chunk_key(&h), data: d, check_first: true }))
+            .map(|(h, d)| Upload {
+                key: pack_key(h),
+                data: d.clone(),
+                check_first: false,
+            })
+            .chain(chunk_uploads.into_iter().map(|(h, d)| Upload {
+                key: chunk_key(&h),
+                data: d,
+                check_first: true,
+            }))
             .collect();
 
         let entries = inputs
@@ -660,9 +762,19 @@ impl Repo {
             .map(|(f, (hash, slot))| {
                 let loc = match slot {
                     Pending::Done(l) => l,
-                    Pending::InPack { pack, off, len } => Loc::Pack { pack: finished[pack].0, off, len },
+                    Pending::InPack { pack, off, len } => Loc::Pack {
+                        pack: finished[pack].0,
+                        off,
+                        len,
+                    },
                 };
-                Entry { path: f.path.clone(), kind: f.kind, size: f.data.len() as u64, hash, loc }
+                Entry {
+                    path: f.path.clone(),
+                    kind: f.kind,
+                    size: f.data.len() as u64,
+                    hash,
+                    loc,
+                }
             })
             .collect();
         (entries, uploads)
@@ -670,7 +782,11 @@ impl Repo {
 
     /// Store immutable objects, all at once.
     pub async fn upload(&self, uploads: Vec<Upload>) -> Result<()> {
-        run_unordered(uploads.into_iter().map(|u| self.upload_one(u)).collect(), PARALLELISM).await?;
+        run_unordered(
+            uploads.into_iter().map(|u| self.upload_one(u)).collect(),
+            PARALLELISM,
+        )
+        .await?;
         Ok(())
     }
 
@@ -697,17 +813,24 @@ impl Repo {
                 Loc::Inline(b) => out[i] = Some(Bytes::from(b.clone())),
                 Loc::Pack { pack, .. } => by_pack.entry(*pack).or_default().push(i),
                 Loc::Chunks(_) => chunked.push(i),
-                Loc::Unresolved => bail!("{}: content {} is not cached and has no known location", e.path, e.hash.short()),
+                Loc::Unresolved => bail!(
+                    "{}: content {} is not cached and has no known location",
+                    e.path,
+                    e.hash.short()
+                ),
             }
         }
         let jobs = by_pack
             .into_iter()
-            .map(|(pack, idxs)| futures::future::Either::Left(self.read_pack_group(entries, pack, idxs)))
+            .map(|(pack, idxs)| {
+                futures::future::Either::Left(self.read_pack_group(entries, pack, idxs))
+            })
             .chain(chunked.into_iter().map(|i| {
-                futures::future::Either::Right(async move { Ok(vec![(i, self.read_chunked(&entries[i]).await?)]) })
+                futures::future::Either::Right(async move {
+                    Ok(vec![(i, self.read_chunked(&entries[i]).await?)])
+                })
             }));
-        let results: Vec<Vec<(usize, Bytes)>> =
-            run_unordered(jobs.collect(), PARALLELISM).await?;
+        let results: Vec<Vec<(usize, Bytes)>> = run_unordered(jobs.collect(), PARALLELISM).await?;
         let mut fetched = vec![false; entries.len()];
         for (i, b) in results.into_iter().flatten() {
             fetched[i] = true;
@@ -737,7 +860,12 @@ impl Repo {
         Ok(verified)
     }
 
-    async fn read_pack_group(&self, entries: &[Entry], pack: Hash, mut idxs: Vec<usize>) -> Result<Vec<(usize, Bytes)>> {
+    async fn read_pack_group(
+        &self,
+        entries: &[Entry],
+        pack: Hash,
+        mut idxs: Vec<usize>,
+    ) -> Result<Vec<(usize, Bytes)>> {
         let span = |i: usize| match &entries[i].loc {
             Loc::Pack { off, len, .. } => *off..*off + *len,
             _ => unreachable!(),
@@ -756,10 +884,18 @@ impl Repo {
     }
 
     async fn read_chunked(&self, e: &Entry) -> Result<Bytes> {
-        let Loc::Chunks(chunks) = &e.loc else { bail!("not chunked") };
+        let Loc::Chunks(chunks) = &e.loc else {
+            bail!("not chunked")
+        };
         let mut parts = Vec::with_capacity(chunks.len());
-        let fetched: Vec<Bytes> =
-            run_ordered(chunks.iter().map(|c| self.store.get_owned(chunk_key(&c.hash))).collect(), 16).await?;
+        let fetched: Vec<Bytes> = run_ordered(
+            chunks
+                .iter()
+                .map(|c| self.store.get_owned(chunk_key(&c.hash)))
+                .collect(),
+            16,
+        )
+        .await?;
         for (c, d) in chunks.iter().zip(fetched) {
             let raw = decode_blob(&d, c.len)?;
             anyhow::ensure!(Hash::of(&raw) == c.hash, "chunk {} corrupt", c.hash.short());
@@ -773,7 +909,12 @@ impl Repo {
     /// Build and store a commit applying `delta` to `parent`, without moving any ref. The
     /// commit records its change list against `parent`. Immutable and idempotent: an
     /// unreferenced result is garbage for `gc`.
-    pub async fn write_commit(&self, parent: Option<Hash>, delta: &Delta, f: &CommitFields) -> Result<Written> {
+    pub async fn write_commit(
+        &self,
+        parent: Option<Hash>,
+        delta: &Delta,
+        f: &CommitFields,
+    ) -> Result<Written> {
         let prepared = self.prepare_commit(parent, delta, f).await?;
         self.store_commit(&prepared, vec![]).await
     }
@@ -786,26 +927,51 @@ impl Repo {
         let n = pages.len();
         let page_puts = pages.into_iter().map(|pg| {
             futures::future::Either::Left(async move {
-                self.store.put_new(&page_key(&pg.hash), pg.data.clone()).await?;
+                self.store
+                    .put_new(&page_key(&pg.hash), pg.data.clone())
+                    .await?;
                 self.cache_write("pages", &pg.hash, &pg.data);
-                self.pages.lock().unwrap().insert(pg.hash, Arc::new(pg.page.clone()));
+                self.pages
+                    .lock()
+                    .unwrap()
+                    .insert(pg.hash, Arc::new(pg.page.clone()));
                 Ok::<_, anyhow::Error>(())
             })
         });
-        let commit_put = std::iter::once(futures::future::Either::Right(futures::future::Either::Left(async move {
-            self.store.put_new(&commit_key(&p.commit), p.data.clone()).await?;
-            self.cache_write("commits", &p.commit, &p.data);
-            Ok::<_, anyhow::Error>(())
-        })));
-        let extra_puts = extra
-            .into_iter()
-            .map(|u| futures::future::Either::Right(futures::future::Either::Right(async move { self.upload_one(u).await.map(|_| ()) })));
-        run_unordered(page_puts.chain(commit_put).chain(extra_puts).collect(), PARALLELISM).await?;
-        Ok(Written { commit: p.commit, pages: n, files: p.files, bytes: p.bytes })
+        let commit_put = std::iter::once(futures::future::Either::Right(
+            futures::future::Either::Left(async move {
+                self.store
+                    .put_new(&commit_key(&p.commit), p.data.clone())
+                    .await?;
+                self.cache_write("commits", &p.commit, &p.data);
+                Ok::<_, anyhow::Error>(())
+            }),
+        ));
+        let extra_puts = extra.into_iter().map(|u| {
+            futures::future::Either::Right(futures::future::Either::Right(async move {
+                self.upload_one(u).await.map(|_| ())
+            }))
+        });
+        run_unordered(
+            page_puts.chain(commit_put).chain(extra_puts).collect(),
+            PARALLELISM,
+        )
+        .await?;
+        Ok(Written {
+            commit: p.commit,
+            pages: n,
+            files: p.files,
+            bytes: p.bytes,
+        })
     }
 
     /// Everything a commit is, computed locally: its pages, its encoded object and its id.
-    pub async fn prepare_commit(&self, parent: Option<Hash>, delta: &Delta, f: &CommitFields) -> Result<PreparedCommit> {
+    pub async fn prepare_commit(
+        &self,
+        parent: Option<Hash>,
+        delta: &Delta,
+        f: &CommitFields,
+    ) -> Result<PreparedCommit> {
         let parent_root = self.root_of(parent).await?;
         let tree = self.apply_delta(parent_root, delta).await?;
         // The exact change against `parent`: paths whose kind or content differ (no-op edits
@@ -822,13 +988,16 @@ impl Repo {
                 changes.insert(
                     path.clone(),
                     crate::objects::FileChange {
-                        old: old.as_ref().map(|e| crate::objects::FileState::of(e, false)),
+                        old: old
+                            .as_ref()
+                            .map(|e| crate::objects::FileState::of(e, false)),
                         new: new.as_ref().map(|e| crate::objects::FileState::of(e, true)),
                     },
                 );
             }
         }
-        let parent_generation = parent.and_then(|p| self.heads.lock().unwrap().get(&p).map(|k| k.1));
+        let parent_generation =
+            parent.and_then(|p| self.heads.lock().unwrap().get(&p).map(|k| k.1));
         let generation = match (parent, parent_generation) {
             (Some(_), Some(g)) => g + 1,
             (Some(p), None) => self.commit_meta(&p).await?.generation + 1,
@@ -849,7 +1018,10 @@ impl Repo {
             changes: Some(crate::objects::Changes::new(&changes)),
         };
         let (ch, data) = commit.encode();
-        self.heads.lock().unwrap().insert(ch, (tree.root, generation));
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(ch, (tree.root, generation));
         // Its pages are readable at once (immutable, content-addressed), so a commit can be
         // prepared on top of this one before either is stored.
         {
@@ -858,13 +1030,25 @@ impl Repo {
                 cache.insert(p.hash, Arc::new(p.page.clone()));
             }
         }
-        Ok(PreparedCommit { commit: ch, data, pages: tree.pages, files: tree.files, bytes: tree.bytes })
+        Ok(PreparedCommit {
+            commit: ch,
+            data,
+            pages: tree.pages,
+            files: tree.files,
+            bytes: tree.bytes,
+        })
     }
 
     /// Move `branch` from `expected` (None: create) to `commit` in one compare-and-swap.
     /// Conflict means someone else moved it first.
     /// `recent` is carried forward from the value being replaced (see [`RefValue::recent`]).
-    pub async fn advance_ref(&self, branch: &str, expected: Option<&Version>, commit: Hash, recent: Vec<Landed>) -> Result<Cas> {
+    pub async fn advance_ref(
+        &self,
+        branch: &str,
+        expected: Option<&Version>,
+        commit: Hash,
+        recent: Vec<Landed>,
+    ) -> Result<Cas> {
         let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, recent))?);
         self.store.cas(&ref_key(branch), body, expected).await
     }
@@ -872,7 +1056,12 @@ impl Repo {
     /// A ref value for `commit`, with its root and generation when this client knows them.
     fn ref_value(&self, commit: Hash, recent: Vec<Landed>) -> RefValue {
         let known = self.heads.lock().unwrap().get(&commit).copied();
-        RefValue { commit, root: known.map(|k| k.0), generation: known.map(|k| k.1), recent }
+        RefValue {
+            commit,
+            root: known.map(|k| k.0),
+            generation: known.map(|k| k.1),
+            recent,
+        }
     }
 
     /// A delta that reproduces commit `h` on another parent: its change list (new sides), or
@@ -893,8 +1082,15 @@ impl Repo {
     /// moves once to the last one. Commits already landed (found by `rewritten.from` on
     /// `onto`) are skipped, so landing is idempotent and a growing stack lands incrementally.
     /// A stack commit touching a path `onto` changed meanwhile is a conflict; nothing moves.
-    pub async fn land_stack(&self, branch: &str, onto: &str, committer: &str, date: &str) -> Result<LandOutcome> {
-        self.land_stack_with(branch, onto, committer, date, None).await
+    pub async fn land_stack(
+        &self,
+        branch: &str,
+        onto: &str,
+        committer: &str,
+        date: &str,
+    ) -> Result<LandOutcome> {
+        self.land_stack_with(branch, onto, committer, date, None)
+            .await
     }
 
     /// [`Repo::land_stack`], asking `check` before the first publish attempt.
@@ -912,10 +1108,19 @@ impl Repo {
         let mut attempts = 0;
         loop {
             attempts += 1;
-            let (tip, _) = self.read_ref(branch).await?.with_context(|| format!("no branch {branch}"))?;
-            let (onto_ref, version) = self.read_ref_value(onto).await?.with_context(|| format!("no branch {onto}"))?;
+            let (tip, _) = self
+                .read_ref(branch)
+                .await?
+                .with_context(|| format!("no branch {branch}"))?;
+            let (onto_ref, version) = self
+                .read_ref_value(onto)
+                .await?
+                .with_context(|| format!("no branch {onto}"))?;
             let onto_tip = onto_ref.commit;
-            let base = self.merge_base(tip, onto_tip).await?.context("branches share no history")?;
+            let base = self
+                .merge_base(tip, onto_tip)
+                .await?
+                .context("branches share no history")?;
             let mut stack = vec![];
             let mut cur = Some(tip);
             while let Some(h) = cur.filter(|h| *h != base) {
@@ -934,19 +1139,38 @@ impl Repo {
                 }
                 cur = c.parent;
             }
-            let done = stack.iter().take_while(|h| copies.contains_key(&h.hex())).count();
-            let from = if done == 0 { base } else { copies[&stack[done - 1].hex()] };
+            let done = stack
+                .iter()
+                .take_while(|h| copies.contains_key(&h.hex()))
+                .count();
+            let from = if done == 0 {
+                base
+            } else {
+                copies[&stack[done - 1].hex()]
+            };
             let stack: Vec<Hash> = stack[done..].to_vec();
             if stack.is_empty() {
-                return Ok(LandOutcome { tip: onto_tip, landed: vec![], fast_forward: true, attempts });
+                return Ok(LandOutcome {
+                    tip: onto_tip,
+                    landed: vec![],
+                    fast_forward: true,
+                    attempts,
+                });
             }
             let (new_tip, landed, ff) = if done == 0 && base == onto_tip {
                 (tip, stack.clone(), true)
             } else {
                 // Paths `onto` changed since what the rest of the stack builds on must not be
                 // touched by it.
-                let theirs: std::collections::BTreeSet<String> =
-                    self.diff(self.root_of(Some(from)).await?, self.root_of(Some(onto_tip)).await?).await?.into_iter().map(|c| c.path).collect();
+                let theirs: std::collections::BTreeSet<String> = self
+                    .diff(
+                        self.root_of(Some(from)).await?,
+                        self.root_of(Some(onto_tip)).await?,
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|c| c.path)
+                    .collect();
                 let mut deltas = vec![];
                 let mut overlap = std::collections::BTreeSet::new();
                 for h in &stack {
@@ -955,7 +1179,11 @@ impl Repo {
                     deltas.push(d);
                 }
                 if !overlap.is_empty() {
-                    return Err(ConflictError { branch: onto.to_string(), paths: overlap.into_iter().collect() }.into());
+                    return Err(ConflictError {
+                        branch: onto.to_string(),
+                        paths: overlap.into_iter().collect(),
+                    }
+                    .into());
                 }
                 let mut parent = onto_tip;
                 let mut landed = vec![];
@@ -979,19 +1207,36 @@ impl Repo {
             };
             if !checked {
                 if let Some(check) = check {
-                    check(&Publish { branch: onto.to_string(), old: Some(onto_tip), new: new_tip })?;
+                    check(&Publish {
+                        branch: onto.to_string(),
+                        old: Some(onto_tip),
+                        new: new_tip,
+                    })?;
                 }
                 checked = true;
             }
             // The one write that publishes the stack.
-            match self.advance_ref(onto, Some(&version), new_tip, onto_ref.recent.clone()).await {
+            match self
+                .advance_ref(onto, Some(&version), new_tip, onto_ref.recent.clone())
+                .await
+            {
                 Ok(Cas::Ok(_)) => {
-                    return Ok(LandOutcome { tip: new_tip, landed, fast_forward: ff, attempts });
+                    return Ok(LandOutcome {
+                        tip: new_tip,
+                        landed,
+                        fast_forward: ff,
+                        attempts,
+                    });
                 }
                 Ok(Cas::Conflict) | Err(_) => {
                     if let Some((now, _)) = self.read_ref(onto).await? {
                         if now == new_tip {
-                            return Ok(LandOutcome { tip: new_tip, landed, fast_forward: ff, attempts });
+                            return Ok(LandOutcome {
+                                tip: new_tip,
+                                landed,
+                                fast_forward: ff,
+                                attempts,
+                            });
                         }
                     }
                 }
@@ -1010,8 +1255,19 @@ impl Repo {
     }
 
     /// [`Repo::commit`], asking `check` before the first publish attempt.
-    pub async fn commit_with(&self, req: CommitRequest, check: Option<PublishCheck<'_>>) -> Result<CommitOutcome> {
-        self.commit_opts(req, CommitOptions { check, ..Default::default() }).await
+    pub async fn commit_with(
+        &self,
+        req: CommitRequest,
+        check: Option<PublishCheck<'_>>,
+    ) -> Result<CommitOutcome> {
+        self.commit_opts(
+            req,
+            CommitOptions {
+                check,
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Commit with every option. The path of a commit:
@@ -1020,9 +1276,17 @@ impl Repo {
     ///    (and `uploads`) in one concurrent wave, compare-and-swap the ref. Two round trips
     ///    when the head is known.
     /// 2. Lost twice: publish an intent and combine (see [`Repo::commit_combining`]).
-    pub async fn commit_opts(&self, req: CommitRequest, opts: CommitOptions<'_>) -> Result<CommitOutcome> {
+    pub async fn commit_opts(
+        &self,
+        req: CommitRequest,
+        opts: CommitOptions<'_>,
+    ) -> Result<CommitOutcome> {
         validate_branch(&req.branch)?;
-        let CommitOptions { check, uploads, known_head } = opts;
+        let CommitOptions {
+            check,
+            uploads,
+            known_head,
+        } = opts;
         // A publish check (a pre-publish hook) must see what is published, so it reads the
         // ref first rather than swapping blind from a remembered head.
         let known_head = known_head.filter(|_| check.is_none());
@@ -1042,12 +1306,21 @@ impl Repo {
         let prefix = intent_prefix(&req.branch);
         // On a store that rate-limits writes to one object (GCS), racing again after a loss
         // only adds to the limit: batch at once.
-        let direct_attempts = if self.store.swap_interval().is_zero() { DIRECT_ATTEMPTS } else { 1 };
+        let direct_attempts = if self.store.swap_interval().is_zero() {
+            DIRECT_ATTEMPTS
+        } else {
+            1
+        };
         for attempt in 1..=direct_attempts {
             let head: Option<(RefValue, Version)> = match &known_head {
-                Some(k) if attempt == 1 && Some(k.commit) == req.base => {
-                    Some((RefValue { commit: k.commit, recent: k.recent.clone(), ..Default::default() }, k.version.clone()))
-                }
+                Some(k) if attempt == 1 && Some(k.commit) == req.base => Some((
+                    RefValue {
+                        commit: k.commit,
+                        recent: k.recent.clone(),
+                        ..Default::default()
+                    },
+                    k.version.clone(),
+                )),
                 _ => self.read_ref_value(&req.branch).await?,
             };
             if head.is_none() && req.base.is_some() {
@@ -1056,19 +1329,29 @@ impl Repo {
             let parent = head.as_ref().map(|(r, _)| r.commit);
             if parent != req.base {
                 // Someone else committed since our base. Replay only if paths are disjoint.
-                self.check_disjoint(&req.branch, base_root, parent, &req.delta).await?;
+                self.check_disjoint(&req.branch, base_root, parent, &req.delta)
+                    .await?;
             }
             let prepared = self.prepare_commit(parent, &req.delta, &fields).await?;
             // Look for writers already combining while the objects upload (no extra round
             // trip): swapping past their pending intents would starve them, so join them.
-            let (written, listed) =
-                tokio::try_join!(self.store_commit(&prepared, uploads.take().unwrap_or_default()), self.store.list(&prefix))?;
-            let recent_now: &[Landed] = head.as_ref().map(|(r, _)| r.recent.as_slice()).unwrap_or(&[]);
+            let (written, listed) = tokio::try_join!(
+                self.store_commit(&prepared, uploads.take().unwrap_or_default()),
+                self.store.list(&prefix)
+            )?;
+            let recent_now: &[Landed] = head
+                .as_ref()
+                .map(|(r, _)| r.recent.as_slice())
+                .unwrap_or(&[]);
             if !pending_intents(recent_now, listed).is_empty() {
                 pages_written += written.pages;
                 if checked.is_none() {
                     if let Some(check) = check {
-                        check(&Publish { branch: req.branch.clone(), old: parent, new: written.commit })?;
+                        check(&Publish {
+                            branch: req.branch.clone(),
+                            old: parent,
+                            new: written.commit,
+                        })?;
                     }
                     checked = Some(written.commit);
                 }
@@ -1078,11 +1361,18 @@ impl Repo {
             let ch = written.commit;
             if checked.is_none() {
                 if let Some(check) = check {
-                    check(&Publish { branch: req.branch.clone(), old: parent, new: ch })?;
+                    check(&Publish {
+                        branch: req.branch.clone(),
+                        old: parent,
+                        new: ch,
+                    })?;
                 }
                 checked = Some(ch);
             }
-            let recent = head.as_ref().map(|(r, _)| r.recent.clone()).unwrap_or_default();
+            let recent = head
+                .as_ref()
+                .map(|(r, _)| r.recent.clone())
+                .unwrap_or_default();
             let expected = head.as_ref().map(|(_, v)| v.clone());
             let outcome = |version: Version, recent: Vec<Landed>| CommitOutcome {
                 commit: ch,
@@ -1095,7 +1385,10 @@ impl Repo {
                 recent,
                 head: ch,
             };
-            match self.advance_ref(&req.branch, expected.as_ref(), ch, recent.clone()).await {
+            match self
+                .advance_ref(&req.branch, expected.as_ref(), ch, recent.clone())
+                .await
+            {
                 Ok(Cas::Ok(version)) => return Ok(outcome(version, recent)),
                 Ok(Cas::Conflict) => {}
                 Err(e) => {
@@ -1108,17 +1401,32 @@ impl Repo {
                 }
             }
         }
-        self.commit_combining(&req, &fields, base_root, started, pages_written, checked).await
+        self.commit_combining(&req, &fields, base_root, started, pages_written, checked)
+            .await
     }
 
     /// Fail with a conflict if `delta` touches a path that changed between `base_root` and
     /// `parent`.
-    async fn check_disjoint(&self, branch: &str, base_root: Hash, parent: Option<Hash>, delta: &Delta) -> Result<()> {
+    async fn check_disjoint(
+        &self,
+        branch: &str,
+        base_root: Hash,
+        parent: Option<Hash>,
+        delta: &Delta,
+    ) -> Result<()> {
         let head_root = self.root_of(parent).await?;
         let theirs = self.diff(base_root, head_root).await?;
-        let overlap: Vec<String> = theirs.into_iter().filter(|c| delta.contains_key(&c.path)).map(|c| c.path).collect();
+        let overlap: Vec<String> = theirs
+            .into_iter()
+            .filter(|c| delta.contains_key(&c.path))
+            .map(|c| c.path)
+            .collect();
         if !overlap.is_empty() {
-            return Err(ConflictError { branch: branch.to_string(), paths: overlap }.into());
+            return Err(ConflictError {
+                branch: branch.to_string(),
+                paths: overlap,
+            }
+            .into());
         }
         Ok(())
     }
@@ -1142,7 +1450,9 @@ impl Repo {
         let id = intent_id();
         let key = intent_key(&req.branch, &id);
         let mine = Intent::new(&id, req.base, &req.delta, fields);
-        self.store.put(&key, Bytes::from(serde_json::to_vec(&mine)?)).await?;
+        self.store
+            .put(&key, Bytes::from(serde_json::to_vec(&mine)?))
+            .await?;
         let mut attempts = DIRECT_ATTEMPTS;
         let prefix = intent_prefix(&req.branch);
         // The head as last seen, and since when: a designated combiner that stops making
@@ -1159,11 +1469,22 @@ impl Repo {
             if let Some(landed) = head.recent.iter().find(|l| l.intent == id) {
                 let _ = self.store.delete(&key).await;
                 return self
-                    .landed_outcome(landed.commit, head.commit, version, head.recent.clone(), attempts, pages_written, checked)
+                    .landed_outcome(
+                        landed.commit,
+                        head.commit,
+                        version,
+                        head.recent.clone(),
+                        attempts,
+                        pages_written,
+                        checked,
+                    )
                     .await;
             }
             // My change must still apply to the head.
-            if let Err(e) = self.check_disjoint(&req.branch, base_root, Some(head.commit), &req.delta).await {
+            if let Err(e) = self
+                .check_disjoint(&req.branch, base_root, Some(head.commit), &req.delta)
+                .await
+            {
                 let _ = self.store.delete(&key).await;
                 return Err(e);
             }
@@ -1171,17 +1492,25 @@ impl Repo {
                 // Withdraw first, so the intent cannot land after we report failure (barring a
                 // combiner that read it in the last instant: see `INTENT_MAX_AGE`).
                 let _ = self.store.delete(&key).await;
-                bail!("gave up after {attempts} attempts in {:?}: {} did not accept the commit", started.elapsed(), req.branch);
+                bail!(
+                    "gave up after {attempts} attempts in {:?}: {} did not accept the commit",
+                    started.elapsed(),
+                    req.branch
+                );
             }
             if last_seen.is_none_or(|(h, _)| h != head.commit) {
                 last_seen = Some((head.commit, std::time::Instant::now()));
             }
             // One designated combiner: the writer of the oldest pending intent. The rest only
             // watch the ref (one read per poll) unless it stalls; then anyone combines.
-            let oldest = pending_intents(&head.recent, listed.clone()).into_iter().next();
+            let oldest = pending_intents(&head.recent, listed.clone())
+                .into_iter()
+                .next();
             let designated = oldest.as_ref().is_none_or(|o| *o >= mine.id);
             // A designated combiner deliberately waits out the swap interval: not a stall.
-            let stalled = last_seen.is_some_and(|(_, at)| at.elapsed() >= COMBINER_TAKEOVER + self.store.swap_interval());
+            let stalled = last_seen.is_some_and(|(_, at)| {
+                at.elapsed() >= COMBINER_TAKEOVER + self.store.swap_interval()
+            });
             if !designated && !stalled {
                 tokio::time::sleep(Duration::from_millis(20 + rand::random::<u64>() % 30)).await;
                 continue;
@@ -1197,11 +1526,24 @@ impl Repo {
                     continue;
                 }
             }
-            match self.combine(&req.branch, head, &version, listed, &mine).await? {
+            match self
+                .combine(&req.branch, head, &version, listed, &mine)
+                .await?
+            {
                 Some((tip, version, recent)) => {
                     let commit = recent.iter().find(|l| l.intent == id).map(|l| l.commit);
                     if let Some(commit) = commit {
-                        return self.landed_outcome(commit, tip, version, recent, attempts, pages_written, checked).await;
+                        return self
+                            .landed_outcome(
+                                commit,
+                                tip,
+                                version,
+                                recent,
+                                attempts,
+                                pages_written,
+                                checked,
+                            )
+                            .await;
                     }
                 }
                 None => {
@@ -1285,34 +1627,61 @@ impl Repo {
             // An intent whose paths changed since its base is skipped: its writer sees the
             // conflict itself.
             let base_root = self.root_of(intent.base).await?;
-            if let Err(e) = self.check_disjoint(branch, base_root, Some(parent), &delta).await {
+            if let Err(e) = self
+                .check_disjoint(branch, base_root, Some(parent), &delta)
+                .await
+            {
                 if e.downcast_ref::<ConflictError>().is_none() {
                     return Err(e);
                 }
-                combine_trace(|| format!("skip {} (conflict) base {:?} parent {}", intent.id, intent.base.map(|h| h.short()), parent.short()));
+                combine_trace(|| {
+                    format!(
+                        "skip {} (conflict) base {:?} parent {}",
+                        intent.id,
+                        intent.base.map(|h| h.short()),
+                        parent.short()
+                    )
+                });
                 continue;
             }
             let mut fields = intent.fields.to_fields();
             fields.meta.insert("pail.intent".into(), intent.id.clone());
             let p = self.prepare_commit(Some(parent), &delta, &fields).await?;
             parent = p.commit;
-            batch.push(Landed { intent: intent.id.clone(), commit: p.commit });
+            batch.push(Landed {
+                intent: intent.id.clone(),
+                commit: p.commit,
+            });
             prepared.push(p);
         }
-        combine_trace(|| format!("{} pending, batch {}, mine {}", pending.len(), batch.len(), batch.iter().any(|l| l.intent == mine.id)));
+        combine_trace(|| {
+            format!(
+                "{} pending, batch {}, mine {}",
+                pending.len(),
+                batch.len(),
+                batch.iter().any(|l| l.intent == mine.id)
+            )
+        });
         if prepared.is_empty() {
             return Ok(None);
         }
-        futures::future::try_join_all(prepared.iter().map(|p| self.store_commit(p, vec![]))).await?;
+        futures::future::try_join_all(prepared.iter().map(|p| self.store_commit(p, vec![])))
+            .await?;
         let mut recent = head.recent;
         recent.extend(batch.iter().cloned());
         if recent.len() > RECENT_MAX {
             recent.drain(..recent.len() - RECENT_MAX);
         }
-        match self.advance_ref(branch, Some(version), parent, recent.clone()).await {
+        match self
+            .advance_ref(branch, Some(version), parent, recent.clone())
+            .await
+        {
             Ok(Cas::Ok(v)) => {
                 // Landed: their intents are done (best effort; `recent` guards against repeats).
-                let keys: Vec<String> = batch.iter().map(|l| intent_key(branch, &l.intent)).collect();
+                let keys: Vec<String> = batch
+                    .iter()
+                    .map(|l| intent_key(branch, &l.intent))
+                    .collect();
                 let _ = futures::future::join_all(keys.iter().map(|k| self.store.delete(k))).await;
                 Ok(Some((parent, v, recent)))
             }
@@ -1354,8 +1723,16 @@ fn pending_intents(recent: &[Landed], listed: Vec<(String, u64)>) -> Vec<String>
     let now = intent_now();
     let mut pending: Vec<String> = listed
         .into_iter()
-        .filter_map(|(k, _)| k.rsplit('/').next().and_then(|f| f.strip_suffix(".json")).map(str::to_string))
-        .filter(|id| !landed.contains(id.as_str()) && intent_age(id, now).is_some_and(|age| age < INTENT_MAX_AGE))
+        .filter_map(|(k, _)| {
+            k.rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".json"))
+                .map(str::to_string)
+        })
+        .filter(|id| {
+            !landed.contains(id.as_str())
+                && intent_age(id, now).is_some_and(|age| age < INTENT_MAX_AGE)
+        })
         .collect();
     pending.sort();
     pending
@@ -1370,7 +1747,10 @@ fn intent_key(branch: &str, id: &str) -> String {
 }
 
 fn intent_now() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 /// Sortable by creation time: `<nanoseconds since the epoch, 20 digits>-<random>`.
@@ -1380,7 +1760,9 @@ fn intent_id() -> String {
 
 fn intent_age(id: &str, now: u128) -> Option<Duration> {
     let nanos: u128 = id.split('-').next()?.parse().ok()?;
-    Some(Duration::from_nanos(now.saturating_sub(nanos).min(u64::MAX as u128) as u64))
+    Some(Duration::from_nanos(
+        now.saturating_sub(nanos).min(u64::MAX as u128) as u64,
+    ))
 }
 
 /// A commit waiting to be landed by whichever writer wins next.
@@ -1420,7 +1802,11 @@ impl IntentFields {
 impl Intent {
     fn new(id: &str, base: Option<Hash>, delta: &Delta, f: &CommitFields) -> Intent {
         let puts: Vec<Entry> = delta.values().flatten().cloned().collect();
-        let deletes = delta.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| k.clone()).collect();
+        let deletes = delta
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.clone())
+            .collect();
         Intent {
             id: id.to_string(),
             base,
@@ -1441,7 +1827,10 @@ impl Intent {
         let Page::Leaf(puts) = crate::manifest::decode_page(&hex::decode(&self.puts)?)? else {
             bail!("intent {} has no entry list", self.id);
         };
-        let mut delta: Delta = puts.into_iter().map(|e| (e.path.clone(), Some(e))).collect();
+        let mut delta: Delta = puts
+            .into_iter()
+            .map(|e| (e.path.clone(), Some(e)))
+            .collect();
         for p in &self.deletes {
             delta.insert(p.clone(), None);
         }
@@ -1481,12 +1870,18 @@ fn merge_edits(entries: &[Entry], edits: &[(&String, &Option<Entry>)]) -> Vec<En
 }
 
 /// Run futures with bounded concurrency, keeping input order.
-pub async fn run_ordered<T, F: Future<Output = Result<T>>>(futs: Vec<F>, n: usize) -> Result<Vec<T>> {
+pub async fn run_ordered<T, F: Future<Output = Result<T>>>(
+    futs: Vec<F>,
+    n: usize,
+) -> Result<Vec<T>> {
     stream::iter(futs).buffered(n).try_collect().await
 }
 
 /// Run futures with bounded concurrency, in completion order.
-pub async fn run_unordered<T, F: Future<Output = Result<T>>>(futs: Vec<F>, n: usize) -> Result<Vec<T>> {
+pub async fn run_unordered<T, F: Future<Output = Result<T>>>(
+    futs: Vec<F>,
+    n: usize,
+) -> Result<Vec<T>> {
     stream::iter(futs).buffer_unordered(n).try_collect().await
 }
 

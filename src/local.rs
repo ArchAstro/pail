@@ -56,20 +56,39 @@ impl LocalRepo {
         f.set("core.store", store)?;
         f.set("core.bare", if bare { "true" } else { "false" })?;
         f.save()?;
-        Ok(LocalRepo { dir, config: RepoConfig { store: store.to_string(), bare } })
+        Ok(LocalRepo {
+            dir,
+            config: RepoConfig {
+                store: store.to_string(),
+                bare,
+            },
+        })
     }
 
     pub fn open(dir: &Path) -> Result<LocalRepo> {
-        let canon = std::fs::canonicalize(dir).with_context(|| format!("{} is not a pail repository", dir.display()))?;
+        let canon = std::fs::canonicalize(dir)
+            .with_context(|| format!("{} is not a pail repository", dir.display()))?;
         let f = crate::config::File::load(&canon.join("config"));
-        let get = |k: &str| f.entries().into_iter().rev().find(|(key, _)| key == k).map(|(_, v)| v);
+        let get = |k: &str| {
+            f.entries()
+                .into_iter()
+                .rev()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v)
+        };
         if let Some(store) = get("core.store") {
             let bare = get("core.bare").is_some_and(|b| b == "true");
-            return Ok(LocalRepo { dir: canon, config: RepoConfig { store, bare } });
+            return Ok(LocalRepo {
+                dir: canon,
+                config: RepoConfig { store, bare },
+            });
         }
         // Repositories made before the Git-format config.
         let p = canon.join("config.json");
-        let config: RepoConfig = serde_json::from_slice(&std::fs::read(&p).with_context(|| format!("{} is not a pail repository", dir.display()))?)?;
+        let config: RepoConfig = serde_json::from_slice(
+            &std::fs::read(&p)
+                .with_context(|| format!("{} is not a pail repository", dir.display()))?,
+        )?;
         Ok(LocalRepo { dir: canon, config })
     }
 
@@ -83,7 +102,10 @@ impl LocalRepo {
 
     /// A store client whose caches and indexes live in this repository.
     pub fn repo(&self) -> Result<Repo> {
-        Ok(Repo::with_local(Store::open_in(&self.config.store, Some(&self.dir))?, &self.dir))
+        Ok(Repo::with_local(
+            Store::open_in(&self.config.store, Some(&self.dir))?,
+            &self.dir,
+        ))
     }
 
     pub fn is_repo(dir: &Path) -> bool {
@@ -149,7 +171,9 @@ pub fn discover(start: &Path) -> Result<Found> {
             }
         }
         if !p.pop() {
-            bail!("not in a pail repository or working copy (no {DOT}/ found; use --repo <dir> or --store <url>)");
+            bail!(
+                "not in a pail repository or working copy (no {DOT}/ found; use --repo <dir> or --store <url>)"
+            );
         }
     }
 }

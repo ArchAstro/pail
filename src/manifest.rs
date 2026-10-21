@@ -156,7 +156,9 @@ pub fn encode_page(page: &Page) -> Vec<u8> {
                             w.varint(c.len);
                         }
                     }
-                    Loc::Unresolved => panic!("unresolved location for {} in a manifest page", e.path),
+                    Loc::Unresolved => {
+                        panic!("unresolved location for {} in a manifest page", e.path)
+                    }
                 }
                 prev = &e.path;
             }
@@ -213,20 +215,37 @@ pub fn decode_page(buf: &[u8]) -> Result<Page> {
                 0 => Loc::Inline(r.bytes()?.to_vec()),
                 1 => {
                     let i = r.varint()? as usize;
-                    let pack = *packs.get(i).ok_or_else(|| anyhow::anyhow!("bad pack index"))?;
-                    Loc::Pack { pack, off: r.varint()?, len: r.varint()? }
+                    let pack = *packs
+                        .get(i)
+                        .ok_or_else(|| anyhow::anyhow!("bad pack index"))?;
+                    Loc::Pack {
+                        pack,
+                        off: r.varint()?,
+                        len: r.varint()?,
+                    }
                 }
                 2 => {
                     let n = r.varint()? as usize;
                     let chunks = (0..n)
-                        .map(|_| Ok(ChunkRef { hash: r.hash()?, len: r.varint()? }))
+                        .map(|_| {
+                            Ok(ChunkRef {
+                                hash: r.hash()?,
+                                len: r.varint()?,
+                            })
+                        })
                         .collect::<Result<_>>()?;
                     Loc::Chunks(chunks)
                 }
                 t => bail!("bad loc tag {t}"),
             };
             prev = path.clone();
-            entries.push(Entry { path, kind, size, hash, loc });
+            entries.push(Entry {
+                path,
+                kind,
+                size,
+                hash,
+                loc,
+            });
         }
         Ok(Page::Leaf(entries))
     } else {
@@ -239,7 +258,12 @@ pub fn decode_page(buf: &[u8]) -> Result<Page> {
             let files = r.varint()?;
             let bytes = r.varint()?;
             prev = key.clone();
-            children.push(Child { key, hash, files, bytes });
+            children.push(Child {
+                key,
+                hash,
+                files,
+                bytes,
+            });
         }
         Ok(Page::Node { level, children })
     }
@@ -317,7 +341,10 @@ pub fn build_leaves(entries: Vec<Entry>) -> Vec<BuiltPage> {
     if !tail.is_empty() {
         groups.push(tail);
     }
-    groups.into_iter().map(|g| build_page(Page::Leaf(g))).collect()
+    groups
+        .into_iter()
+        .map(|g| build_page(Page::Leaf(g)))
+        .collect()
 }
 
 /// Build the internal levels above a complete, ordered list of leaf references.
@@ -374,16 +401,28 @@ pub fn diff_sorted(a: &[Entry], b: &[Entry]) -> Vec<Change> {
         };
         match ord {
             std::cmp::Ordering::Less => {
-                out.push(Change { path: a[i].path.clone(), old: Some(a[i].clone()), new: None });
+                out.push(Change {
+                    path: a[i].path.clone(),
+                    old: Some(a[i].clone()),
+                    new: None,
+                });
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                out.push(Change { path: b[j].path.clone(), old: None, new: Some(b[j].clone()) });
+                out.push(Change {
+                    path: b[j].path.clone(),
+                    old: None,
+                    new: Some(b[j].clone()),
+                });
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
                 if !a[i].same_content(&b[j]) {
-                    out.push(Change { path: a[i].path.clone(), old: Some(a[i].clone()), new: Some(b[j].clone()) });
+                    out.push(Change {
+                        path: a[i].path.clone(),
+                        old: Some(a[i].clone()),
+                        new: Some(b[j].clone()),
+                    });
                 }
                 i += 1;
                 j += 1;
@@ -398,7 +437,13 @@ mod tests {
     use super::*;
 
     fn e(p: &str, n: u8) -> Entry {
-        Entry { path: p.into(), kind: Kind::File, size: n as u64, hash: Hash([n; 32]), loc: Loc::Inline(vec![n]) }
+        Entry {
+            path: p.into(),
+            kind: Kind::File,
+            size: n as u64,
+            hash: Hash([n; 32]),
+            loc: Loc::Inline(vec![n]),
+        }
     }
 
     #[test]
@@ -410,14 +455,21 @@ mod tests {
                 kind: Kind::Exec,
                 size: 9,
                 hash: Hash([2; 32]),
-                loc: Loc::Pack { pack: Hash([9; 32]), off: 5, len: 10 },
+                loc: Loc::Pack {
+                    pack: Hash([9; 32]),
+                    off: 5,
+                    len: 10,
+                },
             },
             Entry {
                 path: "z".into(),
                 kind: Kind::Symlink,
                 size: 9,
                 hash: Hash([3; 32]),
-                loc: Loc::Chunks(vec![ChunkRef { hash: Hash([4; 32]), len: 7 }]),
+                loc: Loc::Chunks(vec![ChunkRef {
+                    hash: Hash([4; 32]),
+                    len: 7,
+                }]),
             },
         ]);
         let b = build_page(p);
@@ -430,7 +482,9 @@ mod tests {
 
     #[test]
     fn canonical_upper() {
-        let entries: Vec<Entry> = (0..20000).map(|i| e(&format!("f/{i:06}"), (i % 250) as u8)).collect();
+        let entries: Vec<Entry> = (0..20000)
+            .map(|i| e(&format!("f/{i:06}"), (i % 250) as u8))
+            .collect();
         let leaves = build_leaves(entries.clone());
         assert!(leaves.len() > 10);
         let (r1, _) = build_upper(leaves.iter().map(leaf_child).collect());

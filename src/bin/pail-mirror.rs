@@ -26,7 +26,10 @@ use pail::store::Store;
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(name = "pail-mirror", about = "Mirror a GitHub branch into pail and prove every commit byte for byte")]
+#[command(
+    name = "pail-mirror",
+    about = "Mirror a GitHub branch into pail and prove every commit byte for byte"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -176,7 +179,10 @@ struct Dash {
 type Shared = Arc<Mutex<Dash>>;
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn set_phase(d: &Shared, p: impl Into<String>) {
@@ -214,7 +220,10 @@ impl BlobIds {
                 }
             }
         }
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         Ok(BlobIds { map, file })
     }
 
@@ -236,7 +245,10 @@ fn meta_for(sha: &str, raw: &RawCommit) -> BTreeMap<String, String> {
     if !raw.extra_headers.is_empty() {
         match std::str::from_utf8(&raw.extra_headers) {
             Ok(s) => m.insert("git.extra_headers".into(), s.to_string()),
-            Err(_) => m.insert("git.extra_headers_hex".into(), hex::encode(&raw.extra_headers)),
+            Err(_) => m.insert(
+                "git.extra_headers_hex".into(),
+                hex::encode(&raw.extra_headers),
+            ),
         };
     }
     if std::str::from_utf8(&raw.message).is_err() {
@@ -245,7 +257,13 @@ fn meta_for(sha: &str, raw: &RawCommit) -> BTreeMap<String, String> {
     m
 }
 
-fn request(branch: &str, base: Option<Hash>, delta: Delta, sha: &str, raw: &RawCommit) -> CommitRequest {
+fn request(
+    branch: &str,
+    base: Option<Hash>,
+    delta: Delta,
+    sha: &str,
+    raw: &RawCommit,
+) -> CommitRequest {
     CommitRequest {
         branch: branch.to_string(),
         base,
@@ -260,14 +278,23 @@ fn request(branch: &str, base: Option<Hash>, delta: Delta, sha: &str, raw: &RawC
 }
 
 /// Store file contents in memory-bounded batches.
-async fn write_batched(repo: &Repo, git: &Git, items: Vec<(String, String, String)>, reuse: &HashMap<Hash, pail::manifest::Loc>) -> Result<Vec<Entry>> {
+async fn write_batched(
+    repo: &Repo,
+    git: &Git,
+    items: Vec<(String, String, String)>,
+    reuse: &HashMap<Hash, pail::manifest::Loc>,
+) -> Result<Vec<Entry>> {
     let mut out = vec![];
     let mut batch: Vec<FileInput> = vec![];
     let mut size = 0usize;
     for (path, mode, oid) in items {
         let data = git.cat(&oid)?;
         size += data.len();
-        batch.push(FileInput { path, kind: kind_for_mode(&mode)?, data: Bytes::from(data) });
+        batch.push(FileInput {
+            path,
+            kind: kind_for_mode(&mode)?,
+            data: Bytes::from(data),
+        });
         if size >= 256 << 20 {
             out.extend(repo.write_files(&batch, reuse).await?);
             batch.clear();
@@ -279,18 +306,36 @@ async fn write_batched(repo: &Repo, git: &Git, items: Vec<(String, String, Strin
 }
 
 /// Import a commit's full tree as the first commit of the pail branch.
-async fn import_full(repo: &Repo, git: &Git, branch: &str, sha: &str) -> Result<(Hash, usize, u32)> {
+async fn import_full(
+    repo: &Repo,
+    git: &Git,
+    branch: &str,
+    sha: &str,
+) -> Result<(Hash, usize, u32)> {
     let raw = git.commit_info(sha)?;
-    let items: Vec<_> = git.ls_tree(sha)?.into_iter().map(|t| (t.path, t.mode, t.oid)).collect();
+    let items: Vec<_> = git
+        .ls_tree(sha)?
+        .into_iter()
+        .map(|t| (t.path, t.mode, t.oid))
+        .collect();
     let n = items.len();
     let entries = write_batched(repo, git, items, &HashMap::new()).await?;
-    let delta: Delta = entries.into_iter().map(|e| (e.path.clone(), Some(e))).collect();
+    let delta: Delta = entries
+        .into_iter()
+        .map(|e| (e.path.clone(), Some(e)))
+        .collect();
     let out = repo.commit(request(branch, None, delta, sha, &raw)).await?;
     Ok((out.commit, n, out.attempts))
 }
 
 /// Import one commit as a delta against its first parent.
-async fn import_delta(repo: &Repo, git: &Git, branch: &str, base: Hash, sha: &str) -> Result<(Hash, usize, u32)> {
+async fn import_delta(
+    repo: &Repo,
+    git: &Git,
+    branch: &str,
+    base: Hash,
+    sha: &str,
+) -> Result<(Hash, usize, u32)> {
     let raw = git.commit_info(sha)?;
     let parent = raw.parents.first().context("commit has no parent")?;
     let changes = git.diff_tree(parent, sha)?;
@@ -305,12 +350,18 @@ async fn import_delta(repo: &Repo, git: &Git, branch: &str, base: Hash, sha: &st
     }
     // Moves and reverts reuse bytes already in the store.
     let base_root = repo.root_of(Some(base)).await?;
-    let reuse: HashMap<Hash, pail::manifest::Loc> =
-        repo.entries(base_root).await?.into_iter().map(|e| (e.hash, e.loc)).collect();
+    let reuse: HashMap<Hash, pail::manifest::Loc> = repo
+        .entries(base_root)
+        .await?
+        .into_iter()
+        .map(|e| (e.hash, e.loc))
+        .collect();
     for e in write_batched(repo, git, items, &reuse).await? {
         delta.insert(e.path.clone(), Some(e));
     }
-    let out = repo.commit(request(branch, Some(base), delta, sha, &raw)).await?;
+    let out = repo
+        .commit(request(branch, Some(base), delta, sha, &raw))
+        .await?;
     Ok((out.commit, changes.len(), out.attempts))
 }
 
@@ -328,12 +379,21 @@ struct Proof {
 }
 
 /// Rebuild the Git commit id from the pail store alone (no local caches).
-async fn prove(verifier: &Repo, ids: &mut BlobIds, pail: Hash, git_sha: &str, git_tree: &str) -> Result<Proof> {
+async fn prove(
+    verifier: &Repo,
+    ids: &mut BlobIds,
+    pail: Hash,
+    git_sha: &str,
+    git_tree: &str,
+) -> Result<Proof> {
     let pc = verifier.commit_obj(&pail).await?;
     let entries = verifier.entries(pc.root).await?;
     let mut seen = HashSet::new();
-    let missing: Vec<Entry> =
-        entries.iter().filter(|e| !ids.map.contains_key(&e.hash) && seen.insert(e.hash)).cloned().collect();
+    let missing: Vec<Entry> = entries
+        .iter()
+        .filter(|e| !ids.map.contains_key(&e.hash) && seen.insert(e.hash))
+        .cloned()
+        .collect();
     let checked = missing.len();
     let mut start = 0;
     while start < missing.len() {
@@ -349,14 +409,19 @@ async fn prove(verifier: &Repo, ids: &mut BlobIds, pail: Hash, git_sha: &str, gi
         }
         start = end;
     }
-    let files: Vec<(String, pail::manifest::Kind, String)> =
-        entries.iter().map(|e| (e.path.clone(), e.kind, ids.map[&e.hash].clone())).collect();
+    let files: Vec<(String, pail::manifest::Kind, String)> = entries
+        .iter()
+        .map(|e| (e.path.clone(), e.kind, ids.map[&e.hash].clone()))
+        .collect();
     let tree = tree_id(&files)?;
     let message = match pc.meta.get("git.message_hex") {
         Some(h) => hex::decode(h)?,
         None => pc.message.clone().into_bytes(),
     };
-    let extra_headers = match (pc.meta.get("git.extra_headers"), pc.meta.get("git.extra_headers_hex")) {
+    let extra_headers = match (
+        pc.meta.get("git.extra_headers"),
+        pc.meta.get("git.extra_headers_hex"),
+    ) {
         (Some(s), _) => s.clone().into_bytes(),
         (_, Some(h)) => hex::decode(h)?,
         _ => vec![],
@@ -385,11 +450,24 @@ async fn prove(verifier: &Repo, ids: &mut BlobIds, pail: Hash, git_sha: &str, gi
             let parent_root = verifier.root_of(pc.parent).await?;
             let actual = verifier.diff(parent_root, pc.root).await?;
             let key = |e: &Option<Entry>, loc: bool| {
-                e.as_ref().map(|e| (e.kind as u8, e.size, e.hash, if loc { format!("{:?}", e.loc) } else { String::new() }))
+                e.as_ref().map(|e| {
+                    (
+                        e.kind as u8,
+                        e.size,
+                        e.hash,
+                        if loc {
+                            format!("{:?}", e.loc)
+                        } else {
+                            String::new()
+                        },
+                    )
+                })
             };
             listed.len() == actual.len()
                 && listed.iter().zip(&actual).all(|(l, a)| {
-                    l.path == a.path && key(&l.old, false) == key(&a.old, false) && key(&l.new, true) == key(&a.new, true)
+                    l.path == a.path
+                        && key(&l.old, false) == key(&a.old, false)
+                        && key(&l.new, true) == key(&a.new, true)
                 })
         }
     };
@@ -405,17 +483,32 @@ async fn prove(verifier: &Repo, ids: &mut BlobIds, pail: Hash, git_sha: &str, gi
 }
 
 /// Cold checkout through the `pail` CLI compared file by file with Git's raw objects.
-async fn deep_check(git: &Git, store: &str, branch: &str, git_sha: &str, state: &Path) -> Result<DeepCheck> {
+async fn deep_check(
+    git: &Git,
+    store: &str,
+    branch: &str,
+    git_sha: &str,
+    state: &Path,
+) -> Result<DeepCheck> {
     let t = Instant::now();
     let work = tempfile::tempdir_in(state)?;
     let pail_dir = work.path().join("pail");
     let bin = std::env::current_exe()?.with_file_name("pail");
     let out = std::process::Command::new(&bin)
-        .args(["clone", store, pail_dir.to_str().unwrap(), "--branch", branch])
+        .args([
+            "clone",
+            store,
+            pail_dir.to_str().unwrap(),
+            "--branch",
+            branch,
+        ])
         .output()
         .with_context(|| format!("running {}", bin.display()))?;
     if !out.status.success() {
-        bail!("pail clone failed: {}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "pail clone failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     let tree = git.ls_tree(git_sha)?;
     let mut problems = vec![];
@@ -457,7 +550,12 @@ async fn deep_check(git: &Git, store: &str, branch: &str, git_sha: &str, state: 
         detail: if problems.is_empty() {
             "identical".into()
         } else {
-            problems.iter().take(5).cloned().collect::<Vec<_>>().join("; ")
+            problems
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
         },
     })
 }
@@ -501,26 +599,45 @@ fn ensure_mirror(dir: &Path, github: &str, branch: &str, reference: Option<&Path
     let st = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["config", "remote.origin.fetch", &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")])
+        .args([
+            "config",
+            "remote.origin.fetch",
+            &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
+        ])
         .status()?;
     anyhow::ensure!(st.success());
     Ok(())
 }
 
 fn fetch(dir: &Path) -> Result<()> {
-    let out = std::process::Command::new("git").arg("-C").arg(dir).args(["fetch", "--quiet", "origin"]).output()?;
-    anyhow::ensure!(out.status.success(), "git fetch: {}", String::from_utf8_lossy(&out.stderr).trim());
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["fetch", "--quiet", "origin"])
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git fetch: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
     Ok(())
 }
 
 fn append_log(state: &Path, rec: &impl Serialize) -> Result<()> {
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(state.join("mirror.jsonl"))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.join("mirror.jsonl"))?;
     writeln!(f, "{}", serde_json::to_string(rec)?)?;
     Ok(())
 }
 
 fn committed_at(raw: &RawCommit) -> i64 {
-    raw.committer_date.split(' ').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+    raw.committer_date
+        .split(' ')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 async fn run(args: RunArgs) -> Result<()> {
@@ -539,7 +656,12 @@ async fn run(args: RunArgs) -> Result<()> {
         eprintln!("dashboard: http://{addr}/");
     }
     set_phase(&dash, "preparing GitHub mirror");
-    ensure_mirror(&c.git_dir, &args.github, &args.branch, args.reference.as_deref())?;
+    ensure_mirror(
+        &c.git_dir,
+        &args.github,
+        &args.branch,
+        args.reference.as_deref(),
+    )?;
     fetch(&c.git_dir)?;
     let git = Git::open(&c.git_dir)?;
     let tip_ref = format!("refs/remotes/origin/{}", args.branch);
@@ -556,7 +678,11 @@ async fn run(args: RunArgs) -> Result<()> {
     let (mut head, mut mirrored) = match repo.read_ref(&c.pail_branch).await? {
         Some((h, _)) => {
             let pc = repo.commit_obj(&h).await?;
-            let g = pc.meta.get("git.commit").cloned().context("pail branch was not created by pail-mirror")?;
+            let g = pc
+                .meta
+                .get("git.commit")
+                .cloned()
+                .context("pail branch was not created by pail-mirror")?;
             (h, g)
         }
         None => {
@@ -578,7 +704,13 @@ async fn run(args: RunArgs) -> Result<()> {
                 seq,
                 git: start.clone(),
                 pail: h.hex(),
-                subject: format!("[full import] {}", String::from_utf8_lossy(&raw.message).lines().next().unwrap_or("")),
+                subject: format!(
+                    "[full import] {}",
+                    String::from_utf8_lossy(&raw.message)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                ),
                 author: raw.author.clone(),
                 committed_at: committed_at(&raw),
                 mirrored_at: now(),
@@ -619,7 +751,13 @@ async fn run(args: RunArgs) -> Result<()> {
             g.github_tip = tip.clone();
             g.github_tip_subject = git
                 .commit_info(&tip)
-                .map(|r| String::from_utf8_lossy(&r.message).lines().next().unwrap_or("").to_string())
+                .map(|r| {
+                    String::from_utf8_lossy(&r.message)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                })
                 .unwrap_or_default();
             g.last_fetch_at = now();
             g.behind = pending.len();
@@ -627,50 +765,86 @@ async fn run(args: RunArgs) -> Result<()> {
         if let Some(first) = pending.first() {
             let raw = git.commit_info(first)?;
             if raw.parents.first() != Some(&mirrored) {
-                bail!("GitHub history no longer descends from {} (force push?); refusing to rewrite pail history", &mirrored[..10]);
+                bail!(
+                    "GitHub history no longer descends from {} (force push?); refusing to rewrite pail history",
+                    &mirrored[..10]
+                );
             }
         }
         for sha in &pending {
             set_phase(&dash, format!("forwarding {}", &sha[..10]));
-            let raw = git.commit_info(sha)?;
-            let before = repo.store.stats.snapshot();
-            let t = Instant::now();
-            let (h, changed, attempts) = import_delta(&repo, &git, &c.pail_branch, head, sha).await?;
-            let import_ms = t.elapsed().as_millis();
-            let after = repo.store.stats.snapshot();
-            let t = Instant::now();
-            let p = prove(&verifier, &mut ids, h, sha, &raw.tree).await?;
-            let rec = Record {
-                seq,
-                git: sha.clone(),
-                pail: h.hex(),
-                subject: String::from_utf8_lossy(&raw.message).lines().next().unwrap_or("").to_string(),
-                author: raw.author.clone(),
-                committed_at: committed_at(&raw),
-                mirrored_at: now(),
-                changed,
-                files: p.files as u64,
-                bytes_up: after.3 - before.3,
-                puts: after.1 - before.1,
-                gets: after.0 - before.0,
-                import_ms,
-                verify_ms: t.elapsed().as_millis(),
-                contents_checked: p.contents_checked,
-                tree_match: p.tree_match && p.changes_match,
-                commit_match: p.commit_match,
-                attempts,
-                note: if !p.changes_match {
-                    "change list differs from the manifest diff".to_string()
-                } else if p.commit_match {
-                    String::new()
-                } else {
-                    format!("rebuilt {}", p.rebuilt_commit)
-                },
+            let step = async {
+                let raw = git.commit_info(sha)?;
+                let before = repo.store.stats.snapshot();
+                let t = Instant::now();
+                let (h, changed, attempts) =
+                    import_delta(&repo, &git, &c.pail_branch, head, sha).await?;
+                let import_ms = t.elapsed().as_millis();
+                let after = repo.store.stats.snapshot();
+                let t = Instant::now();
+                let p = prove(&verifier, &mut ids, h, sha, &raw.tree).await?;
+                anyhow::Ok((
+                    h,
+                    Record {
+                        seq,
+                        git: sha.clone(),
+                        pail: h.hex(),
+                        subject: String::from_utf8_lossy(&raw.message)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string(),
+                        author: raw.author.clone(),
+                        committed_at: committed_at(&raw),
+                        mirrored_at: now(),
+                        changed,
+                        files: p.files as u64,
+                        bytes_up: after.3 - before.3,
+                        puts: after.1 - before.1,
+                        gets: after.0 - before.0,
+                        import_ms,
+                        verify_ms: t.elapsed().as_millis(),
+                        contents_checked: p.contents_checked,
+                        tree_match: p.tree_match && p.changes_match,
+                        commit_match: p.commit_match,
+                        attempts,
+                        note: if !p.changes_match {
+                            "change list differs from the manifest diff".to_string()
+                        } else if p.commit_match {
+                            String::new()
+                        } else {
+                            format!("rebuilt {}", p.rebuilt_commit)
+                        },
+                    },
+                ))
+            };
+            let (h, rec) = match step.await {
+                Ok(v) => v,
+                Err(e) => {
+                    // Credentials expire, networks drop: wait and resume from what the store
+                    // says was mirrored, rather than exiting. Proof failures are not errors
+                    // here; they are recorded below.
+                    push_error(
+                        &dash,
+                        format!("{}: {e:#}; retrying after the next poll", &sha[..10]),
+                    );
+                    eprintln!("  {}: {e:#}; retrying after the next poll", &sha[..10]);
+                    if let Ok(Some((h, _))) = repo.read_ref(&c.pail_branch).await
+                        && let Ok(pc) = repo.commit_obj(&h).await
+                        && let Some(g) = pc.meta.get("git.commit")
+                    {
+                        (head, mirrored) = (h, g.clone());
+                    }
+                    break;
+                }
             };
             let ok = rec.commit_match && rec.tree_match;
             record(&dash, &c.state_dir, rec)?;
             if !ok {
-                push_error(&dash, format!("{} did not reproduce byte for byte", &sha[..10]));
+                push_error(
+                    &dash,
+                    format!("{} did not reproduce byte for byte", &sha[..10]),
+                );
             }
             head = h;
             mirrored = sha.clone();
@@ -686,10 +860,18 @@ async fn run(args: RunArgs) -> Result<()> {
             }
         }
         if needs_deep {
-            set_phase(&dash, format!("deep check: cold pail clone vs git {}", &mirrored[..10]));
+            set_phase(
+                &dash,
+                format!("deep check: cold pail clone vs git {}", &mirrored[..10]),
+            );
             match deep_check(&git, &c.store, &c.pail_branch, &mirrored, &c.state_dir).await {
                 Ok(d) => {
-                    eprintln!("  deep check {}: {} files, {}", &d.git[..10], d.files, d.detail);
+                    eprintln!(
+                        "  deep check {}: {} files, {}",
+                        &d.git[..10],
+                        d.files,
+                        d.detail
+                    );
                     append_log(&c.state_dir, &serde_json::json!({"deep_check": &d}))?;
                     dash.lock().unwrap().deep_checks.insert(0, d);
                 }
@@ -758,11 +940,17 @@ async fn verify(args: VerifyArgs) -> Result<()> {
     let git = Git::open(&c.git_dir)?;
     let verifier = Repo::with_store(Store::open(&c.store)?, None);
     let mut ids = BlobIds::open(&c.state_dir)?;
-    let (head, _) = verifier.read_ref(&c.pail_branch).await?.context("pail branch not found")?;
+    let (head, _) = verifier
+        .read_ref(&c.pail_branch)
+        .await?
+        .context("pail branch not found")?;
     let history = verifier.log(head, args.n.unwrap_or(usize::MAX)).await?;
     let (mut ok, mut bad) = (0, 0);
     for (h, pc) in history.iter().rev() {
-        let sha = pc.meta.get("git.commit").context("commit lacks git.commit")?;
+        let sha = pc
+            .meta
+            .get("git.commit")
+            .context("commit lacks git.commit")?;
         let raw = git.commit_info(sha)?;
         let p = prove(&verifier, &mut ids, *h, sha, &raw.tree).await?;
         if p.commit_match && p.tree_match && p.changes_match {
@@ -779,7 +967,10 @@ async fn verify(args: VerifyArgs) -> Result<()> {
             pc.subject().chars().take(60).collect::<String>()
         );
     }
-    println!("{ok}/{} commits reproduce their Git commit id byte for byte", ok + bad);
+    println!(
+        "{ok}/{} commits reproduce their Git commit id byte for byte",
+        ok + bad
+    );
     anyhow::ensure!(bad == 0, "{bad} commit(s) failed");
     Ok(())
 }
@@ -794,11 +985,15 @@ fn serve(addr: &str, dash: Shared) -> Result<()> {
     std::thread::spawn(move || {
         for req in server.incoming_requests() {
             let (body, ctype) = if req.url().starts_with("/api/status") {
-                (serde_json::to_string(&*dash.lock().unwrap()).unwrap_or_default(), "application/json")
+                (
+                    serde_json::to_string(&*dash.lock().unwrap()).unwrap_or_default(),
+                    "application/json",
+                )
             } else {
                 (DASHBOARD.to_string(), "text/html; charset=utf-8")
             };
-            let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap();
+            let header =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).unwrap();
             let _ = req.respond(tiny_http::Response::from_string(body).with_header(header));
         }
     });

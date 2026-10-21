@@ -56,7 +56,11 @@ struct Reply {
 
 impl Reply {
     fn new(status: u16, body: impl Into<Vec<u8>>) -> Reply {
-        Reply { status, body: body.into(), headers: vec![] }
+        Reply {
+            status,
+            body: body.into(),
+            headers: vec![],
+        }
     }
     fn header(mut self, k: &'static str, v: String) -> Reply {
         self.headers.push((k, v));
@@ -66,7 +70,10 @@ impl Reply {
 
 /// A version token as an ETag, and back.
 fn etag(v: &Version) -> String {
-    format!("\"{}\"", hex::encode(serde_json::to_vec(v).unwrap_or_default()))
+    format!(
+        "\"{}\"",
+        hex::encode(serde_json::to_vec(v).unwrap_or_default())
+    )
 }
 
 fn unetag(s: &str) -> Option<Version> {
@@ -74,11 +81,21 @@ fn unetag(s: &str) -> Option<Version> {
 }
 
 fn valid_repo(repo: &str) -> bool {
-    repo.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != ".." && seg.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)))
+    repo.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg != "."
+            && seg != ".."
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    })
 }
 
 fn valid_key(key: &str) -> bool {
-    !key.is_empty() && key.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+    !key.is_empty()
+        && key
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
 impl Proxy {
@@ -100,7 +117,10 @@ impl Proxy {
         }
         let r = crate::repo::Repo::with_store(store.clone(), None);
         let p = Policy::load(&r).await?.map(Arc::new);
-        self.policies.lock().unwrap().insert(repo.to_string(), (p.clone(), Instant::now()));
+        self.policies
+            .lock()
+            .unwrap()
+            .insert(repo.to_string(), (p.clone(), Instant::now()));
         Ok(p)
     }
 
@@ -108,23 +128,43 @@ impl Proxy {
         if let Some(s) = self.stores.lock().unwrap().get(repo) {
             return Ok(s.clone());
         }
-        let url = if repo.is_empty() { self.root.clone() } else { format!("{}/{repo}", self.root) };
+        let url = if repo.is_empty() {
+            self.root.clone()
+        } else {
+            format!("{}/{repo}", self.root)
+        };
         let s = Store::open(&url)?;
-        self.stores.lock().unwrap().insert(repo.to_string(), s.clone());
+        self.stores
+            .lock()
+            .unwrap()
+            .insert(repo.to_string(), s.clone());
         Ok(s)
     }
 
     /// Ok(principal) or the reply refusing the request.
-    fn authorize(&self, token: Option<&str>, repo: &str, op: &'static str) -> Result<Identity, Reply> {
-        let Some(cmd) = &self.auth else { return Ok(Identity::new("anonymous", &[])) };
-        let Some(token) = token else {
-            return Err(Reply::new(401, "a bearer token is required").header("WWW-Authenticate", "Bearer".into()));
+    fn authorize(
+        &self,
+        token: Option<&str>,
+        repo: &str,
+        op: &'static str,
+    ) -> Result<Identity, Reply> {
+        let Some(cmd) = &self.auth else {
+            return Ok(Identity::new("anonymous", &[]));
         };
-        let key = (blake3::hash(token.as_bytes()).to_hex().to_string(), repo.to_string(), op);
+        let Some(token) = token else {
+            return Err(Reply::new(401, "a bearer token is required")
+                .header("WWW-Authenticate", "Bearer".into()));
+        };
+        let key = (
+            blake3::hash(token.as_bytes()).to_hex().to_string(),
+            repo.to_string(),
+            op,
+        );
         let answer = |status: u16, id: Identity| match status {
             200 => Ok(id),
             403 => Err(Reply::new(403, format!("not allowed to {op} {repo}"))),
-            _ => Err(Reply::new(401, "the token was not accepted").header("WWW-Authenticate", "Bearer".into())),
+            _ => Err(Reply::new(401, "the token was not accepted")
+                .header("WWW-Authenticate", "Bearer".into())),
         };
         if let Some((status, id, at)) = self.decisions.lock().unwrap().get(&key) {
             if at.elapsed() < AUTH_TTL {
@@ -155,21 +195,44 @@ impl Proxy {
             // The auth command could not run: not a verdict on the token, so not cached.
             Err(e) => return Err(Reply::new(503, format!("auth command failed: {e}"))),
         };
-        self.decisions.lock().unwrap().insert(key, (status, id.clone(), Instant::now()));
+        self.decisions
+            .lock()
+            .unwrap()
+            .insert(key, (status, id.clone(), Instant::now()));
         answer(status, id)
     }
 
-    async fn handle(&self, method: &str, url: &str, headers: &[(String, String)], body: Bytes) -> Reply {
+    async fn handle(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Bytes,
+    ) -> Reply {
         match self.route(method, url, headers, body).await {
             Ok(r) | Err(r) => r,
         }
     }
 
-    async fn route(&self, method: &str, url: &str, headers: &[(String, String)], body: Bytes) -> Result<Reply, Reply> {
-        let h = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+    async fn route(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Bytes,
+    ) -> Result<Reply, Reply> {
+        let h = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
         let (path, query) = url.split_once('?').unwrap_or((url, ""));
         let path = path.trim_start_matches('/');
-        let (repo, rest) = if let Some(i) = path.find("_o/").filter(|&i| i == 0 || path.as_bytes()[i - 1] == b'/') {
+        let (repo, rest) = if let Some(i) = path
+            .find("_o/")
+            .filter(|&i| i == 0 || path.as_bytes()[i - 1] == b'/')
+        {
             (path[..i].trim_end_matches('/'), &path[i..])
         } else if path == "_ls" || path.ends_with("/_ls") {
             (path.trim_end_matches("_ls").trim_end_matches('/'), "_ls")
@@ -181,17 +244,32 @@ impl Proxy {
         if !repo.is_empty() && !valid_repo(repo) {
             return Err(Reply::new(400, "bad repository path"));
         }
-        let op = if matches!(method, "GET" | "HEAD") { "read" } else { "write" };
-        let token = h("authorization").and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
+        let op = if matches!(method, "GET" | "HEAD") {
+            "read"
+        } else {
+            "write"
+        };
+        let token = h("authorization")
+            .and_then(|a| a.strip_prefix("Bearer "))
+            .map(str::trim);
         let caller = self.authorize(token, repo, op)?;
-        let store = self.store(repo).map_err(|e| Reply::new(500, format!("{e:#}")))?;
+        let store = self
+            .store(repo)
+            .map_err(|e| Reply::new(500, format!("{e:#}")))?;
         let fail = |e: anyhow::Error| Reply::new(502, format!("{e:#}"));
-        let policy = self.policy(repo, &store).await.map_err(|e| Reply::new(500, format!("reading the policy: {e:#}")))?;
+        let policy = self
+            .policy(repo, &store)
+            .await
+            .map_err(|e| Reply::new(500, format!("reading the policy: {e:#}")))?;
         let check = |op: PolicyOp, key: &str| -> Result<(), Reply> {
             match &policy {
                 Some(p) => {
                     let d = p.decide(&caller, op, key);
-                    if d.allow { Ok(()) } else { Err(Reply::new(403, format!("policy: {}", d.reason))) }
+                    if d.allow {
+                        Ok(())
+                    } else {
+                        Err(Reply::new(403, format!("policy: {}", d.reason)))
+                    }
                 }
                 None => Ok(()),
             }
@@ -211,9 +289,14 @@ impl Proxy {
                 .await
                 .map_err(fail)?
                 .into_iter()
-                .map(|o| ListEntry { key: o.key, size: o.size, modified: o.modified })
+                .map(|o| ListEntry {
+                    key: o.key,
+                    size: o.size,
+                    modified: o.modified,
+                })
                 .collect();
-            return Ok(Reply::new(200, serde_json::to_vec(&items).unwrap()).header("Content-Type", "application/json".into()));
+            return Ok(Reply::new(200, serde_json::to_vec(&items).unwrap())
+                .header("Content-Type", "application/json".into()));
         }
         let key = &rest[3..];
         if !valid_key(key) {
@@ -221,7 +304,9 @@ impl Proxy {
         }
         // Branch objects are written and deleted by their writers; immutable content may only
         // be created (an unconditional write or a delete counts as rewriting history).
-        let content = ["commits/", "pages/", "packs/", "chunks/"].iter().any(|p| key.starts_with(p));
+        let content = ["commits/", "pages/", "packs/", "chunks/"]
+            .iter()
+            .any(|p| key.starts_with(p));
         let pop = match method {
             "GET" | "HEAD" => PolicyOp::Read,
             "PUT" if content && h("if-none-match") != Some("*") => PolicyOp::Delete,
@@ -239,8 +324,10 @@ impl Proxy {
                     return match store.read_range(key, r.clone()).await.map_err(fail)? {
                         Some((b, total)) => {
                             let end = r.start + b.len() as u64;
-                            Ok(Reply::new(206, b.to_vec())
-                                .header("Content-Range", format!("bytes {}-{}/{total}", r.start, end.saturating_sub(1))))
+                            Ok(Reply::new(206, b.to_vec()).header(
+                                "Content-Range",
+                                format!("bytes {}-{}/{total}", r.start, end.saturating_sub(1)),
+                            ))
                         }
                         None => Err(Reply::new(404, "no such object")),
                     };
@@ -253,7 +340,9 @@ impl Proxy {
             "PUT" => {
                 let expected = match (h("if-none-match"), h("if-match")) {
                     (Some("*"), _) => Some(None),
-                    (_, Some(t)) => Some(Some(unetag(t).ok_or_else(|| Reply::new(400, "bad If-Match"))?)),
+                    (_, Some(t)) => Some(Some(
+                        unetag(t).ok_or_else(|| Reply::new(400, "bad If-Match"))?,
+                    )),
                     _ => None,
                 };
                 match expected {
@@ -285,10 +374,16 @@ fn parse_range(s: &str) -> Option<std::ops::Range<u64>> {
 
 pub async fn serve(root: &str, addr: &str, auth: Option<String>, anonymous: bool) -> Result<()> {
     if auth.is_none() && !anonymous {
-        bail!("pass --auth-command <cmd> to check tokens, or --allow-anonymous for a trusted network");
+        bail!(
+            "pass --auth-command <cmd> to check tokens, or --allow-anonymous for a trusted network"
+        );
     }
     let server = tiny_http::Server::http(addr).map_err(|e| anyhow!("listening on {addr}: {e}"))?;
-    let mode = if auth.is_some() { "tokens checked by the auth command" } else { "anonymous access" };
+    let mode = if auth.is_some() {
+        "tokens checked by the auth command"
+    } else {
+        "anonymous access"
+    };
     eprintln!("pail proxy for {root} at http://{addr}/<repo>  ({mode})");
     let proxy = Arc::new(Proxy::new(root, auth));
     let handle = tokio::runtime::Handle::current();
@@ -299,15 +394,28 @@ pub async fn serve(root: &str, addr: &str, auth: Option<String>, anonymous: bool
             std::thread::spawn(move || {
                 let method = req.method().as_str().to_uppercase();
                 let url = req.url().to_string();
-                let headers: Vec<(String, String)> =
-                    req.headers().iter().map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string())).collect();
+                let headers: Vec<(String, String)> = req
+                    .headers()
+                    .iter()
+                    .map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string()))
+                    .collect();
                 let mut body = vec![];
-                if req.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut body).is_err() || body.len() > MAX_BODY {
-                    let _ = req.respond(tiny_http::Response::from_string("body too large").with_status_code(413));
+                if req
+                    .as_reader()
+                    .take(MAX_BODY as u64 + 1)
+                    .read_to_end(&mut body)
+                    .is_err()
+                    || body.len() > MAX_BODY
+                {
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("body too large").with_status_code(413),
+                    );
                     return;
                 }
-                let reply = handle.block_on(proxy.handle(&method, &url, &headers, Bytes::from(body)));
-                let mut resp = tiny_http::Response::from_data(reply.body).with_status_code(reply.status);
+                let reply =
+                    handle.block_on(proxy.handle(&method, &url, &headers, Bytes::from(body)));
+                let mut resp =
+                    tiny_http::Response::from_data(reply.body).with_status_code(reply.status);
                 for (k, v) in reply.headers {
                     if let Ok(h) = tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()) {
                         resp.add_header(h);

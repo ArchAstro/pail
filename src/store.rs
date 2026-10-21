@@ -118,7 +118,14 @@ impl Store {
                     b = b.with_credentials(Arc::new(crate::creds::AwsProvider(src)));
                 }
                 let s3 = b.build()?;
-                Ok(Store { inner: Arc::new(s3), prefix, local_root: None, url: url.to_string(), stats, creds: helper })
+                Ok(Store {
+                    inner: Arc::new(s3),
+                    prefix,
+                    local_root: None,
+                    url: url.to_string(),
+                    stats,
+                    creds: helper,
+                })
             }
             "gs" => {
                 let bucket = parsed.host_str().ok_or_else(|| anyhow!("missing bucket"))?;
@@ -142,7 +149,9 @@ impl Store {
             }
             "https" | "http" => {
                 // A pail proxy: the whole URL is the repository; keys are relative to it.
-                let auth = helper.clone().map(|src| Arc::new(crate::creds::BearerProvider(src)));
+                let auth = helper
+                    .clone()
+                    .map(|src| Arc::new(crate::creds::BearerProvider(src)));
                 let http = crate::httpstore::HttpStore::new(url, auth)?;
                 Ok(Store {
                     inner: Arc::new(http),
@@ -161,7 +170,10 @@ impl Store {
     /// write per second to the same name; S3 and local stores have no per-key limit.
     /// `PAIL_SWAP_INTERVAL_MS` overrides.
     pub fn swap_interval(&self) -> std::time::Duration {
-        if let Some(ms) = std::env::var("PAIL_SWAP_INTERVAL_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        if let Some(ms) = std::env::var("PAIL_SWAP_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
             return std::time::Duration::from_millis(ms);
         }
         if self.url.starts_with("gs://") {
@@ -172,11 +184,18 @@ impl Store {
     }
 
     fn path(&self, key: &str) -> Path {
-        if self.prefix.is_empty() { Path::from(key) } else { Path::from(format!("{}/{key}", self.prefix)) }
+        if self.prefix.is_empty() {
+            Path::from(key)
+        } else {
+            Path::from(format!("{}/{key}", self.prefix))
+        }
     }
 
     pub async fn get(&self, key: &str) -> Result<Bytes> {
-        self.get_opt(key).await?.map(|(b, _)| b).ok_or_else(|| anyhow!("object not found: {key}"))
+        self.get_opt(key)
+            .await?
+            .map(|(b, _)| b)
+            .ok_or_else(|| anyhow!("object not found: {key}"))
     }
 
     pub async fn get_owned(&self, key: String) -> Result<Bytes> {
@@ -191,7 +210,9 @@ impl Store {
             let p = root.join(key);
             return match std::fs::read(&p) {
                 Ok(b) => {
-                    self.stats.bytes_down.fetch_add(b.len() as u64, Ordering::Relaxed);
+                    self.stats
+                        .bytes_down
+                        .fetch_add(b.len() as u64, Ordering::Relaxed);
                     let v = local_version(&b);
                     Ok(Some((Bytes::from(b), v)))
                 }
@@ -200,20 +221,26 @@ impl Store {
             };
         }
         let path = self.path(key);
-        let got = self.retry(|| async {
-            match self.inner.get_opts(&path, GetOptions::default()).await {
-                Ok(r) => {
-                    let v = Version { etag: r.meta.e_tag.clone(), version: r.meta.version.clone() };
-                    Ok(Some((r.bytes().await?, v)))
+        let got = self
+            .retry(|| async {
+                match self.inner.get_opts(&path, GetOptions::default()).await {
+                    Ok(r) => {
+                        let v = Version {
+                            etag: r.meta.e_tag.clone(),
+                            version: r.meta.version.clone(),
+                        };
+                        Ok(Some((r.bytes().await?, v)))
+                    }
+                    Err(object_store::Error::NotFound { .. }) => Ok(None),
+                    Err(e) => Err(e),
                 }
-                Err(object_store::Error::NotFound { .. }) => Ok(None),
-                Err(e) => Err(e),
-            }
-        })
-        .await
-        .with_context(|| format!("get {key}"))?;
+            })
+            .await
+            .with_context(|| format!("get {key}"))?;
         if let Some((b, _)) = &got {
-            self.stats.bytes_down.fetch_add(b.len() as u64, Ordering::Relaxed);
+            self.stats
+                .bytes_down
+                .fetch_add(b.len() as u64, Ordering::Relaxed);
         }
         Ok(got)
     }
@@ -223,7 +250,10 @@ impl Store {
         let _trace = Trace::start("ranges", key);
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let path = self.path(key);
-        let out = self.retry(|| self.inner.get_ranges(&path, ranges)).await.with_context(|| format!("range read {key}"))?;
+        let out = self
+            .retry(|| self.inner.get_ranges(&path, ranges))
+            .await
+            .with_context(|| format!("range read {key}"))?;
         let n: usize = out.iter().map(|b| b.len()).sum();
         self.stats.bytes_down.fetch_add(n as u64, Ordering::Relaxed);
         Ok(out)
@@ -234,21 +264,27 @@ impl Store {
         let _trace = Trace::start("range", key);
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let path = self.path(key);
-        let got = self.retry(|| async {
-            let opts = GetOptions { range: Some(range.clone().into()), ..Default::default() };
-            match self.inner.get_opts(&path, opts).await {
-                Ok(r) => {
-                    let size = r.meta.size;
-                    Ok(Some((r.bytes().await?, size)))
+        let got = self
+            .retry(|| async {
+                let opts = GetOptions {
+                    range: Some(range.clone().into()),
+                    ..Default::default()
+                };
+                match self.inner.get_opts(&path, opts).await {
+                    Ok(r) => {
+                        let size = r.meta.size;
+                        Ok(Some((r.bytes().await?, size)))
+                    }
+                    Err(object_store::Error::NotFound { .. }) => Ok(None),
+                    Err(e) => Err(e),
                 }
-                Err(object_store::Error::NotFound { .. }) => Ok(None),
-                Err(e) => Err(e),
-            }
-        })
-        .await
-        .with_context(|| format!("range read {key}"))?;
+            })
+            .await
+            .with_context(|| format!("range read {key}"))?;
         if let Some((b, _)) = &got {
-            self.stats.bytes_down.fetch_add(b.len() as u64, Ordering::Relaxed);
+            self.stats
+                .bytes_down
+                .fetch_add(b.len() as u64, Ordering::Relaxed);
         }
         Ok(got)
     }
@@ -258,13 +294,22 @@ impl Store {
     pub async fn put_new(&self, key: &str, data: Bytes) -> Result<bool> {
         let _trace = Trace::start("put_new", key);
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_up
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         let path = self.path(key);
         // Safe to retry: content-addressed, so a retried create that finds the object
         // already written (by our earlier attempt) is a success.
         self.retry(|| async {
-            let opts = PutOptions { mode: PutMode::Create, ..Default::default() };
-            match self.inner.put_opts(&path, PutPayload::from(data.clone()), opts).await {
+            let opts = PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            };
+            match self
+                .inner
+                .put_opts(&path, PutPayload::from(data.clone()), opts)
+                .await
+            {
                 Ok(_) => Ok(true),
                 Err(object_store::Error::AlreadyExists { .. }) => Ok(false),
                 // Some S3 implementations answer a lost If-None-Match race with 412.
@@ -280,9 +325,12 @@ impl Store {
     pub async fn put(&self, key: &str, data: Bytes) -> Result<()> {
         let _trace = Trace::start("put", key);
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_up
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         let path = self.path(key);
-        self.retry(|| self.inner.put(&path, PutPayload::from(data.clone()))).await?;
+        self.retry(|| self.inner.put(&path, PutPayload::from(data.clone())))
+            .await?;
         Ok(())
     }
 
@@ -291,28 +339,43 @@ impl Store {
         let _trace = Trace::start("cas", key);
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
         self.stats.cas.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_up
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         if let Some(root) = &self.local_root {
             return local_cas(root, key, &data, expected);
         }
         let mode = match expected {
             None => PutMode::Create,
-            Some(v) => PutMode::Update(UpdateVersion { e_tag: v.etag.clone(), version: v.version.clone() }),
+            Some(v) => PutMode::Update(UpdateVersion {
+                e_tag: v.etag.clone(),
+                version: v.version.clone(),
+            }),
         };
-        let opts = PutOptions { mode, ..Default::default() };
+        let opts = PutOptions {
+            mode,
+            ..Default::default()
+        };
         // A refused credential means nothing was written, so asking again is safe; any other
         // outcome is final (a retried CAS could not tell its own earlier success from a loss).
         let path = self.path(key);
-        let attempt = || self.inner.put_opts(&path, PutPayload::from(data.clone()), opts.clone());
+        let attempt = || {
+            self.inner
+                .put_opts(&path, PutPayload::from(data.clone()), opts.clone())
+        };
         let result = match attempt().await {
-            Err(object_store::Error::Unauthenticated { .. }) if self.drop_credentials() => attempt().await,
+            Err(object_store::Error::Unauthenticated { .. }) if self.drop_credentials() => {
+                attempt().await
+            }
             r => r,
         };
         match result {
-            Ok(r) => Ok(Cas::Ok(Version { etag: r.e_tag, version: r.version })),
-            Err(object_store::Error::AlreadyExists { .. }) | Err(object_store::Error::Precondition { .. }) => {
-                Ok(Cas::Conflict)
-            }
+            Ok(r) => Ok(Cas::Ok(Version {
+                etag: r.e_tag,
+                version: r.version,
+            })),
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => Ok(Cas::Conflict),
             Err(e) => Err(e).with_context(|| format!("cas {key}")),
         }
     }
@@ -331,7 +394,12 @@ impl Store {
 
     /// List keys under a prefix, relative to the store root, with sizes.
     pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>> {
-        Ok(self.list_meta(prefix).await?.into_iter().map(|o| (o.key, o.size)).collect())
+        Ok(self
+            .list_meta(prefix)
+            .await?
+            .into_iter()
+            .map(|o| (o.key, o.size))
+            .collect())
     }
 
     /// List keys under a prefix with size and last-modified time (unix seconds).
@@ -350,7 +418,11 @@ impl Store {
     pub async fn list_meta(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
         let _trace = Trace::start("list", prefix);
         let p = self.path(prefix.trim_end_matches('/'));
-        let strip = if self.prefix.is_empty() { 0 } else { self.prefix.len() + 1 };
+        let strip = if self.prefix.is_empty() {
+            0
+        } else {
+            self.prefix.len() + 1
+        };
         let items: Vec<_> = match self.retry(|| self.inner.list(Some(&p)).try_collect()).await {
             Ok(v) => v,
             Err(object_store::Error::NotFound { .. }) => vec![],
@@ -371,12 +443,19 @@ impl Store {
 }
 
 fn local_version(b: &[u8]) -> Version {
-    Version { etag: Some(blake3::hash(b).to_hex()[..16].to_string()), version: None }
+    Version {
+        etag: Some(blake3::hash(b).to_hex()[..16].to_string()),
+        version: None,
+    }
 }
 
 fn local_cas(root: &FsPath, key: &str, data: &[u8], expected: Option<&Version>) -> Result<Cas> {
     use fs2::FileExt;
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join(".lock"))?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join(".lock"))?;
     lock.lock_exclusive()?;
     let path = root.join(key);
     let current = match std::fs::read(&path) {
@@ -436,7 +515,9 @@ where
     loop {
         match op().await {
             Ok(v) => return Ok(v),
-            Err(object_store::Error::Unauthenticated { .. }) if !refreshed && refresh() => refreshed = true,
+            Err(object_store::Error::Unauthenticated { .. }) if !refreshed && refresh() => {
+                refreshed = true
+            }
             Err(e @ object_store::Error::NotFound { .. })
             | Err(e @ object_store::Error::AlreadyExists { .. })
             | Err(e @ object_store::Error::Precondition { .. })
@@ -448,7 +529,10 @@ where
             Err(_) => {
                 attempt += 1;
                 let ms = (100u64 << attempt).min(5_000);
-                tokio::time::sleep(std::time::Duration::from_millis(ms / 2 + rand::random::<u64>() % (ms / 2))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    ms / 2 + rand::random::<u64>() % (ms / 2),
+                ))
+                .await;
             }
         }
     }
@@ -476,7 +560,11 @@ impl Trace {
     fn start(op: &'static str, key: &str) -> Option<Trace> {
         trace_enabled().then(|| {
             process_start();
-            Trace { op, key: key.to_string(), start: std::time::Instant::now() }
+            Trace {
+                op,
+                key: key.to_string(),
+                start: std::time::Instant::now(),
+            }
         })
     }
 }
@@ -484,6 +572,11 @@ impl Trace {
 impl Drop for Trace {
     fn drop(&mut self) {
         let at = self.start.duration_since(process_start()).as_millis();
-        eprintln!("store {at:>6}ms +{:>4}ms {:8} {}", self.start.elapsed().as_millis(), self.op, self.key);
+        eprintln!(
+            "store {at:>6}ms +{:>4}ms {:8} {}",
+            self.start.elapsed().as_millis(),
+            self.op,
+            self.key
+        );
     }
 }

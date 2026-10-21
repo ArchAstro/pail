@@ -11,7 +11,9 @@ use clap_complete::env::Shells;
 /// The registration script for `shell`.
 pub fn registration(shell: &str) -> Result<()> {
     let shells = Shells::builtins();
-    let sh = shells.completer(shell).with_context(|| format!("unsupported shell {shell}"))?;
+    let sh = shells
+        .completer(shell)
+        .with_context(|| format!("unsupported shell {shell}"))?;
     // `pail` from PATH, so the script keeps working across upgrades and reinstalls.
     sh.write_registration("COMPLETE", "pail", "pail", "pail", &mut std::io::stdout())?;
     Ok(())
@@ -20,7 +22,12 @@ pub fn registration(shell: &str) -> Result<()> {
 /// Branch names (with their commit), from the repository around the current directory.
 /// Completion must never hang or fail the shell: a slow or unreachable store yields nothing.
 pub fn branches() -> Vec<CompletionCandidate> {
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return vec![] };
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return vec![];
+    };
     rt.block_on(async {
         let found = tokio::time::timeout(Duration::from_secs(2), async {
             let cwd = std::env::current_dir().ok()?;
@@ -46,7 +53,10 @@ pub fn config_keys() -> Vec<CompletionCandidate> {
         ("user.name", "your name, for commits"),
         ("user.email", "your email, for commits"),
         ("init.defaultBranch", "default branch for `pail init`"),
-        ("core.hooksPath", "hooks directory (relative to the working copy)"),
+        (
+            "core.hooksPath",
+            "hooks directory (relative to the working copy)",
+        ),
         ("core.pager", "pager for long output"),
         ("color.ui", "auto, always or never"),
         ("log.date", "date format for log"),
@@ -54,11 +64,15 @@ pub fn config_keys() -> Vec<CompletionCandidate> {
         ("log.decorate", "show branch names in log"),
         ("format.pretty", "default log format"),
     ];
-    let mut out: Vec<CompletionCandidate> =
-        known.iter().map(|(k, h)| CompletionCandidate::new(*k).help(Some((*h).into()))).collect();
-    let dir = std::env::current_dir().ok().and_then(|d| match pail::local::discover(&d).ok()? {
-        pail::local::Found::Worktree(_, l) | pail::local::Found::Bare(l) => Some(l.dir),
-    });
+    let mut out: Vec<CompletionCandidate> = known
+        .iter()
+        .map(|(k, h)| CompletionCandidate::new(*k).help(Some((*h).into())))
+        .collect();
+    let dir = std::env::current_dir()
+        .ok()
+        .and_then(|d| match pail::local::discover(&d).ok()? {
+            pail::local::Found::Worktree(_, l) | pail::local::Found::Bare(l) => Some(l.dir),
+        });
     let cfg = pail::config::Config::load(dir.as_deref());
     for (_, k, _) in cfg.list() {
         if !known.iter().any(|(n, _)| n.eq_ignore_ascii_case(&k)) {
@@ -70,10 +84,13 @@ pub fn config_keys() -> Vec<CompletionCandidate> {
 
 /// Installed credential providers, plus `ambient`.
 pub fn providers() -> Vec<CompletionCandidate> {
-    std::iter::once(CompletionCandidate::new("ambient").help(Some("the cloud SDK's own credential chain".into())))
-        .chain(pail::creds::installed().into_iter().map(|(n, exe)| {
-            let help = pail::creds::description(&exe).unwrap_or_default();
-            CompletionCandidate::new(n).help(Some(help.into()))
-        }))
-        .collect()
+    std::iter::once(
+        CompletionCandidate::new("ambient")
+            .help(Some("the cloud SDK's own credential chain".into())),
+    )
+    .chain(pail::creds::installed().into_iter().map(|(n, exe)| {
+        let help = pail::creds::description(&exe).unwrap_or_default();
+        CompletionCandidate::new(n).help(Some(help.into()))
+    }))
+    .collect()
 }

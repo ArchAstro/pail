@@ -24,12 +24,21 @@ pub struct GcReport {
 }
 
 pub async fn gc(repo: &Repo, grace_secs: i64, dry_run: bool) -> Result<GcReport> {
-    let mut roots: Vec<Hash> = repo.list_refs().await?.into_iter().map(|(_, h)| h).collect();
+    let mut roots: Vec<Hash> = repo
+        .list_refs()
+        .await?
+        .into_iter()
+        .map(|(_, h)| h)
+        .collect();
     for o in repo.store.list_meta("reflog/").await? {
         let b = repo.store.get(&o.key).await?;
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
             for k in ["old", "new"] {
-                if let Some(h) = v.get(k).and_then(|x| x.as_str()).and_then(|s| Hash::from_hex(s).ok()) {
+                if let Some(h) = v
+                    .get(k)
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| Hash::from_hex(s).ok())
+                {
                     roots.push(h);
                 }
             }
@@ -74,7 +83,9 @@ pub async fn gc(repo: &Repo, grace_secs: i64, dry_run: bool) -> Result<GcReport>
     let commit_hex: HashSet<String> = commits.iter().map(|h| h.hex()).collect();
     let page_hex: HashSet<String> = pages.iter().map(|h| h.hex()).collect();
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
     let mut report = GcReport {
         live_commits: commits.len(),
         live_pages: pages.len(),
@@ -82,7 +93,12 @@ pub async fn gc(repo: &Repo, grace_secs: i64, dry_run: bool) -> Result<GcReport>
         live_chunks: chunks.len(),
         ..Default::default()
     };
-    for (prefix, live) in [("commits/", &commit_hex), ("pages/", &page_hex), ("packs/", &packs), ("chunks/", &chunks)] {
+    for (prefix, live) in [
+        ("commits/", &commit_hex),
+        ("pages/", &page_hex),
+        ("packs/", &packs),
+        ("chunks/", &chunks),
+    ] {
         for o in repo.store.list_meta(prefix).await? {
             let name = o.key[prefix.len()..].trim_end_matches(".pack");
             if live.contains(name) {

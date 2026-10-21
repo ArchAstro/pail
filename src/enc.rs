@@ -51,7 +51,9 @@ impl<'a> Reader<'a> {
     }
 
     pub fn u8(&mut self) -> Result<u8> {
-        let Some(&b) = self.buf.get(self.pos) else { bail!("unexpected end of data") };
+        let Some(&b) = self.buf.get(self.pos) else {
+            bail!("unexpected end of data")
+        };
         self.pos += 1;
         Ok(b)
     }

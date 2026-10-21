@@ -84,7 +84,19 @@ struct Env {
 
 /// Divide and conquer: find a middle snake (xdl_split).
 #[allow(clippy::too_many_arguments)]
-fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i64, kvdf: &mut [i64], kvdb: &mut [i64], base: i64, need_min: bool, env: &Env) -> Split {
+fn split(
+    ha1: &[usize],
+    off1: i64,
+    lim1: i64,
+    ha2: &[usize],
+    off2: i64,
+    lim2: i64,
+    kvdf: &mut [i64],
+    kvdb: &mut [i64],
+    base: i64,
+    need_min: bool,
+    env: &Env,
+) -> Split {
     let dmin = off1 - lim2;
     let dmax = lim1 - off2;
     let fmid = off1 - off2;
@@ -114,7 +126,11 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
         }
         let mut d = fmax;
         while d >= fmin {
-            let mut i1 = if kvdf[kf(d - 1)] >= kvdf[kf(d + 1)] { kvdf[kf(d - 1)] + 1 } else { kvdf[kf(d + 1)] };
+            let mut i1 = if kvdf[kf(d - 1)] >= kvdf[kf(d + 1)] {
+                kvdf[kf(d - 1)] + 1
+            } else {
+                kvdf[kf(d + 1)]
+            };
             let prev1 = i1;
             let mut i2 = i1 - d;
             while i1 < lim1 && i2 < lim2 && h1(i1) == h2(i2) {
@@ -126,7 +142,12 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
             }
             kvdf[kf(d)] = i1;
             if odd && bmin <= d && d <= bmax && kvdb[kf(d)] <= i1 {
-                return Split { i1, i2, min_lo: true, min_hi: true };
+                return Split {
+                    i1,
+                    i2,
+                    min_lo: true,
+                    min_hi: true,
+                };
             }
             d -= 2;
         }
@@ -144,7 +165,11 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
         }
         let mut d = bmax;
         while d >= bmin {
-            let mut i1 = if kvdb[kf(d - 1)] < kvdb[kf(d + 1)] { kvdb[kf(d - 1)] } else { kvdb[kf(d + 1)] - 1 };
+            let mut i1 = if kvdb[kf(d - 1)] < kvdb[kf(d + 1)] {
+                kvdb[kf(d - 1)]
+            } else {
+                kvdb[kf(d + 1)] - 1
+            };
             let prev1 = i1;
             let mut i2 = i1 - d;
             while i1 > off1 && i2 > off2 && h1(i1 - 1) == h2(i2 - 1) {
@@ -156,7 +181,12 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
             }
             kvdb[kf(d)] = i1;
             if !odd && fmin <= d && d <= fmax && i1 <= kvdf[kf(d)] {
-                return Split { i1, i2, min_lo: true, min_hi: true };
+                return Split {
+                    i1,
+                    i2,
+                    min_lo: true,
+                    min_hi: true,
+                };
             }
             d -= 2;
         }
@@ -173,7 +203,13 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
                 let i1 = kvdf[kf(d)];
                 let i2 = i1 - d;
                 let v = (i1 - off1) + (i2 - off2) - dd;
-                if v > XDL_K_HEUR * ec && v > best && off1 + XDL_SNAKE_CNT <= i1 && i1 < lim1 && off2 + XDL_SNAKE_CNT <= i2 && i2 < lim2 {
+                if v > XDL_K_HEUR * ec
+                    && v > best
+                    && off1 + XDL_SNAKE_CNT <= i1
+                    && i1 < lim1
+                    && off2 + XDL_SNAKE_CNT <= i2
+                    && i2 < lim2
+                {
                     let mut k = 1;
                     while h1(i1 - k) == h2(i2 - k) {
                         if k == XDL_SNAKE_CNT {
@@ -187,7 +223,12 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
                 d -= 2;
             }
             if best > 0 {
-                return Split { i1: sp.0, i2: sp.1, min_lo: true, min_hi: false };
+                return Split {
+                    i1: sp.0,
+                    i2: sp.1,
+                    min_lo: true,
+                    min_hi: false,
+                };
             }
             let mut best = 0;
             let mut d = bmax;
@@ -196,7 +237,13 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
                 let i1 = kvdb[kf(d)];
                 let i2 = i1 - d;
                 let v = (lim1 - i1) + (lim2 - i2) - dd;
-                if v > XDL_K_HEUR * ec && v > best && off1 < i1 && i1 <= lim1 - XDL_SNAKE_CNT && off2 < i2 && i2 <= lim2 - XDL_SNAKE_CNT {
+                if v > XDL_K_HEUR * ec
+                    && v > best
+                    && off1 < i1
+                    && i1 <= lim1 - XDL_SNAKE_CNT
+                    && off2 < i2
+                    && i2 <= lim2 - XDL_SNAKE_CNT
+                {
                     let mut k = 0;
                     while h1(i1 + k) == h2(i2 + k) {
                         if k == XDL_SNAKE_CNT - 1 {
@@ -210,7 +257,12 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
                 d -= 2;
             }
             if best > 0 {
-                return Split { i1: sp.0, i2: sp.1, min_lo: false, min_hi: true };
+                return Split {
+                    i1: sp.0,
+                    i2: sp.1,
+                    min_lo: false,
+                    min_hi: true,
+                };
             }
         }
         if ec >= env.mxcost {
@@ -245,16 +297,33 @@ fn split(ha1: &[usize], off1: i64, lim1: i64, ha2: &[usize], off2: i64, lim2: i6
                 d -= 2;
             }
             if (lim1 + lim2) - bbest < fbest - (off1 + off2) {
-                return Split { i1: fbest1, i2: fbest - fbest1, min_lo: true, min_hi: false };
+                return Split {
+                    i1: fbest1,
+                    i2: fbest - fbest1,
+                    min_lo: true,
+                    min_hi: false,
+                };
             }
-            return Split { i1: bbest1, i2: bbest - bbest1, min_lo: false, min_hi: true };
+            return Split {
+                i1: bbest1,
+                i2: bbest - bbest1,
+                min_lo: false,
+                min_hi: true,
+            };
         }
         ec += 1;
     }
 }
 
 /// xdl_recs_cmp, iterative over an explicit stack.
-fn recs_cmp(f1: &mut XdFile, f2: &mut XdFile, kvdf: &mut [i64], kvdb: &mut [i64], base: i64, env: &Env) {
+fn recs_cmp(
+    f1: &mut XdFile,
+    f2: &mut XdFile,
+    kvdf: &mut [i64],
+    kvdb: &mut [i64],
+    base: i64,
+    env: &Env,
+) {
     let ha1 = std::mem::take(&mut f1.ha);
     let ha2 = std::mem::take(&mut f2.ha);
     let mut stack = vec![(0i64, ha1.len() as i64, 0i64, ha2.len() as i64, false)];
@@ -278,7 +347,9 @@ fn recs_cmp(f1: &mut XdFile, f2: &mut XdFile, kvdf: &mut [i64], kvdb: &mut [i64]
                 f1.set(r, 1);
             }
         } else {
-            let spl = split(&ha1, off1, lim1, &ha2, off2, lim2, kvdf, kvdb, base, need_min, env);
+            let spl = split(
+                &ha1, off1, lim1, &ha2, off2, lim2, kvdf, kvdb, base, need_min, env,
+            );
             // Push the high half first so the low half is processed first, as recursion would.
             stack.push((spl.i1, lim1, spl.i2, lim2, spl.min_hi));
             stack.push((off1, spl.i1, off2, spl.i2, spl.min_lo));
@@ -339,14 +410,32 @@ fn prepare<'a>(a: &'a [u8], b: &'a [u8]) -> (XdFile<'a>, XdFile<'a>) {
             len1.push(0);
             len2.push(0);
         }
-        if side == 1 { len1[c] += 1 } else { len2[c] += 1 }
+        if side == 1 {
+            len1[c] += 1
+        } else {
+            len2[c] += 1
+        }
         c
     };
-    let ca: Vec<usize> = ra.iter().map(|r| classify(r, 1, &mut len1, &mut len2)).collect();
-    let cb: Vec<usize> = rb.iter().map(|r| classify(r, 2, &mut len1, &mut len2)).collect();
+    let ca: Vec<usize> = ra
+        .iter()
+        .map(|r| classify(r, 1, &mut len1, &mut len2))
+        .collect();
+    let cb: Vec<usize> = rb
+        .iter()
+        .map(|r| classify(r, 2, &mut len1, &mut len2))
+        .collect();
     let mk = |recs: Vec<&'a [u8]>, class: Vec<usize>| {
         let n = recs.len();
-        XdFile { recs, class, rchg: vec![0; n + 2], rindex: vec![], ha: vec![], dstart: 0, dend: 0 }
+        XdFile {
+            recs,
+            class,
+            rchg: vec![0; n + 2],
+            rindex: vec![],
+            ha: vec![],
+            dstart: 0,
+            dend: 0,
+        }
     };
     let mut f1 = mk(ra, ca);
     let mut f2 = mk(rb, cb);
@@ -371,12 +460,24 @@ fn prepare<'a>(a: &'a [u8], b: &'a [u8]) -> (XdFile<'a>, XdFile<'a>) {
     let mlim = bogosqrt(f1.nrec()).min(XDL_MAX_EQLIMIT);
     for i in f1.dstart..=f1.dend {
         let nm = len2[f1.class[i as usize]];
-        dis1[i as usize] = if nm == 0 { 0 } else if nm >= mlim { 2 } else { 1 };
+        dis1[i as usize] = if nm == 0 {
+            0
+        } else if nm >= mlim {
+            2
+        } else {
+            1
+        };
     }
     let mlim = bogosqrt(f2.nrec()).min(XDL_MAX_EQLIMIT);
     for i in f2.dstart..=f2.dend {
         let nm = len1[f2.class[i as usize]];
-        dis2[i as usize] = if nm == 0 { 0 } else if nm >= mlim { 2 } else { 1 };
+        dis2[i as usize] = if nm == 0 {
+            0
+        } else if nm >= mlim {
+            2
+        } else {
+            1
+        };
     }
     for (f, dis) in [(&mut f1, &dis1), (&mut f2, &dis2)] {
         for i in f.dstart..=f.dend {
@@ -492,22 +593,39 @@ fn score_add_split(m: &Measure, s: &mut Score) {
     let total_blank = m.pre_blank + post_blank;
     s.penalty += TOTAL_BLANK_WEIGHT * total_blank;
     s.penalty += POST_BLANK_WEIGHT * post_blank;
-    let indent = if m.indent != -1 { m.indent } else { m.post_indent };
+    let indent = if m.indent != -1 {
+        m.indent
+    } else {
+        m.post_indent
+    };
     let any_blanks = total_blank != 0;
     s.effective_indent += indent;
     if indent == -1 || m.pre_indent == -1 {
     } else if indent > m.pre_indent {
-        s.penalty += if any_blanks { RELATIVE_INDENT_WITH_BLANK_PENALTY } else { RELATIVE_INDENT_PENALTY };
+        s.penalty += if any_blanks {
+            RELATIVE_INDENT_WITH_BLANK_PENALTY
+        } else {
+            RELATIVE_INDENT_PENALTY
+        };
     } else if indent == m.pre_indent {
     } else if m.post_indent != -1 && m.post_indent > indent {
-        s.penalty += if any_blanks { RELATIVE_OUTDENT_WITH_BLANK_PENALTY } else { RELATIVE_OUTDENT_PENALTY };
+        s.penalty += if any_blanks {
+            RELATIVE_OUTDENT_WITH_BLANK_PENALTY
+        } else {
+            RELATIVE_OUTDENT_PENALTY
+        };
     } else {
-        s.penalty += if any_blanks { RELATIVE_DEDENT_WITH_BLANK_PENALTY } else { RELATIVE_DEDENT_PENALTY };
+        s.penalty += if any_blanks {
+            RELATIVE_DEDENT_WITH_BLANK_PENALTY
+        } else {
+            RELATIVE_DEDENT_PENALTY
+        };
     }
 }
 
 fn score_cmp(a: &Score, b: &Score) -> i32 {
-    let ci = (a.effective_indent > b.effective_indent) as i32 - (a.effective_indent < b.effective_indent) as i32;
+    let ci = (a.effective_indent > b.effective_indent) as i32
+        - (a.effective_indent < b.effective_indent) as i32;
     INDENT_WEIGHT * ci + (a.penalty - b.penalty)
 }
 
@@ -612,7 +730,10 @@ fn change_compact(f: &mut XdFile, fo: &XdFile) {
             } else if end_matching_other != -1 {
                 while go.end == go.start {
                     assert!(group_slide_up(f, &mut g), "match disappeared");
-                    assert!(group_previous(fo, &mut go), "group sync broken sliding to match");
+                    assert!(
+                        group_previous(fo, &mut go),
+                        "group sync broken sliding to match"
+                    );
                 }
             } else {
                 let mut shift = earliest_end;
@@ -636,14 +757,20 @@ fn change_compact(f: &mut XdFile, fo: &XdFile) {
                 }
                 while g.end > best_shift {
                     assert!(group_slide_up(f, &mut g), "best shift unreached");
-                    assert!(group_previous(fo, &mut go), "group sync broken sliding to blank line");
+                    assert!(
+                        group_previous(fo, &mut go),
+                        "group sync broken sliding to blank line"
+                    );
                 }
             }
         }
         if !group_next(f, &mut g) {
             break;
         }
-        assert!(group_next(fo, &mut go), "group sync broken moving to next group");
+        assert!(
+            group_next(fo, &mut go),
+            "group sync broken moving to next group"
+        );
     }
 }
 
@@ -656,7 +783,9 @@ pub fn diff<'a>(a: &'a [u8], b: &'a [u8]) -> (Vec<&'a [u8]>, Vec<&'a [u8]>, Vec<
     let size = (2 * ndiags + 2) as usize;
     let mut kvdf = vec![0i64; size];
     let mut kvdb = vec![0i64; size];
-    let env = Env { mxcost: bogosqrt(ndiags).max(XDL_MAX_COST_MIN) };
+    let env = Env {
+        mxcost: bogosqrt(ndiags).max(XDL_MAX_COST_MIN),
+    };
     recs_cmp(&mut f1, &mut f2, &mut kvdf, &mut kvdb, n2 + 1, &env);
     change_compact(&mut f1, &f2);
     change_compact(&mut f2, &f1);
@@ -672,7 +801,12 @@ pub fn diff<'a>(a: &'a [u8], b: &'a [u8]) -> (Vec<&'a [u8]>, Vec<&'a [u8]>, Vec<
             while f2.chg(i2 - 1) {
                 i2 -= 1;
             }
-            script.push(Change { i1: i1 as usize, i2: i2 as usize, chg1: (l1 - i1) as usize, chg2: (l2 - i2) as usize });
+            script.push(Change {
+                i1: i1 as usize,
+                i2: i2 as usize,
+                chg1: (l1 - i1) as usize,
+                chg2: (l2 - i2) as usize,
+            });
         }
         i1 -= 1;
         i2 -= 1;
@@ -688,8 +822,24 @@ mod tests {
     #[test]
     fn simple() {
         let (_, _, s) = diff(b"a\nb\nc\n", b"a\nx\nc\n");
-        assert_eq!(s, vec![Change { i1: 1, i2: 1, chg1: 1, chg2: 1 }]);
+        assert_eq!(
+            s,
+            vec![Change {
+                i1: 1,
+                i2: 1,
+                chg1: 1,
+                chg2: 1
+            }]
+        );
         let (_, _, s) = diff(b"", b"a\n");
-        assert_eq!(s, vec![Change { i1: 0, i2: 0, chg1: 0, chg2: 1 }]);
+        assert_eq!(
+            s,
+            vec![Change {
+                i1: 0,
+                i2: 0,
+                chg1: 0,
+                chg2: 1
+            }]
+        );
     }
 }

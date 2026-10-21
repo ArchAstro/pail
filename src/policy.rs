@@ -88,12 +88,16 @@ pub struct Identity {
 
 impl Identity {
     pub fn new(principal: &str, groups: &[String]) -> Identity {
-        Identity { principal: principal.to_string(), groups: groups.to_vec() }
+        Identity {
+            principal: principal.to_string(),
+            groups: groups.to_vec(),
+        }
     }
 
     /// Whether any of `who` names this identity.
     pub fn is_any(&self, who: &[String]) -> bool {
-        who.iter().any(|w| w == "*" || *w == self.principal || self.groups.iter().any(|g| g == w))
+        who.iter()
+            .any(|w| w == "*" || *w == self.principal || self.groups.iter().any(|g| g == w))
     }
 }
 
@@ -113,18 +117,27 @@ pub struct Decision {
 }
 
 fn allow(reason: impl Into<String>) -> Decision {
-    Decision { allow: true, reason: reason.into() }
+    Decision {
+        allow: true,
+        reason: reason.into(),
+    }
 }
 
 fn deny(reason: impl Into<String>) -> Decision {
-    Decision { allow: false, reason: reason.into() }
+    Decision {
+        allow: false,
+        reason: reason.into(),
+    }
 }
 
 impl Policy {
     pub fn parse(bytes: &[u8]) -> Result<Policy> {
         let p: Policy = serde_json::from_slice(bytes).context("invalid policy.json")?;
         if p.version != 1 {
-            bail!("unsupported policy version {} (this pail reads version 1)", p.version);
+            bail!(
+                "unsupported policy version {} (this pail reads version 1)",
+                p.version
+            );
         }
         for glob in p.branches.keys() {
             if glob.is_empty() || glob[..glob.len() - 1].contains('*') {
@@ -136,9 +149,13 @@ impl Policy {
 
     /// The policy on the repository's `_policy` branch, if there is one.
     pub async fn load(repo: &crate::repo::Repo) -> Result<Option<Policy>> {
-        let Some((head, _)) = repo.read_ref(BRANCH).await? else { return Ok(None) };
+        let Some((head, _)) = repo.read_ref(BRANCH).await? else {
+            return Ok(None);
+        };
         let root = repo.root_of(Some(head)).await?;
-        let Some(entry) = repo.get_entry(root, FILE).await? else { return Ok(None) };
+        let Some(entry) = repo.get_entry(root, FILE).await? else {
+            return Ok(None);
+        };
         let data = repo.read_files(&[entry]).await?.remove(0);
         Ok(Some(Policy::parse(&data)?))
     }
@@ -151,18 +168,24 @@ impl Policy {
         }
         self.branches
             .iter()
-            .filter(|(glob, _)| glob.strip_suffix('*').is_some_and(|p| branch.starts_with(p)))
+            .filter(|(glob, _)| {
+                glob.strip_suffix('*')
+                    .is_some_and(|p| branch.starts_with(p))
+            })
             .max_by_key(|(glob, _)| glob.len())
             .map(|(k, r)| (k.as_str(), r))
     }
 
     pub fn may_write_branch(&self, id: &Identity, branch: &str) -> bool {
-        self.rule_for(branch).is_some_and(|(_, r)| id.is_any(&r.writers))
+        self.rule_for(branch)
+            .is_some_and(|(_, r)| id.is_any(&r.writers))
     }
 
     /// Whether some identity outside the branch's writers exists, i.e. not everyone may write.
     pub fn is_protected(&self, branch: &str) -> bool {
-        !self.rule_for(branch).is_some_and(|(_, r)| r.writers.iter().any(|w| w == "*"))
+        !self
+            .rule_for(branch)
+            .is_some_and(|(_, r)| r.writers.iter().any(|w| w == "*"))
     }
 
     /// Whether `id` may write at least one branch (and so create content).
@@ -173,18 +196,32 @@ impl Policy {
     /// May `id` do `op` to the object `key` (relative to the repository)?
     pub fn decide(&self, id: &Identity, op: Op, key: &str) -> Decision {
         if op == Op::Read {
-            return if id.is_any(&self.readers) { allow("reader") } else { deny("not a reader of this repository") };
+            return if id.is_any(&self.readers) {
+                allow("reader")
+            } else {
+                deny("not a reader of this repository")
+            };
         }
-        let branch_key = ["refs/", "intents/", "reflog/"].iter().find_map(|p| key.strip_prefix(p).map(|rest| (*p, rest)));
+        let branch_key = ["refs/", "intents/", "reflog/"]
+            .iter()
+            .find_map(|p| key.strip_prefix(p).map(|rest| (*p, rest)));
         if let Some((kind, rest)) = branch_key {
             let branch = match kind {
                 "refs/" => rest.to_string(),
                 // intents/<branch>/<id>.json and reflog/<branch>/<ts>: the branch is all but the last segment.
-                _ => rest.rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_default(),
+                _ => rest
+                    .rsplit_once('/')
+                    .map(|(b, _)| b.to_string())
+                    .unwrap_or_default(),
             };
             return match self.rule_for(&branch) {
-                Some((glob, r)) if id.is_any(&r.writers) => allow(format!("writer of {branch} (rule {glob:?})")),
-                Some((glob, _)) => deny(format!("{branch} is protected (rule {glob:?}): its writers do not include {}", id.principal)),
+                Some((glob, r)) if id.is_any(&r.writers) => {
+                    allow(format!("writer of {branch} (rule {glob:?})"))
+                }
+                Some((glob, _)) => deny(format!(
+                    "{branch} is protected (rule {glob:?}): its writers do not include {}",
+                    id.principal
+                )),
                 None => deny(format!("no rule lets anyone write {branch}")),
             };
         }
@@ -197,7 +234,11 @@ impl Policy {
             };
         }
         if key == "HEAD" {
-            return if id.is_any(&self.admins) { allow("admin") } else { deny("only admins set the default branch") };
+            return if id.is_any(&self.admins) {
+                allow("admin")
+            } else {
+                deny("only admins set the default branch")
+            };
         }
         deny(format!("{key} is outside pail's layout"))
     }
@@ -208,8 +249,16 @@ impl Policy {
     /// specific protected ones), delete for gc. At most four rules (GCS allows ten).
     pub fn gcs_boundary(&self, id: &Identity, bucket: &str, prefix: &str) -> Result<Value> {
         let prefix = prefix.trim_matches('/');
-        let base = if prefix.is_empty() { format!("projects/_/buckets/{bucket}/objects/") } else { format!("projects/_/buckets/{bucket}/objects/{prefix}/") };
-        let list_base = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
+        let base = if prefix.is_empty() {
+            format!("projects/_/buckets/{bucket}/objects/")
+        } else {
+            format!("projects/_/buckets/{bucket}/objects/{prefix}/")
+        };
+        let list_base = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}/")
+        };
         let resource = format!("//storage.googleapis.com/projects/_/buckets/{bucket}");
         let rule = |role: &str, expr: String| json!({"availableResource": resource, "availablePermissions": [format!("inRole:roles/storage.{role}")], "availabilityCondition": {"expression": expr}});
         let mut rules = vec![];
@@ -220,7 +269,10 @@ impl Policy {
             ));
         }
         if self.writes_anything(id) {
-            let content: Vec<String> = CONTENT.iter().map(|c| format!("resource.name.startsWith('{base}{c}')")).collect();
+            let content: Vec<String> = CONTENT
+                .iter()
+                .map(|c| format!("resource.name.startsWith('{base}{c}')"))
+                .collect();
             rules.push(rule("objectCreator", content.join(" || ")));
             // Branch objects: each writable pattern, minus more specific patterns it may not write.
             let mut grants = vec![];
@@ -233,7 +285,10 @@ impl Policy {
                 let mut excluded = vec![];
                 for (other, o) in &self.branches {
                     let olit = other.trim_end_matches('*');
-                    let more_specific = other != glob && olit.starts_with(lit) && (olit.len() > lit.len() || (!other.ends_with('*') && glob.ends_with('*')));
+                    let more_specific = other != glob
+                        && olit.starts_with(lit)
+                        && (olit.len() > lit.len()
+                            || (!other.ends_with('*') && glob.ends_with('*')));
                     if !exact && more_specific && !id.is_any(&o.writers) {
                         excluded.push((olit.to_string(), !other.ends_with('*')));
                     }
@@ -267,26 +322,43 @@ impl Policy {
                     rules.push(rule("objectAdmin", std::mem::take(&mut chunk)));
                 }
                 if g.len() > CONDITION_BUDGET {
-                    bail!("a branch rule's condition is too long for a GCS access boundary ({} characters): use fewer protected patterns under one glob", g.len());
+                    bail!(
+                        "a branch rule's condition is too long for a GCS access boundary ({} characters): use fewer protected patterns under one glob",
+                        g.len()
+                    );
                 }
-                chunk = if chunk.is_empty() { g } else { format!("{chunk} || {g}") };
+                chunk = if chunk.is_empty() {
+                    g
+                } else {
+                    format!("{chunk} || {g}")
+                };
             }
             if !chunk.is_empty() {
                 rules.push(rule("objectAdmin", chunk));
             }
         }
         if id.is_any(&self.gc) {
-            let content: Vec<String> = CONTENT.iter().map(|c| format!("resource.name.startsWith('{base}{c}')")).collect();
+            let content: Vec<String> = CONTENT
+                .iter()
+                .map(|c| format!("resource.name.startsWith('{base}{c}')"))
+                .collect();
             rules.push(rule("objectAdmin", content.join(" || ")));
         }
         if id.is_any(&self.admins) {
-            rules.push(rule("objectAdmin", format!("resource.name == '{base}HEAD'")));
+            rules.push(rule(
+                "objectAdmin",
+                format!("resource.name == '{base}HEAD'"),
+            ));
         }
         if rules.is_empty() {
             bail!("{} may not access this repository", id.principal);
         }
         if rules.len() > MAX_BOUNDARY_RULES {
-            bail!("this policy needs {} access-boundary rules for {}; GCS allows {MAX_BOUNDARY_RULES}", rules.len(), id.principal);
+            bail!(
+                "this policy needs {} access-boundary rules for {}; GCS allows {MAX_BOUNDARY_RULES}",
+                rules.len(),
+                id.principal
+            );
         }
         Ok(json!({"accessBoundary": {"accessBoundaryRules": rules}}))
     }
@@ -296,9 +368,18 @@ impl Policy {
 /// limited by `boundary`, at Google's Security Token Service. Returns (token, expires_at).
 pub async fn gcs_downscope(source_token: &str, boundary: &Value) -> Result<(String, u64)> {
     let form = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
-        .append_pair("subject_token_type", "urn:ietf:params:oauth:token-type:access_token")
-        .append_pair("requested_token_type", "urn:ietf:params:oauth:token-type:access_token")
+        .append_pair(
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        )
+        .append_pair(
+            "subject_token_type",
+            "urn:ietf:params:oauth:token-type:access_token",
+        )
+        .append_pair(
+            "requested_token_type",
+            "urn:ietf:params:oauth:token-type:access_token",
+        )
         .append_pair("subject_token", source_token)
         .append_pair("options", &boundary.to_string())
         .finish();
@@ -314,8 +395,13 @@ pub async fn gcs_downscope(source_token: &str, boundary: &Value) -> Result<(Stri
     if !status.is_success() {
         bail!("STS refused the exchange ({status}): {body}");
     }
-    let token = body["access_token"].as_str().context("STS returned no token")?.to_string();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let token = body["access_token"]
+        .as_str()
+        .context("STS returned no token")?
+        .to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
     Ok((token, now + body["expires_in"].as_u64().unwrap_or(3600)))
 }
 
@@ -343,41 +429,88 @@ mod tests {
         let w = |id: &Identity, key: &str| p.decide(id, Op::Write, key).allow;
         assert!(!w(&alice, "refs/main"));
         assert!(!w(&alice, "refs/release/2026"));
-        assert!(!w(&alice, "intents/main/0001-ab.json"), "no combining into a protected branch");
+        assert!(
+            !w(&alice, "intents/main/0001-ab.json"),
+            "no combining into a protected branch"
+        );
         assert!(!w(&alice, "refs/_policy"));
-        assert!(w(&alice, "refs/pr/hello") && w(&alice, "intents/pr/hello/1.json") && w(&alice, "refs/alice/wip"));
+        assert!(
+            w(&alice, "refs/pr/hello")
+                && w(&alice, "intents/pr/hello/1.json")
+                && w(&alice, "refs/alice/wip")
+        );
         assert!(w(&alice, "commits/abc") && w(&alice, "packs/x.pack"));
         assert!(!p.decide(&alice, Op::Delete, "packs/x.pack").allow);
         assert!(!p.decide(&lander, Op::Delete, "packs/x.pack").allow);
-        assert!(p.decide(&Identity::new("svc", &["role:gc".into()]), Op::Delete, "packs/x.pack").allow);
+        assert!(
+            p.decide(
+                &Identity::new("svc", &["role:gc".into()]),
+                Op::Delete,
+                "packs/x.pack"
+            )
+            .allow
+        );
         assert!(w(&lander, "refs/main") && w(&lander, "refs/release/2026"));
         assert!(w(&admin, "refs/_policy") && w(&admin, "HEAD") && !w(&alice, "HEAD"));
         assert!(p.decide(&alice, Op::Read, "refs/main").allow);
         assert!(p.is_protected("main") && p.is_protected("release/x") && !p.is_protected("pr/x"));
         assert_eq!(p.rule_for("release/2026").unwrap().0, "release/*");
         assert_eq!(p.rule_for("main").unwrap().1.required_checks, vec!["test"]);
-        let strict = Policy::parse(br#"{"version":1,"branches":{"main":{"writers":["lander"]}}}"#).unwrap();
-        assert!(!strict.decide(&alice, Op::Write, "refs/feature").allow, "unnamed branches are writable by nobody");
+        let strict =
+            Policy::parse(br#"{"version":1,"branches":{"main":{"writers":["lander"]}}}"#).unwrap();
+        assert!(
+            !strict.decide(&alice, Op::Write, "refs/feature").allow,
+            "unnamed branches are writable by nobody"
+        );
         assert!(Policy::parse(br#"{"version":1,"branches":{"a*b":{"writers":["*"]}}}"#).is_err());
     }
 
     #[test]
     fn boundaries_encode_the_same_rules() {
         let p = policy();
-        let b = p.gcs_boundary(&Identity::new("user:alice", &[]), "bkt", "team/app").unwrap();
-        let rules = b["accessBoundary"]["accessBoundaryRules"].as_array().unwrap();
+        let b = p
+            .gcs_boundary(&Identity::new("user:alice", &[]), "bkt", "team/app")
+            .unwrap();
+        let rules = b["accessBoundary"]["accessBoundaryRules"]
+            .as_array()
+            .unwrap();
         assert!(rules.len() >= 3 && rules.len() <= MAX_BOUNDARY_RULES);
-        assert!(rules.iter().all(|r| r["availabilityCondition"]["expression"].as_str().unwrap().len() <= CONDITION_BUDGET));
-        let refs: String = rules[2..].iter().map(|r| r["availabilityCondition"]["expression"].as_str().unwrap().to_string()).collect::<Vec<_>>().join(" || ");
+        assert!(rules.iter().all(|r| {
+            r["availabilityCondition"]["expression"]
+                .as_str()
+                .unwrap()
+                .len()
+                <= CONDITION_BUDGET
+        }));
+        let refs: String = rules[2..]
+            .iter()
+            .map(|r| {
+                r["availabilityCondition"]["expression"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" || ");
         let base = "projects/_/buckets/bkt/objects/team/app/";
         assert!(refs.contains(&format!("resource.name.startsWith('{base}refs/')")));
         assert!(refs.contains(&format!("!(resource.name == '{base}refs/main')")));
-        assert!(refs.contains(&format!("!(resource.name.startsWith('{base}refs/release/'))")));
-        assert!(refs.contains(&format!("!(resource.name.startsWith('{base}intents/main/'))")));
+        assert!(refs.contains(&format!(
+            "!(resource.name.startsWith('{base}refs/release/'))"
+        )));
+        assert!(refs.contains(&format!(
+            "!(resource.name.startsWith('{base}intents/main/'))"
+        )));
         assert!(refs.contains(&format!("!(resource.name == '{base}refs/_policy')")));
-        let lander = p.gcs_boundary(&Identity::new("lander", &[]), "bkt", "team/app").unwrap();
+        let lander = p
+            .gcs_boundary(&Identity::new("lander", &[]), "bkt", "team/app")
+            .unwrap();
         let expr = lander["accessBoundary"]["accessBoundaryRules"].to_string();
         assert!(expr.contains(&format!("resource.name == '{base}refs/main'")));
-        assert!(p.gcs_boundary(&Identity::new("user:mallory", &[]), "bkt", "x").is_ok(), "readers include everyone here");
+        assert!(
+            p.gcs_boundary(&Identity::new("user:mallory", &[]), "bkt", "x")
+                .is_ok(),
+            "readers include everyone here"
+        );
     }
 }

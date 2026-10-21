@@ -114,13 +114,22 @@ impl FileState {
             Kind::Exec => KindTag::Exec,
             Kind::Symlink => KindTag::Symlink,
         };
-        let loc = with_loc.then(|| match &e.loc {
-            Loc::Inline(b) => Some(LocRef::Inline(hex::encode(b))),
-            Loc::Pack { pack, off, len } => Some(LocRef::Pack(*pack, *off, *len)),
-            Loc::Chunks(cs) => Some(LocRef::Chunks(cs.iter().map(|c| (c.hash, c.len)).collect())),
-            Loc::Unresolved => None,
-        }).flatten();
-        FileState { kind, size: e.size, hash: e.hash, loc }
+        let loc = with_loc
+            .then(|| match &e.loc {
+                Loc::Inline(b) => Some(LocRef::Inline(hex::encode(b))),
+                Loc::Pack { pack, off, len } => Some(LocRef::Pack(*pack, *off, *len)),
+                Loc::Chunks(cs) => {
+                    Some(LocRef::Chunks(cs.iter().map(|c| (c.hash, c.len)).collect()))
+                }
+                Loc::Unresolved => None,
+            })
+            .flatten();
+        FileState {
+            kind,
+            size: e.size,
+            hash: e.hash,
+            loc,
+        }
     }
 
     pub fn entry(&self, path: &str) -> Entry {
@@ -131,11 +140,25 @@ impl FileState {
         };
         let loc = match &self.loc {
             Some(LocRef::Inline(h)) => Loc::Inline(hex::decode(h).unwrap_or_default()),
-            Some(LocRef::Pack(pack, off, len)) => Loc::Pack { pack: *pack, off: *off, len: *len },
-            Some(LocRef::Chunks(cs)) => Loc::Chunks(cs.iter().map(|(h, l)| ChunkRef { hash: *h, len: *l }).collect()),
+            Some(LocRef::Pack(pack, off, len)) => Loc::Pack {
+                pack: *pack,
+                off: *off,
+                len: *len,
+            },
+            Some(LocRef::Chunks(cs)) => Loc::Chunks(
+                cs.iter()
+                    .map(|(h, l)| ChunkRef { hash: *h, len: *l })
+                    .collect(),
+            ),
             None => Loc::Unresolved,
         };
-        Entry { path: path.to_string(), kind, size: self.size, hash: self.hash, loc }
+        Entry {
+            path: path.to_string(),
+            kind,
+            size: self.size,
+            hash: self.hash,
+            loc,
+        }
     }
 }
 
@@ -147,7 +170,10 @@ impl Commit {
 
     pub fn decode(expected: &Hash, data: &[u8]) -> Result<Commit> {
         let got = Hash::of(data);
-        anyhow::ensure!(&got == expected, "commit hash mismatch: expected {expected}, got {got}");
+        anyhow::ensure!(
+            &got == expected,
+            "commit hash mismatch: expected {expected}, got {got}"
+        );
         Ok(serde_json::from_slice(data)?)
     }
 
@@ -211,7 +237,9 @@ pub fn validate_branch(name: &str) -> Result<()> {
             && !name.ends_with('/')
             && !name.contains("//")
             && !name.split('/').any(|s| s == "." || s == "..")
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c)),
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c)),
         "invalid branch name {name:?}"
     );
     Ok(())

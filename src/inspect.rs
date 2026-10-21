@@ -29,8 +29,12 @@ fn kind(k: Kind) -> &'static str {
 fn loc_json(l: &Loc) -> Value {
     match l {
         Loc::Inline(b) => json!({"type": "inline", "bytes": b.len()}),
-        Loc::Pack { pack, off, len } => json!({"type": "pack", "pack": pack.hex(), "off": off, "len": len}),
-        Loc::Chunks(cs) => json!({"type": "chunks", "chunks": cs.iter().map(|c| json!({"hash": c.hash.hex(), "len": c.len})).collect::<Vec<_>>()}),
+        Loc::Pack { pack, off, len } => {
+            json!({"type": "pack", "pack": pack.hex(), "off": off, "len": len})
+        }
+        Loc::Chunks(cs) => {
+            json!({"type": "chunks", "chunks": cs.iter().map(|c| json!({"hash": c.hash.hex(), "len": c.len})).collect::<Vec<_>>()})
+        }
         Loc::Unresolved => json!({"type": "unresolved"}),
     }
 }
@@ -64,7 +68,11 @@ impl Inspector {
             let c = self.ctx.commit(&h).await?;
             refs.push(json!({"name": name, "commit": h.hex(), "subject": c.subject(), "date": c.committer_date, "files": c.files, "bytes": c.bytes}));
         }
-        let local = self.ctx.local.as_ref().map(|l| json!({"dir": l.dir.display().to_string(), "bare": l.config.bare}));
+        let local = self
+            .ctx
+            .local
+            .as_ref()
+            .map(|l| json!({"dir": l.dir.display().to_string(), "bare": l.config.bare}));
         Ok(json!({
             "store": self.ctx.repo.store.url,
             "default_branch": default,
@@ -76,11 +84,19 @@ impl Inspector {
 
     /// What the local repository holds, by part (walks its files: only on request).
     async fn local(&self) -> Result<Value> {
-        let l = self.ctx.local.as_ref().context("reading the store directly: nothing is kept locally")?;
+        let l = self
+            .ctx
+            .local
+            .as_ref()
+            .context("reading the store directly: nothing is kept locally")?;
         let size = |d: &str| -> (u64, u64) {
             let mut n = 0;
             let mut b = 0;
-            for e in ignore::WalkBuilder::new(l.dir.join(d)).standard_filters(false).build().flatten() {
+            for e in ignore::WalkBuilder::new(l.dir.join(d))
+                .standard_filters(false)
+                .build()
+                .flatten()
+            {
                 if let Ok(m) = e.metadata() {
                     if m.is_file() {
                         n += 1;
@@ -90,13 +106,18 @@ impl Inspector {
             }
             (n, b)
         };
-        let parts: Vec<Value> = [("blobs", "file contents"), ("objects", "commits and pages"), ("graph", "commit graph"), ("index", "Git ids")]
-            .iter()
-            .map(|(d, what)| {
-                let (n, b) = size(d);
-                json!({"name": d, "what": what, "files": n, "bytes": b})
-            })
-            .collect();
+        let parts: Vec<Value> = [
+            ("blobs", "file contents"),
+            ("objects", "commits and pages"),
+            ("graph", "commit graph"),
+            ("index", "Git ids"),
+        ]
+        .iter()
+        .map(|(d, what)| {
+            let (n, b) = size(d);
+            json!({"name": d, "what": what, "files": n, "bytes": b})
+        })
+        .collect();
         Ok(json!({"dir": l.dir.display().to_string(), "bare": l.config.bare, "parts": parts}))
     }
 
@@ -165,7 +186,9 @@ impl Inspector {
         let data = self.ctx.repo.store.get(key).await?;
         let text = String::from_utf8_lossy(&data);
         let shown: String = text.chars().take(5000).collect();
-        Ok(json!({"key": key, "bytes": data.len(), "text": shown, "truncated": text.len() > shown.len()}))
+        Ok(
+            json!({"key": key, "bytes": data.len(), "text": shown, "truncated": text.len() > shown.len()}),
+        )
     }
 
     async fn page(&self, h: &str) -> Result<Value> {
@@ -214,13 +237,19 @@ impl Inspector {
         let h = self.commit_id(rev).await?;
         let c = self.ctx.commit(&h).await?;
         let dir = dir.trim_matches('/');
-        let (lo, hi) = if dir.is_empty() { (String::new(), "\u{10FFFF}".to_string()) } else { (format!("{dir}/"), format!("{dir}0")) };
+        let (lo, hi) = if dir.is_empty() {
+            (String::new(), "\u{10FFFF}".to_string())
+        } else {
+            (format!("{dir}/"), format!("{dir}0"))
+        };
         let mut pages = vec![];
         let mut leaves = 0;
-        let mut storage: BTreeMap<String, (String, u64, u64, std::collections::BTreeSet<String>)> = BTreeMap::new();
+        let mut storage: BTreeMap<String, (String, u64, u64, std::collections::BTreeSet<String>)> =
+            BTreeMap::new();
         let mut files = 0u64;
         // (page, parent, range low (exclusive), range high (inclusive))
-        let mut stack: Vec<(Hash, Option<Hash>, Option<String>, Option<String>)> = vec![(c.root, None, None, None)];
+        let mut stack: Vec<(Hash, Option<Hash>, Option<String>, Option<String>)> =
+            vec![(c.root, None, None, None)];
         while let Some((ph, parent, rlo, rhi)) = stack.pop() {
             let p = self.ctx.repo.page(&ph).await?;
             let level = p.level();
@@ -229,7 +258,8 @@ impl Inspector {
                     let mut prev: Option<String> = rlo.clone();
                     let mut picked = vec![];
                     for ch in children {
-                        let overlaps = ch.key.as_str() >= lo.as_str() && prev.as_deref().is_none_or(|pv| pv < hi.as_str());
+                        let overlaps = ch.key.as_str() >= lo.as_str()
+                            && prev.as_deref().is_none_or(|pv| pv < hi.as_str());
                         if overlaps {
                             picked.push((ch.hash, Some(ph), prev.clone(), Some(ch.key.clone())));
                         }
@@ -243,26 +273,44 @@ impl Inspector {
                 }
                 Page::Leaf(es) => {
                     leaves += 1;
-                    let inside: Vec<&Entry> = es.iter().filter(|e| e.path.as_str() >= lo.as_str() && e.path.as_str() < hi.as_str()).collect();
+                    let inside: Vec<&Entry> = es
+                        .iter()
+                        .filter(|e| e.path.as_str() >= lo.as_str() && e.path.as_str() < hi.as_str())
+                        .collect();
                     files += inside.len() as u64;
                     for e in &inside {
                         match &e.loc {
                             Loc::Pack { pack, len, .. } => {
-                                let s = storage.entry(pack.hex()).or_insert(("pack".into(), 0, 0, Default::default()));
+                                let s = storage.entry(pack.hex()).or_insert((
+                                    "pack".into(),
+                                    0,
+                                    0,
+                                    Default::default(),
+                                ));
                                 s.1 += 1;
                                 s.2 += len;
                                 s.3.insert(ph.hex());
                             }
                             Loc::Chunks(cs) => {
                                 for ch in cs {
-                                    let s = storage.entry(ch.hash.hex()).or_insert(("chunk".into(), 0, 0, Default::default()));
+                                    let s = storage.entry(ch.hash.hex()).or_insert((
+                                        "chunk".into(),
+                                        0,
+                                        0,
+                                        Default::default(),
+                                    ));
                                     s.1 += 1;
                                     s.2 += ch.len;
                                     s.3.insert(ph.hex());
                                 }
                             }
                             _ => {
-                                let s = storage.entry("inline".into()).or_insert(("inline".into(), 0, 0, Default::default()));
+                                let s = storage.entry("inline".into()).or_insert((
+                                    "inline".into(),
+                                    0,
+                                    0,
+                                    Default::default(),
+                                ));
                                 s.1 += 1;
                                 s.2 += e.size;
                                 s.3.insert(ph.hex());
@@ -279,7 +327,9 @@ impl Inspector {
         }
         let mut storage: Vec<Value> = storage.into_iter().map(|(h, (kind, n, b, ls))| json!({"hash": h, "kind": kind, "files": n, "bytes": b, "leaves": ls})).collect();
         storage.sort_by(|a, b| b["bytes"].as_u64().cmp(&a["bytes"].as_u64()));
-        Ok(json!({"commit": h.hex(), "root": c.root.hex(), "dir": dir, "files": files, "leaves": leaves, "pages": pages, "storage": storage}))
+        Ok(
+            json!({"commit": h.hex(), "root": c.root.hex(), "dir": dir, "files": files, "leaves": leaves, "pages": pages, "storage": storage}),
+        )
     }
 
     /// A file and the physical path to its bytes: the pages from the root to its leaf, its
@@ -293,23 +343,41 @@ impl Inspector {
             let p = self.ctx.repo.page(&cur).await?;
             match &*p {
                 Page::Node { level, children } => {
-                    let i = children.partition_point(|ch| ch.key.as_str() < path).min(children.len() - 1);
-                    let lo = if i == 0 { None } else { Some(children[i - 1].key.clone()) };
+                    let i = children
+                        .partition_point(|ch| ch.key.as_str() < path)
+                        .min(children.len() - 1);
+                    let lo = if i == 0 {
+                        None
+                    } else {
+                        Some(children[i - 1].key.clone())
+                    };
                     spine.push(json!({"hash": cur.hex(), "level": level, "children": children.len(), "index": i,
                         "range": [lo, children[i].key], "files": children.iter().map(|c| c.files).sum::<u64>()}));
                     cur = children[i].hash;
                 }
                 Page::Leaf(es) => {
-                    let i = es.binary_search_by(|e| e.path.as_str().cmp(path)).ok().with_context(|| format!("{path} is not in this commit"))?;
+                    let i = es
+                        .binary_search_by(|e| e.path.as_str().cmp(path))
+                        .ok()
+                        .with_context(|| format!("{path} is not in this commit"))?;
                     spine.push(json!({"hash": cur.hex(), "level": 0, "children": es.len(), "index": i,
                         "range": [es.first().map(|e| e.path.clone()), es.last().map(|e| e.path.clone())]}));
                     break es[i].clone();
                 }
             }
         };
-        let data = self.ctx.repo.read_files(std::slice::from_ref(&entry)).await?.remove(0);
+        let data = self
+            .ctx
+            .repo
+            .read_files(std::slice::from_ref(&entry))
+            .await?
+            .remove(0);
         let text = !data.iter().take(8000).any(|&b| b == 0);
-        let preview = if text { String::from_utf8_lossy(&data[..data.len().min(6000)]).into_owned() } else { String::new() };
+        let preview = if text {
+            String::from_utf8_lossy(&data[..data.len().min(6000)]).into_owned()
+        } else {
+            String::new()
+        };
         let mut neighbors = Value::Null;
         if let Loc::Pack { pack, .. } = &entry.loc {
             neighbors = self.pack_map(pack, Some(h)).await.unwrap_or(Value::Null);
@@ -327,10 +395,22 @@ impl Inspector {
     async fn pack_map(&self, pack: &Hash, commit: Option<Hash>) -> Result<Value> {
         let key = pack_key(pack);
         let size = self.stored_size(&key).await.context("pack not found")?;
-        let tail = self.ctx.repo.store.get_ranges(&key, &[size - 12..size]).await?.remove(0);
+        let tail = self
+            .ctx
+            .repo
+            .store
+            .get_ranges(&key, &[size - 12..size])
+            .await?
+            .remove(0);
         anyhow::ensure!(&tail[4..] == b"PAILPK1\0", "not a pail pack");
         let footer_len = u32::from_le_bytes(tail[..4].try_into().unwrap()) as u64;
-        let footer = self.ctx.repo.store.get_ranges(&key, &[size - 12 - footer_len..size - 12]).await?.remove(0);
+        let footer = self
+            .ctx
+            .repo
+            .store
+            .get_ranges(&key, &[size - 12 - footer_len..size - 12])
+            .await?
+            .remove(0);
         let mut r = crate::enc::Reader::new(&footer);
         let n = r.varint()?;
         let mut blobs = vec![];
@@ -391,12 +471,28 @@ impl Inspector {
             ["store"] => self.store_prefixes().await,
             ["local"] => self.local().await,
             ["raw"] => self.raw(q.get("key").context("key is required")?).await,
-            ["log"] => self.log(rev, q.get("n").and_then(|n| n.parse().ok()).unwrap_or(50), q.get("skip").and_then(|n| n.parse().ok()).unwrap_or(0)).await,
+            ["log"] => {
+                self.log(
+                    rev,
+                    q.get("n").and_then(|n| n.parse().ok()).unwrap_or(50),
+                    q.get("skip").and_then(|n| n.parse().ok()).unwrap_or(0),
+                )
+                .await
+            }
             ["commit", r] => self.commit(r).await,
             ["page", h] => self.page(h).await,
-            ["cover"] => self.cover(rev, q.get("path").map(String::as_str).unwrap_or("")).await,
-            ["tree"] => self.tree(rev, q.get("path").map(String::as_str).unwrap_or("")).await,
-            ["file"] => self.file(rev, q.get("path").context("path is required")?).await,
+            ["cover"] => {
+                self.cover(rev, q.get("path").map(String::as_str).unwrap_or(""))
+                    .await
+            }
+            ["tree"] => {
+                self.tree(rev, q.get("path").map(String::as_str).unwrap_or(""))
+                    .await
+            }
+            ["file"] => {
+                self.file(rev, q.get("path").context("path is required")?)
+                    .await
+            }
             ["pack", h] => {
                 let c = self.commit_id(rev).await?;
                 self.pack_map(&Hash::from_hex(h)?, Some(c)).await
@@ -431,13 +527,26 @@ fn decode(s: &str) -> String {
 
 /// Serve the inspector until interrupted.
 pub async fn serve(ctx: Ctx, addr: &str, open: bool) -> Result<()> {
-    let server = tiny_http::Server::http(addr).map_err(|e| anyhow::anyhow!("listening on {addr}: {e}"))?;
+    let server =
+        tiny_http::Server::http(addr).map_err(|e| anyhow::anyhow!("listening on {addr}: {e}"))?;
     let url = format!("http://{addr}/");
-    println!("inspecting {} at {url}  (ctrl-c to stop)", ctx.repo.store.url);
+    println!(
+        "inspecting {} at {url}  (ctrl-c to stop)",
+        ctx.repo.store.url
+    );
     if open {
-        let _ = std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(&url).spawn();
+        let _ = std::process::Command::new(if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        })
+        .arg(&url)
+        .spawn();
     }
-    let ins = Arc::new(Inspector { ctx, prefixes: tokio::sync::OnceCell::new() });
+    let ins = Arc::new(Inspector {
+        ctx,
+        prefixes: tokio::sync::OnceCell::new(),
+    });
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
         for req in server.incoming_requests() {
@@ -454,16 +563,22 @@ pub async fn serve(ctx: Ctx, addr: &str, open: bool) -> Result<()> {
                         (decode(k), decode(v))
                     })
                     .collect();
-                let header = |v: &str| tiny_http::Header::from_bytes(&b"Content-Type"[..], v.as_bytes()).unwrap();
+                let header = |v: &str| {
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], v.as_bytes()).unwrap()
+                };
                 let resp = if path.starts_with("/api/") {
                     match handle.block_on(ins.route(path, &q)) {
-                        Ok(v) => tiny_http::Response::from_string(v.to_string()).with_header(header("application/json")),
-                        Err(e) => tiny_http::Response::from_string(json!({"error": format!("{e:#}")}).to_string())
-                            .with_status_code(400)
+                        Ok(v) => tiny_http::Response::from_string(v.to_string())
                             .with_header(header("application/json")),
+                        Err(e) => tiny_http::Response::from_string(
+                            json!({"error": format!("{e:#}")}).to_string(),
+                        )
+                        .with_status_code(400)
+                        .with_header(header("application/json")),
                     }
                 } else {
-                    tiny_http::Response::from_string(PAGE).with_header(header("text/html; charset=utf-8"))
+                    tiny_http::Response::from_string(PAGE)
+                        .with_header(header("text/html; charset=utf-8"))
                 };
                 let _ = req.respond(resp);
             });

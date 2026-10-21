@@ -38,7 +38,11 @@ pub struct CloneStats {
 
 impl CloneStats {
     pub fn add(&self, cloned: bool, bytes: u64) {
-        let (n, b) = if cloned { (&self.cloned, &self.cloned_bytes) } else { (&self.copied, &self.copied_bytes) };
+        let (n, b) = if cloned {
+            (&self.cloned, &self.cloned_bytes)
+        } else {
+            (&self.copied, &self.copied_bytes)
+        };
         n.fetch_add(1, Ordering::Relaxed);
         b.fetch_add(bytes, Ordering::Relaxed);
     }
@@ -67,7 +71,9 @@ mod imp {
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
             Some(libc::ENOTSUP) | Some(libc::EXDEV) => Ok(false),
-            _ => Err(err).with_context(|| format!("clonefile {} → {}", src.display(), dst.display())),
+            _ => {
+                Err(err).with_context(|| format!("clonefile {} → {}", src.display(), dst.display()))
+            }
         }
     }
 }
@@ -106,7 +112,10 @@ mod imp {
         drop(d);
         let _ = std::fs::remove_file(dst);
         match err.raw_os_error() {
-            Some(libc::EOPNOTSUPP) | Some(libc::EXDEV) | Some(libc::EINVAL) | Some(libc::ENOTTY) => Ok(false),
+            Some(libc::EOPNOTSUPP)
+            | Some(libc::EXDEV)
+            | Some(libc::EINVAL)
+            | Some(libc::ENOTTY) => Ok(false),
             _ => Err(err).with_context(|| format!("FICLONE {} → {}", src.display(), dst.display())),
         }
     }
@@ -129,8 +138,14 @@ impl Blobs {
         let mut data = Vec::with_capacity(md.len() as usize);
         f.read_to_end(&mut data).ok()?;
         let day = std::time::Duration::from_secs(86400);
-        if md.accessed().ok().and_then(|a| a.elapsed().ok()).is_none_or(|age| age > day) {
-            let _ = f.set_times(std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now()));
+        if md
+            .accessed()
+            .ok()
+            .and_then(|a| a.elapsed().ok())
+            .is_none_or(|age| age > day)
+        {
+            let _ =
+                f.set_times(std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now()));
         }
         Some(data.into())
     }
@@ -141,7 +156,10 @@ impl Blobs {
         for d in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
             for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
                 if let Ok(md) = f.metadata() {
-                    let used = md.accessed().or_else(|_| md.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                    let used = md
+                        .accessed()
+                        .or_else(|_| md.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
                     if md.is_file() && !f.file_name().to_string_lossy().contains(".tmp") {
                         out.push((f.path(), md.len(), used));
                     }
@@ -169,7 +187,11 @@ impl Blobs {
             return Ok(());
         }
         std::fs::create_dir_all(p.parent().unwrap())?;
-        let tmp = p.with_extension(format!("tmp{}.{}", std::process::id(), rand::random::<u32>()));
+        let tmp = p.with_extension(format!(
+            "tmp{}.{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
         std::fs::write(&tmp, data)?;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o444))?;
         std::fs::rename(&tmp, &p)?;
@@ -198,7 +220,8 @@ impl Blobs {
         if clone_path(&src, dst)? {
             stats.add(true, size);
         } else {
-            std::fs::copy(&src, dst).with_context(|| format!("copying blob to {}", dst.display()))?;
+            std::fs::copy(&src, dst)
+                .with_context(|| format!("copying blob to {}", dst.display()))?;
             stats.add(false, size);
         }
         Ok(())

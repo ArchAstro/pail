@@ -99,7 +99,11 @@ fn pct(v: &mut [f64], p: f64) -> Option<f64> {
 }
 
 fn mb(n: u64) -> String {
-    if n >= 1 << 20 { format!("{:.1} MB", n as f64 / 1048576.0) } else { format!("{:.1} KB", n as f64 / 1024.0) }
+    if n >= 1 << 20 {
+        format!("{:.1} MB", n as f64 / 1048576.0)
+    } else {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    }
 }
 
 /// Store counters before/after a measured block.
@@ -110,10 +114,22 @@ struct Meter {
 }
 
 fn meter(repo: &Repo) -> Meter {
-    Meter { t: Instant::now(), s: repo.store.stats.snapshot(), cas: repo.store.stats.cas.load(Relaxed) }
+    Meter {
+        t: Instant::now(),
+        s: repo.store.stats.snapshot(),
+        cas: repo.store.stats.cas.load(Relaxed),
+    }
 }
 
-fn finish(m: Meter, repo: &Repo, scenario: &str, what: &str, ops: u64, mut lat: Vec<f64>, note: String) -> Row {
+fn finish(
+    m: Meter,
+    repo: &Repo,
+    scenario: &str,
+    what: &str,
+    ops: u64,
+    mut lat: Vec<f64>,
+    note: String,
+) -> Row {
     let s = repo.store.stats.snapshot();
     Row {
         scenario: scenario.into(),
@@ -132,7 +148,10 @@ fn finish(m: Meter, repo: &Repo, scenario: &str, what: &str, ops: u64, mut lat: 
 }
 
 fn text(rng: &mut StdRng, len: usize) -> Bytes {
-    const WORDS: &[&str] = &["let", "fn", "pail", "commit", "page", "pack", "chunk", "branch", "store", "range", "=", "{", "}", "(", ")", ";", "\n", "    "];
+    const WORDS: &[&str] = &[
+        "let", "fn", "pail", "commit", "page", "pack", "chunk", "branch", "store", "range", "=",
+        "{", "}", "(", ")", ";", "\n", "    ",
+    ];
     let mut s = String::with_capacity(len + 16);
     while s.len() < len {
         s.push_str(WORDS[rng.random_range(0..WORDS.len())]);
@@ -165,18 +184,41 @@ struct Bench {
 
 impl Bench {
     /// Write new contents for `paths` and commit them to `branch` on top of `base`.
-    async fn edit(&self, branch: &str, base: Option<Hash>, paths: &[String], rng: &mut StdRng, msg: &str) -> Result<pail::repo::CommitOutcome> {
+    async fn edit(
+        &self,
+        branch: &str,
+        base: Option<Hash>,
+        paths: &[String],
+        rng: &mut StdRng,
+        msg: &str,
+    ) -> Result<pail::repo::CommitOutcome> {
         let inputs: Vec<FileInput> = paths
             .iter()
-            .map(|p| FileInput { path: p.clone(), kind: pail::manifest::Kind::File, data: { let n = rng.random_range(200..6000); text(rng, n) } })
+            .map(|p| FileInput {
+                path: p.clone(),
+                kind: pail::manifest::Kind::File,
+                data: {
+                    let n = rng.random_range(200..6000);
+                    text(rng, n)
+                },
+            })
             .collect();
         let entries = self.repo.write_files(&inputs, &HashMap::new()).await?;
-        let delta: Delta = entries.into_iter().map(|e| (e.path.clone(), Some(e))).collect();
+        let delta: Delta = entries
+            .into_iter()
+            .map(|e| (e.path.clone(), Some(e)))
+            .collect();
         self.repo.commit(req(branch, base, delta, msg)).await
     }
 
     fn pick(&self, rng: &mut StdRng, n: usize) -> Vec<String> {
-        (0..n).map(|_| self.files[rng.random_range(0..self.files.len())].path.clone()).collect()
+        (0..n)
+            .map(|_| {
+                self.files[rng.random_range(0..self.files.len())]
+                    .path
+                    .clone()
+            })
+            .collect()
     }
 
     fn branch(&self, name: &str) -> String {
@@ -201,10 +243,16 @@ impl Bench {
             r.what,
             r.secs,
             r.ops,
-            r.p50_ms.map(|p| format!("  p50 {p:6.0} ms  p95 {:6.0} ms", r.p95_ms.unwrap_or(0.0))).unwrap_or_default(),
+            r.p50_ms
+                .map(|p| format!("  p50 {p:6.0} ms  p95 {:6.0} ms", r.p95_ms.unwrap_or(0.0)))
+                .unwrap_or_default(),
             r.puts,
             mb(r.up),
-            if r.note.is_empty() { String::new() } else { format!("  {}", r.note) }
+            if r.note.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", r.note)
+            }
         );
         self.rows.push(r);
     }
@@ -221,10 +269,22 @@ impl Bench {
             let n = rng.random_range(1..=3);
             let paths = self.pick(&mut rng, n);
             let t = Instant::now();
-            head = Some(self.edit(&b, head, &paths, &mut rng, &format!("small {i}")).await?.commit);
+            head = Some(
+                self.edit(&b, head, &paths, &mut rng, &format!("small {i}"))
+                    .await?
+                    .commit,
+            );
             lat.push(t.elapsed().as_secs_f64() * 1000.0);
         }
-        let r = finish(m, &self.repo, "small", "200 commits of 1-3 files, one writer", 200, lat, String::new());
+        let r = finish(
+            m,
+            &self.repo,
+            "small",
+            "200 commits of 1-3 files, one writer",
+            200,
+            lat,
+            String::new(),
+        );
         self.push(r);
         if let Some(g) = &self.git {
             let r = g.small(&self.files)?;
@@ -245,26 +305,68 @@ impl Bench {
             v
         };
         let m = meter(&self.repo);
-        let out = self.edit(&b, Some(self.base), &paths, &mut rng, "edit 2000").await?;
-        let r = finish(m, &self.repo, "wide", "edit 2,000 files across the tree", 1, vec![], format!("{} pages", out.pages_written));
+        let out = self
+            .edit(&b, Some(self.base), &paths, &mut rng, "edit 2000")
+            .await?;
+        let r = finish(
+            m,
+            &self.repo,
+            "wide",
+            "edit 2,000 files across the tree",
+            1,
+            vec![],
+            format!("{} pages", out.pages_written),
+        );
         self.push(r);
         // Add 5,000 new files in 50 new directories.
-        let new: Vec<String> = (0..5000).map(|i| format!("bench_new/d{:02}/f{i:05}.txt", i % 50)).collect();
+        let new: Vec<String> = (0..5000)
+            .map(|i| format!("bench_new/d{:02}/f{i:05}.txt", i % 50))
+            .collect();
         let m = meter(&self.repo);
-        let out = self.edit(&b, Some(out.commit), &new, &mut rng, "add 5000").await?;
-        let r = finish(m, &self.repo, "wide", "add 5,000 files", 1, vec![], format!("{} pages", out.pages_written));
+        let out = self
+            .edit(&b, Some(out.commit), &new, &mut rng, "add 5000")
+            .await?;
+        let r = finish(
+            m,
+            &self.repo,
+            "wide",
+            "add 5,000 files",
+            1,
+            vec![],
+            format!("{} pages", out.pages_written),
+        );
         self.push(r);
         // Delete the largest top-level directory under 3,000+ files.
         let (dir, n) = largest_dir(&self.files, 3000);
-        let delta: Delta = self.files.iter().filter(|e| e.path.starts_with(&format!("{dir}/"))).map(|e| (e.path.clone(), None)).collect();
+        let delta: Delta = self
+            .files
+            .iter()
+            .filter(|e| e.path.starts_with(&format!("{dir}/")))
+            .map(|e| (e.path.clone(), None))
+            .collect();
         let m = meter(&self.repo);
-        let out2 = self.repo.commit(req(&b, Some(out.commit), delta, "delete dir")).await?;
-        let r = finish(m, &self.repo, "wide", &format!("delete {dir}/ ({n} files)"), 1, vec![], format!("{} pages", out2.pages_written));
+        let out2 = self
+            .repo
+            .commit(req(&b, Some(out.commit), delta, "delete dir"))
+            .await?;
+        let r = finish(
+            m,
+            &self.repo,
+            "wide",
+            &format!("delete {dir}/ ({n} files)"),
+            1,
+            vec![],
+            format!("{} pages", out2.pages_written),
+        );
         self.push(r);
         // Rename a ~2,000-file directory: content is reused, only the manifest changes.
         let (rdir, rn) = largest_dir(&self.files, 2000);
         let mut delta: Delta = BTreeMap::new();
-        for e in self.files.iter().filter(|e| e.path.starts_with(&format!("{rdir}/"))) {
+        for e in self
+            .files
+            .iter()
+            .filter(|e| e.path.starts_with(&format!("{rdir}/")))
+        {
             delta.insert(e.path.clone(), None);
             let mut moved = e.clone();
             moved.path = format!("{rdir}_renamed/{}", &e.path[rdir.len() + 1..]);
@@ -272,8 +374,19 @@ impl Bench {
         }
         let b2 = self.fresh_branch("rename").await?;
         let m = meter(&self.repo);
-        let out3 = self.repo.commit(req(&b2, Some(self.base), delta, "rename dir")).await?;
-        let r = finish(m, &self.repo, "wide", &format!("rename {rdir}/ ({rn} files)"), 1, vec![], format!("{} pages", out3.pages_written));
+        let out3 = self
+            .repo
+            .commit(req(&b2, Some(self.base), delta, "rename dir"))
+            .await?;
+        let r = finish(
+            m,
+            &self.repo,
+            "wide",
+            &format!("rename {rdir}/ ({rn} files)"),
+            1,
+            vec![],
+            format!("{} pages", out3.pages_written),
+        );
         self.push(r);
         if let Some(g) = &self.git {
             for r in g.wide(&paths, &new, &dir, &rdir)? {
@@ -302,8 +415,18 @@ impl Bench {
                         let path = format!("bench_writers/w{i:02}/f{j:03}.txt");
                         let data = text(&mut rng, 2000);
                         let t = Instant::now();
-                        let es = repo.write_files(&[FileInput { path: path.clone(), kind: pail::manifest::Kind::File, data }], &HashMap::new()).await?;
-                        let delta: Delta = es.into_iter().map(|e| (e.path.clone(), Some(e))).collect();
+                        let es = repo
+                            .write_files(
+                                &[FileInput {
+                                    path: path.clone(),
+                                    kind: pail::manifest::Kind::File,
+                                    data,
+                                }],
+                                &HashMap::new(),
+                            )
+                            .await?;
+                        let delta: Delta =
+                            es.into_iter().map(|e| (e.path.clone(), Some(e))).collect();
                         let out = repo.commit(req(&b, head, delta, "w")).await?;
                         head = Some(out.commit);
                         attempts += out.attempts;
@@ -321,7 +444,19 @@ impl Bench {
             }
             let n = (w * per) as u64;
             let secs = m.t.elapsed().as_secs_f64();
-            let r = finish(m, &self.repo, "writers", &format!("{w} writer(s) x {per} commits, disjoint paths"), n, lat, format!("{:.1} commits/s, {:.2} attempts/commit", n as f64 / secs, attempts as f64 / n as f64));
+            let r = finish(
+                m,
+                &self.repo,
+                "writers",
+                &format!("{w} writer(s) x {per} commits, disjoint paths"),
+                n,
+                lat,
+                format!(
+                    "{:.1} commits/s, {:.2} attempts/commit",
+                    n as f64 / secs,
+                    attempts as f64 / n as f64
+                ),
+            );
             self.push(r);
             if let Some(g) = &self.git {
                 let r = g.writers(w, per)?;
@@ -345,9 +480,22 @@ impl Bench {
                 let (mut ok, mut conflicts) = (0u64, 0u64);
                 let mut head = Some(base);
                 for j in 0..per {
-                    let path = if rng.random_bool(0.3) { "bench_hot/shared.txt".to_string() } else { format!("bench_hot/w{i}/f{j}.txt") };
+                    let path = if rng.random_bool(0.3) {
+                        "bench_hot/shared.txt".to_string()
+                    } else {
+                        format!("bench_hot/w{i}/f{j}.txt")
+                    };
                     let data = text(&mut rng, 1000);
-                    let es = repo.write_files(&[FileInput { path, kind: pail::manifest::Kind::File, data }], &HashMap::new()).await?;
+                    let es = repo
+                        .write_files(
+                            &[FileInput {
+                                path,
+                                kind: pail::manifest::Kind::File,
+                                data,
+                            }],
+                            &HashMap::new(),
+                        )
+                        .await?;
                     let delta: Delta = es.into_iter().map(|e| (e.path.clone(), Some(e))).collect();
                     match repo.commit(req(&b, head, delta, "h")).await {
                         Ok(out) => {
@@ -371,7 +519,15 @@ impl Bench {
             ok += a;
             conflicts += c;
         }
-        let r = finish(m, &self.repo, "hot", "8 writers x 20, 30% touch one shared file", ok + conflicts, vec![], format!("{ok} landed, {conflicts} conflicts (stale edits of the shared file)"));
+        let r = finish(
+            m,
+            &self.repo,
+            "hot",
+            "8 writers x 20, 30% touch one shared file",
+            ok + conflicts,
+            vec![],
+            format!("{ok} landed, {conflicts} conflicts (stale edits of the shared file)"),
+        );
         self.push(r);
         Ok(())
     }
@@ -386,12 +542,27 @@ impl Bench {
             let b = self.fresh_branch(&format!("stack{i:02}")).await?;
             let mut head = Some(self.base);
             for j in 0..5 {
-                let paths = vec![format!("bench_stacks/s{i:02}/c{j}.txt"), format!("bench_stacks/s{i:02}/shared.txt")];
-                head = Some(self.edit(&b, head, &paths, &mut rng, &format!("s{i} c{j}")).await?.commit);
+                let paths = vec![
+                    format!("bench_stacks/s{i:02}/c{j}.txt"),
+                    format!("bench_stacks/s{i:02}/shared.txt"),
+                ];
+                head = Some(
+                    self.edit(&b, head, &paths, &mut rng, &format!("s{i} c{j}"))
+                        .await?
+                        .commit,
+                );
             }
             names.push(b);
         }
-        let r = finish(build, &self.repo, "stacks", "build 40 branches x 5-commit stacks", 200, vec![], String::new());
+        let r = finish(
+            build,
+            &self.repo,
+            "stacks",
+            "build 40 branches x 5-commit stacks",
+            200,
+            vec![],
+            String::new(),
+        );
         self.push(r);
         // Land them one by one while main also gets unrelated commits.
         let m = meter(&self.repo);
@@ -401,15 +572,31 @@ impl Bench {
         for (i, b) in names.iter().enumerate() {
             if i % 4 == 0 {
                 let paths = vec![format!("bench_stacks/main/{i}.txt")];
-                self.edit(&main, head, &paths, &mut rng, "main moves").await?;
+                self.edit(&main, head, &paths, &mut rng, "main moves")
+                    .await?;
             }
             let t = Instant::now();
-            let out = self.repo.land_stack(b, &main, "Lander <l@x>", "1700000000 +0000").await?;
+            let out = self
+                .repo
+                .land_stack(b, &main, "Lander <l@x>", "1700000000 +0000")
+                .await?;
             head = Some(out.tip);
             lat.push(t.elapsed().as_secs_f64() * 1000.0);
-            if out.fast_forward { ff += 1 } else { replay += 1 }
+            if out.fast_forward {
+                ff += 1
+            } else {
+                replay += 1
+            }
         }
-        let r = finish(m, &self.repo, "stacks", "land 40 stacks while main moves", 40, lat, format!("{ff} fast-forward, {replay} replayed"));
+        let r = finish(
+            m,
+            &self.repo,
+            "stacks",
+            "land 40 stacks while main moves",
+            40,
+            lat,
+            format!("{ff} fast-forward, {replay} replayed"),
+        );
         self.push(r);
         // Stacked branches: b2 on b1 on b0; landing b2 lands all three.
         let mut prev = self.base;
@@ -420,14 +607,29 @@ impl Bench {
             let mut h = Some(prev);
             for j in 0..4 {
                 let paths = vec![format!("bench_chain/b{k}/c{j}.txt")];
-                h = Some(self.edit(&b, h, &paths, &mut rng, &format!("chain{k} c{j}")).await?.commit);
+                h = Some(
+                    self.edit(&b, h, &paths, &mut rng, &format!("chain{k} c{j}"))
+                        .await?
+                        .commit,
+                );
             }
             prev = h.unwrap();
             chain.push(b);
         }
         let m = meter(&self.repo);
-        let out = self.repo.land_stack(&chain[2], &main, "Lander <l@x>", "1700000000 +0000").await?;
-        let r = finish(m, &self.repo, "stacks", "land a 3-branch chain (12 commits) at once", 1, vec![], format!("{} commits landed", out.landed.len()));
+        let out = self
+            .repo
+            .land_stack(&chain[2], &main, "Lander <l@x>", "1700000000 +0000")
+            .await?;
+        let r = finish(
+            m,
+            &self.repo,
+            "stacks",
+            "land a 3-branch chain (12 commits) at once",
+            1,
+            vec![],
+            format!("{} commits landed", out.landed.len()),
+        );
         self.push(r);
         // 8 landers racing for main.
         let mut racers = vec![];
@@ -447,7 +649,9 @@ impl Bench {
             let main = main.clone();
             tasks.push(tokio::spawn(async move {
                 let t = Instant::now();
-                let out = repo.land_stack(&b, &main, "Lander <l@x>", "1700000000 +0000").await?;
+                let out = repo
+                    .land_stack(&b, &main, "Lander <l@x>", "1700000000 +0000")
+                    .await?;
                 Ok::<_, anyhow::Error>((t.elapsed().as_secs_f64() * 1000.0, out.attempts))
             }));
         }
@@ -458,7 +662,15 @@ impl Bench {
             lat.push(l);
             attempts += a;
         }
-        let r = finish(m, &self.repo, "stacks", "8 landers racing (3-commit stacks)", 8, lat, format!("{:.2} attempts/landing", attempts as f64 / 8.0));
+        let r = finish(
+            m,
+            &self.repo,
+            "stacks",
+            "8 landers racing (3-commit stacks)",
+            8,
+            lat,
+            format!("{:.2} attempts/landing", attempts as f64 / 8.0),
+        );
         self.push(r);
         Ok(())
     }
@@ -467,20 +679,75 @@ impl Bench {
         let b = self.fresh_branch("bigfile").await?;
         // Fresh bytes every run: chunks left in the store by an earlier run would make the
         // first upload look free.
-        let mut rng = StdRng::seed_from_u64(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos() as u64);
+        let mut rng = StdRng::seed_from_u64(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos() as u64,
+        );
         let mut data = vec![0u8; 256 << 20];
         rng.fill(&mut data[..]);
         let m = meter(&self.repo);
-        let e = self.repo.write_files(&[FileInput { path: "bench_big/blob.bin".into(), kind: pail::manifest::Kind::File, data: Bytes::from(data.clone()) }], &HashMap::new()).await?;
-        let out = self.repo.commit(req(&b, Some(self.base), e.into_iter().map(|e| (e.path.clone(), Some(e))).collect(), "big")).await?;
-        let r = finish(m, &self.repo, "bigfile", "add a 256 MB file", 1, vec![], String::new());
+        let e = self
+            .repo
+            .write_files(
+                &[FileInput {
+                    path: "bench_big/blob.bin".into(),
+                    kind: pail::manifest::Kind::File,
+                    data: Bytes::from(data.clone()),
+                }],
+                &HashMap::new(),
+            )
+            .await?;
+        let out = self
+            .repo
+            .commit(req(
+                &b,
+                Some(self.base),
+                e.into_iter().map(|e| (e.path.clone(), Some(e))).collect(),
+                "big",
+            ))
+            .await?;
+        let r = finish(
+            m,
+            &self.repo,
+            "bigfile",
+            "add a 256 MB file",
+            1,
+            vec![],
+            String::new(),
+        );
         self.push(r);
         let mid = 128 << 20;
         rng.fill(&mut data[mid..mid + (1 << 20)]);
         let m = meter(&self.repo);
-        let e = self.repo.write_files(&[FileInput { path: "bench_big/blob.bin".into(), kind: pail::manifest::Kind::File, data: Bytes::from(data) }], &HashMap::new()).await?;
-        self.repo.commit(req(&b, Some(out.commit), e.into_iter().map(|e| (e.path.clone(), Some(e))).collect(), "big edit")).await?;
-        let r = finish(m, &self.repo, "bigfile", "change 1 MB in its middle", 1, vec![], "only the touched chunks upload".into());
+        let e = self
+            .repo
+            .write_files(
+                &[FileInput {
+                    path: "bench_big/blob.bin".into(),
+                    kind: pail::manifest::Kind::File,
+                    data: Bytes::from(data),
+                }],
+                &HashMap::new(),
+            )
+            .await?;
+        self.repo
+            .commit(req(
+                &b,
+                Some(out.commit),
+                e.into_iter().map(|e| (e.path.clone(), Some(e))).collect(),
+                "big edit",
+            ))
+            .await?;
+        let r = finish(
+            m,
+            &self.repo,
+            "bigfile",
+            "change 1 MB in its middle",
+            1,
+            vec![],
+            "only the touched chunks upload".into(),
+        );
         self.push(r);
         Ok(())
     }
@@ -492,10 +759,17 @@ impl Bench {
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }
-        run(Command::new(&bin).args(["clone", store]).arg(&dir).args(["-b", &b]))?;
+        run(Command::new(&bin)
+            .args(["clone", store])
+            .arg(&dir)
+            .args(["-b", &b]))?;
         let pail = |args: &[&str]| -> Result<f64> {
             let t = Instant::now();
-            run(Command::new(&bin).current_dir(&dir).args(args).env("PAIL_AUTHOR", "Bench <bench@pail>").env("PAIL_CONFIG_GLOBAL", "/dev/null"))?;
+            run(Command::new(&bin)
+                .current_dir(&dir)
+                .args(args)
+                .env("PAIL_AUTHOR", "Bench <bench@pail>")
+                .env("PAIL_CONFIG_GLOBAL", "/dev/null"))?;
             Ok(t.elapsed().as_secs_f64() * 1000.0)
         };
         let mut rng = StdRng::seed_from_u64(8);
@@ -513,9 +787,21 @@ impl Bench {
             commit.push(c);
             lat.push(a + c);
         }
-        let note = format!("add p50 {:.0} ms, commit+publish p50 {:.0} ms", pct(&mut add, 0.5).unwrap(), pct(&mut commit, 0.5).unwrap());
+        let note = format!(
+            "add p50 {:.0} ms, commit+publish p50 {:.0} ms",
+            pct(&mut add, 0.5).unwrap(),
+            pct(&mut commit, 0.5).unwrap()
+        );
         // The CLI talks to the store from another process, so the meter only covers time.
-        let mut r = finish(m, &self.repo, "wc", "50 x edit, add -A, commit (CLI, working copy)", 50, lat, note);
+        let mut r = finish(
+            m,
+            &self.repo,
+            "wc",
+            "50 x edit, add -A, commit (CLI, working copy)",
+            50,
+            lat,
+            note,
+        );
         (r.puts, r.gets, r.up, r.cas) = (0, 0, 0, 0);
         self.push(r);
         let _ = std::fs::remove_dir_all(&dir);
@@ -530,7 +816,9 @@ impl Bench {
         let bin = std::env::current_exe()?.with_file_name("pail");
         let repo_dir = work.join("reads.pail");
         if !repo_dir.exists() {
-            run(Command::new(&bin).args(["clone", "--bare", store]).arg(&repo_dir))?;
+            run(Command::new(&bin)
+                .args(["clone", "--bare", store])
+                .arg(&repo_dir))?;
         }
         let pail = |args: &[&str]| -> Result<f64> {
             let mut best = f64::MAX;
@@ -542,15 +830,49 @@ impl Bench {
             Ok(best)
         };
         let cases: Vec<(&str, Vec<String>)> = vec![
-            ("log of a 240-commit branch", vec!["log".into(), "--oneline".into(), self.branch("stacks-main")]),
-            ("log -- path on it", vec!["log".into(), "--oneline".into(), self.branch("stacks-main"), "--".into(), "bench_stacks/s07".into()]),
-            ("diff between branch tips (5,000+ files)", vec!["log".into(), "-1".into(), "--stat".into(), self.branch("wide")]),
-            ("show a 2,000-file commit (--stat)", vec!["show".into(), "--stat".into(), format!("{}~2", self.branch("wide"))]),
+            (
+                "log of a 240-commit branch",
+                vec!["log".into(), "--oneline".into(), self.branch("stacks-main")],
+            ),
+            (
+                "log -- path on it",
+                vec![
+                    "log".into(),
+                    "--oneline".into(),
+                    self.branch("stacks-main"),
+                    "--".into(),
+                    "bench_stacks/s07".into(),
+                ],
+            ),
+            (
+                "diff between branch tips (5,000+ files)",
+                vec![
+                    "log".into(),
+                    "-1".into(),
+                    "--stat".into(),
+                    self.branch("wide"),
+                ],
+            ),
+            (
+                "show a 2,000-file commit (--stat)",
+                vec![
+                    "show".into(),
+                    "--stat".into(),
+                    format!("{}~2", self.branch("wide")),
+                ],
+            ),
         ];
         for (what, args) in cases {
             let a: Vec<&str> = args.iter().map(String::as_str).collect();
             let secs = pail(&a)?;
-            self.push(Row { scenario: "reads".into(), system: "pail".into(), what: what.into(), secs, ops: 1, ..Default::default() });
+            self.push(Row {
+                scenario: "reads".into(),
+                system: "pail".into(),
+                what: what.into(),
+                secs,
+                ops: 1,
+                ..Default::default()
+            });
         }
         // Switching a working copy between two branches that differ by 2,000+ files.
         let wt = work.join("reads-wt");
@@ -558,14 +880,43 @@ impl Bench {
             std::fs::remove_dir_all(&wt)?;
         }
         let t = Instant::now();
-        run(Command::new(&bin).args(["clone", store]).arg(&wt).args(["-b", &self.branch("wide")]))?;
-        self.push(Row { scenario: "reads".into(), system: "pail".into(), what: "clone a working copy (33k files)".into(), secs: t.elapsed().as_secs_f64(), ops: 1, ..Default::default() });
+        run(Command::new(&bin)
+            .args(["clone", store])
+            .arg(&wt)
+            .args(["-b", &self.branch("wide")]))?;
+        self.push(Row {
+            scenario: "reads".into(),
+            system: "pail".into(),
+            what: "clone a working copy (33k files)".into(),
+            secs: t.elapsed().as_secs_f64(),
+            ops: 1,
+            ..Default::default()
+        });
         let t = Instant::now();
-        run(Command::new(&bin).current_dir(&wt).args(["switch", &self.branch("rename")]))?;
-        self.push(Row { scenario: "reads".into(), system: "pail".into(), what: "switch to a branch 9,000+ files away".into(), secs: t.elapsed().as_secs_f64(), ops: 1, ..Default::default() });
+        run(Command::new(&bin)
+            .current_dir(&wt)
+            .args(["switch", &self.branch("rename")]))?;
+        self.push(Row {
+            scenario: "reads".into(),
+            system: "pail".into(),
+            what: "switch to a branch 9,000+ files away".into(),
+            secs: t.elapsed().as_secs_f64(),
+            ops: 1,
+            ..Default::default()
+        });
         let t = Instant::now();
-        run(Command::new(&bin).current_dir(&wt).args(["worktree", "add", "--no-seed"]).arg(work.join("reads-wt2")))?;
-        self.push(Row { scenario: "reads".into(), system: "pail".into(), what: "worktree add (clones from the local store)".into(), secs: t.elapsed().as_secs_f64(), ops: 1, ..Default::default() });
+        run(Command::new(&bin)
+            .current_dir(&wt)
+            .args(["worktree", "add", "--no-seed"])
+            .arg(work.join("reads-wt2")))?;
+        self.push(Row {
+            scenario: "reads".into(),
+            system: "pail".into(),
+            what: "worktree add (clones from the local store)".into(),
+            secs: t.elapsed().as_secs_f64(),
+            ops: 1,
+            ..Default::default()
+        });
         let _ = std::fs::remove_dir_all(work.join("reads-wt2"));
         let _ = std::fs::remove_dir_all(&wt);
         Ok(())
@@ -603,14 +954,23 @@ struct GitSide {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    run(Command::new("git").arg("-C").arg(dir).args(args).env("GIT_AUTHOR_NAME", "Bench").env("GIT_AUTHOR_EMAIL", "b@x").env("GIT_COMMITTER_NAME", "Bench").env("GIT_COMMITTER_EMAIL", "b@x"))
+    run(Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Bench")
+        .env("GIT_AUTHOR_EMAIL", "b@x")
+        .env("GIT_COMMITTER_NAME", "Bench")
+        .env("GIT_COMMITTER_EMAIL", "b@x"))
 }
 
 fn write_text(root: &Path, path: &str, rng: &mut StdRng, len: usize) -> Result<()> {
     let p = root.join(path);
     std::fs::create_dir_all(p.parent().unwrap())?;
     // Picked paths can be symlinks (even to directories); replace them with a file.
-    if p.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+    if p.symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
         std::fs::remove_file(&p)?;
     }
     std::fs::write(p, text(rng, len))?;
@@ -622,9 +982,14 @@ impl GitSide {
     fn setup(mirror: &Path, base: &str, work: &Path) -> Result<GitSide> {
         let remote = work.join("git-remote.git");
         if !remote.exists() {
-            run(Command::new("git").args(["init", "-q", "--bare"]).arg(&remote))?;
+            run(Command::new("git")
+                .args(["init", "-q", "--bare"])
+                .arg(&remote))?;
             let objects = std::fs::canonicalize(mirror)?.join("objects");
-            std::fs::write(remote.join("objects/info/alternates"), format!("{}\n", objects.display()))?;
+            std::fs::write(
+                remote.join("objects/info/alternates"),
+                format!("{}\n", objects.display()),
+            )?;
             // The mirror may itself borrow objects; chain its alternates.
             if let Ok(more) = std::fs::read_to_string(objects.join("info/alternates")) {
                 let mut all = std::fs::read_to_string(remote.join("objects/info/alternates"))?;
@@ -633,17 +998,27 @@ impl GitSide {
             }
         }
         git(&remote, &["update-ref", "refs/heads/main", base])?;
-        Ok(GitSide { work: work.to_path_buf(), remote, base: base.to_string() })
+        Ok(GitSide {
+            work: work.to_path_buf(),
+            remote,
+            base: base.to_string(),
+        })
     }
 
     /// A working copy on branch `b` (created at the base on the remote).
     fn checkout(&self, name: &str, b: &str) -> Result<PathBuf> {
-        git(&self.remote, &["update-ref", &format!("refs/heads/{b}"), &self.base])?;
+        git(
+            &self.remote,
+            &["update-ref", &format!("refs/heads/{b}"), &self.base],
+        )?;
         let dir = self.work.join(format!("git-{name}"));
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }
-        run(Command::new("git").args(["clone", "-q", "--shared", "-b", b]).arg(&self.remote).arg(&dir))?;
+        run(Command::new("git")
+            .args(["clone", "-q", "--shared", "-b", b])
+            .arg(&self.remote)
+            .arg(&dir))?;
         Ok(dir)
     }
 
@@ -696,7 +1071,12 @@ impl GitSide {
             ops: 50,
             p50_ms: pct(&mut lat.clone(), 0.5),
             p95_ms: pct(&mut lat, 0.95),
-            note: format!("add p50 {:.0} ms, commit p50 {:.0} ms, push p50 {:.0} ms", pct(&mut add, 0.5).unwrap(), pct(&mut commit, 0.5).unwrap(), pct(&mut push, 0.5).unwrap()),
+            note: format!(
+                "add p50 {:.0} ms, commit p50 {:.0} ms, push p50 {:.0} ms",
+                pct(&mut add, 0.5).unwrap(),
+                pct(&mut commit, 0.5).unwrap(),
+                pct(&mut push, 0.5).unwrap()
+            ),
             ..Default::default()
         })
     }
@@ -708,7 +1088,9 @@ impl GitSide {
         let mut lat = vec![];
         for i in 0..200 {
             let n = rng.random_range(1..=3);
-            let paths: Vec<String> = (0..n).map(|_| files[rng.random_range(0..files.len())].path.clone()).collect();
+            let paths: Vec<String> = (0..n)
+                .map(|_| files[rng.random_range(0..files.len())].path.clone())
+                .collect();
             let s = Instant::now();
             for p in &paths {
                 let len = rng.random_range(200..6000);
@@ -718,19 +1100,42 @@ impl GitSide {
             lat.push(s.elapsed().as_secs_f64() * 1000.0);
         }
         let _ = std::fs::remove_dir_all(&dir);
-        Ok(Row { scenario: "small".into(), system: "git".into(), what: "200 commits of 1-3 files, commit + push each".into(), secs: t.elapsed().as_secs_f64(), ops: 200, p50_ms: pct(&mut lat.clone(), 0.5), p95_ms: pct(&mut lat, 0.95), ..Default::default() })
+        Ok(Row {
+            scenario: "small".into(),
+            system: "git".into(),
+            what: "200 commits of 1-3 files, commit + push each".into(),
+            secs: t.elapsed().as_secs_f64(),
+            ops: 200,
+            p50_ms: pct(&mut lat.clone(), 0.5),
+            p95_ms: pct(&mut lat, 0.95),
+            ..Default::default()
+        })
     }
 
-    fn wide(&self, paths: &[String], new: &[String], del_dir: &str, ren_dir: &str) -> Result<Vec<Row>> {
+    fn wide(
+        &self,
+        paths: &[String],
+        new: &[String],
+        del_dir: &str,
+        ren_dir: &str,
+    ) -> Result<Vec<Row>> {
         let mut rows = vec![];
         let dir = self.checkout("wide", "bench-wide")?;
         let mut rng = StdRng::seed_from_u64(2);
-        let mut timed = |what: String, f: &mut dyn FnMut(&mut StdRng) -> Result<()>| -> Result<()> {
-            let t = Instant::now();
-            f(&mut rng)?;
-            rows.push(Row { scenario: "wide".into(), system: "git".into(), what, secs: t.elapsed().as_secs_f64(), ops: 1, ..Default::default() });
-            Ok(())
-        };
+        let mut timed =
+            |what: String, f: &mut dyn FnMut(&mut StdRng) -> Result<()>| -> Result<()> {
+                let t = Instant::now();
+                f(&mut rng)?;
+                rows.push(Row {
+                    scenario: "wide".into(),
+                    system: "git".into(),
+                    what,
+                    secs: t.elapsed().as_secs_f64(),
+                    ops: 1,
+                    ..Default::default()
+                });
+                Ok(())
+            };
         timed("edit 2,000 files across the tree".into(), &mut |rng| {
             for p in paths {
                 let len = rng.random_range(200..6000);
@@ -761,7 +1166,9 @@ impl GitSide {
 
     fn writers(&self, w: usize, per: usize) -> Result<Row> {
         let b = format!("bench-writers{w}");
-        let dirs: Vec<PathBuf> = (0..w).map(|i| self.checkout(&format!("w{w}-{i}"), &b)).collect::<Result<_>>()?;
+        let dirs: Vec<PathBuf> = (0..w)
+            .map(|i| self.checkout(&format!("w{w}-{i}"), &b))
+            .collect::<Result<_>>()?;
         let cleanup = dirs.clone();
         let t = Instant::now();
         let handles: Vec<_> = dirs
@@ -775,7 +1182,12 @@ impl GitSide {
                     let mut tries = 0;
                     for j in 0..per {
                         let s = Instant::now();
-                        write_text(&dir, &format!("bench_writers/w{i:02}/f{j:03}.txt"), &mut rng, 2000)?;
+                        write_text(
+                            &dir,
+                            &format!("bench_writers/w{i:02}/f{j:03}.txt"),
+                            &mut rng,
+                            2000,
+                        )?;
                         tries += GitSide::commit_push(&dir, &b, "w")?;
                         lat.push(s.elapsed().as_secs_f64() * 1000.0);
                     }
@@ -803,7 +1215,11 @@ impl GitSide {
             ops: n,
             p50_ms: pct(&mut lat.clone(), 0.5),
             p95_ms: pct(&mut lat, 0.95),
-            note: format!("{:.1} commits/s, {:.2} pushes/commit", n as f64 / secs, tries as f64 / n as f64),
+            note: format!(
+                "{:.1} commits/s, {:.2} pushes/commit",
+                n as f64 / secs,
+                tries as f64 / n as f64
+            ),
             ..Default::default()
         })
     }
@@ -823,14 +1239,26 @@ async fn import_base(repo: &Repo, g: &Git, base: &str) -> Result<Hash> {
     for chunk in items.chunks(4000) {
         let inputs: Vec<FileInput> = chunk
             .iter()
-            .map(|it| Ok(FileInput { path: it.path.clone(), kind: kind_for_mode(&it.mode)?, data: Bytes::from(g.cat(&it.oid)?) }))
+            .map(|it| {
+                Ok(FileInput {
+                    path: it.path.clone(),
+                    kind: kind_for_mode(&it.mode)?,
+                    data: Bytes::from(g.cat(&it.oid)?),
+                })
+            })
             .collect::<Result<_>>()?;
         for e in repo.write_files(&inputs, &HashMap::new()).await? {
             delta.insert(e.path.clone(), Some(e));
         }
     }
-    let out = repo.commit(req("bench/base", None, delta, "bench base")).await?;
-    println!("  imported {} files in {:.1}s", out.files, t.elapsed().as_secs_f64());
+    let out = repo
+        .commit(req("bench/base", None, delta, "bench base"))
+        .await?;
+    println!(
+        "  imported {} files in {:.1}s",
+        out.files,
+        t.elapsed().as_secs_f64()
+    );
     Ok(out.commit)
 }
 
@@ -841,27 +1269,64 @@ async fn main() -> Result<()> {
     let g = Git::open(&a.git_dir)?;
     let base_git = match &a.base {
         Some(b) => g.rev_parse(b)?,
-        None => g.rev_parse("refs/remotes/origin/main").or_else(|_| g.rev_parse("HEAD"))?,
+        None => g
+            .rev_parse("refs/remotes/origin/main")
+            .or_else(|_| g.rev_parse("HEAD"))?,
     };
     let store = pail::rev::store_url(&a.store)?;
     let repo = Arc::new(Repo::with_store(Store::open(&store)?, None));
     let base = import_base(&repo, &g, &base_git).await?;
     let files = repo.entries(repo.commit_obj(&base).await?.root).await?;
-    let git_side = if a.no_git { None } else { Some(GitSide::setup(&a.git_dir, &base_git, &a.work)?) };
-    let mut b = Bench { repo, base, files, rows: vec![], git: git_side };
+    let git_side = if a.no_git {
+        None
+    } else {
+        Some(GitSide::setup(&a.git_dir, &base_git, &a.work)?)
+    };
+    let mut b = Bench {
+        repo,
+        base,
+        files,
+        rows: vec![],
+        git: git_side,
+    };
     let want = |s: &str| a.only.is_empty() || a.only.iter().any(|o| o == s);
-    println!("store {store}, base {} ({} files)", &base_git[..10], b.files.len());
-    if want("small") { b.small().await?; }
-    if want("wide") { b.wide().await?; }
-    if want("writers") { b.writers().await?; }
-    if want("hot") { b.hot().await?; }
-    if want("stacks") { b.stacks().await?; }
-    if want("bigfile") { b.bigfile().await?; }
-    if want("reads") { b.reads(&store, &a.work).await?; }
-    if want("wc") { b.wc(&store, &a.work).await?; }
+    println!(
+        "store {store}, base {} ({} files)",
+        &base_git[..10],
+        b.files.len()
+    );
+    if want("small") {
+        b.small().await?;
+    }
+    if want("wide") {
+        b.wide().await?;
+    }
+    if want("writers") {
+        b.writers().await?;
+    }
+    if want("hot") {
+        b.hot().await?;
+    }
+    if want("stacks") {
+        b.stacks().await?;
+    }
+    if want("bigfile") {
+        b.bigfile().await?;
+    }
+    if want("reads") {
+        b.reads(&store, &a.work).await?;
+    }
+    if want("wc") {
+        b.wc(&store, &a.work).await?;
+    }
     if let Some(out) = &a.out {
         let rows: Vec<Value> = b.rows.iter().map(Row::json).collect();
-        std::fs::write(out, serde_json::to_vec_pretty(&json!({"store": store, "base": base_git, "files": b.files.len(), "rows": rows}))?)?;
+        std::fs::write(
+            out,
+            serde_json::to_vec_pretty(
+                &json!({"store": store, "base": base_git, "files": b.files.len(), "rows": rows}),
+            )?,
+        )?;
         println!("results in {}", out.display());
     }
     Ok(())

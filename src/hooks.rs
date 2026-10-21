@@ -71,12 +71,20 @@ impl Hooks {
             Some(p) => Some(root.join(expand_home(&p))),
             None => Some(repo_dir.join("hooks")),
         };
-        Hooks { dir, cwd: root.to_path_buf(), env: vec![] }
+        Hooks {
+            dir,
+            cwd: root.to_path_buf(),
+            env: vec![],
+        }
     }
 
     /// No hooks at all.
     pub fn off(root: &Path) -> Hooks {
-        Hooks { dir: None, cwd: root.to_path_buf(), env: vec![] }
+        Hooks {
+            dir: None,
+            cwd: root.to_path_buf(),
+            env: vec![],
+        }
     }
 
     pub fn with_env(mut self, k: &str, v: impl Into<String>) -> Hooks {
@@ -93,15 +101,24 @@ impl Hooks {
 
     /// Run `name` if it exists. Ok(false): no such hook.
     pub fn run(&self, name: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<bool> {
-        let Some(exe) = self.find(name) else { return Ok(false) };
+        let Some(exe) = self.find(name) else {
+            return Ok(false);
+        };
         let started = Instant::now();
         // Both of the hook's streams go to our stderr: stdout stays the command's own.
         let err = std::io::stderr().as_fd().try_clone_to_owned()?;
         let mut cmd = Command::new(&exe);
         // `pail` inside a hook is the pail running it (Git puts its exec-path first likewise).
-        if let Some(bin) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        if let Some(bin) = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+        {
             let mut paths = vec![bin];
-            paths.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
+            paths.extend(
+                std::env::var_os("PATH")
+                    .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            );
             if let Ok(joined) = std::env::join_paths(paths) {
                 cmd.env("PATH", joined);
             }
@@ -110,10 +127,16 @@ impl Hooks {
             .current_dir(&self.cwd)
             .env("PAIL_HOOK", name)
             .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::from(err.try_clone()?))
             .stderr(Stdio::from(err));
-        let mut child = cmd.spawn().with_context(|| format!("running the {name} hook ({})", exe.display()))?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("running the {name} hook ({})", exe.display()))?;
         if let Some(data) = stdin {
             let mut pipe = child.stdin.take().expect("piped stdin");
             // A hook may exit without reading its input; that is not an error.
@@ -124,7 +147,11 @@ impl Hooks {
         if status.success() {
             Ok(true)
         } else {
-            Err(HookRefused { hook: name.to_string(), code: status.code() }.into())
+            Err(HookRefused {
+                hook: name.to_string(),
+                code: status.code(),
+            }
+            .into())
         }
     }
 
@@ -147,9 +174,15 @@ fn expand_home(p: &str) -> PathBuf {
 
 /// One JSON line per hook run to `$PAIL_TRACE_HOOKS`, when set.
 fn trace(name: &str, args: &[&str], code: Option<i32>, ms: u128) {
-    let Some(path) = std::env::var_os("PAIL_TRACE_HOOKS") else { return };
+    let Some(path) = std::env::var_os("PAIL_TRACE_HOOKS") else {
+        return;
+    };
     let line = serde_json::json!({"hook": name, "args": args, "exit": code, "ms": ms as u64});
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }

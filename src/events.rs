@@ -43,8 +43,13 @@ pub struct RefEvent {
 }
 
 pub enum Source {
-    Poll { interval: Duration },
-    GcsPubSub { subscription: String, token: Arc<crate::creds::Source> },
+    Poll {
+        interval: Duration,
+    },
+    GcsPubSub {
+        subscription: String,
+        token: Arc<crate::creds::Source>,
+    },
 }
 
 /// `*` matches any run of characters (including `/`); otherwise literal.
@@ -73,7 +78,10 @@ pub fn glob_match(pattern: &str, s: &str) -> bool {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Watch refs matching any of `globs` (all when empty) and call `emit` per change. With
@@ -90,24 +98,49 @@ pub async fn watch(
     for (b, h) in repo.list_refs().await? {
         if wanted(&b) {
             if initial {
-                emit(RefEvent { branch: b.clone(), commit: Some(h), old: None, source: "initial", at: now_ms() })?;
+                emit(RefEvent {
+                    branch: b.clone(),
+                    commit: Some(h),
+                    old: None,
+                    source: "initial",
+                    at: now_ms(),
+                })?;
             }
             seen.insert(b, Some(h));
         }
     }
-    let mut changed = |branch: String, commit: Option<Hash>, source: &'static str, seen: &mut HashMap<String, Option<Hash>>| -> Result<()> {
+    let mut changed = |branch: String,
+                       commit: Option<Hash>,
+                       source: &'static str,
+                       seen: &mut HashMap<String, Option<Hash>>|
+     -> Result<()> {
         let old = seen.get(&branch).copied().flatten();
         if seen.get(&branch) == Some(&commit) || (commit.is_none() && !seen.contains_key(&branch)) {
             return Ok(()); // a duplicate or reordered notification
         }
         seen.insert(branch.clone(), commit);
-        emit(RefEvent { branch, commit, old, source, at: now_ms() })
+        emit(RefEvent {
+            branch,
+            commit,
+            old,
+            source,
+            at: now_ms(),
+        })
     };
     match source {
         Source::Poll { interval } => loop {
             tokio::time::sleep(interval).await;
-            let now: HashMap<String, Hash> = repo.list_refs().await?.into_iter().filter(|(b, _)| wanted(b)).collect();
-            let gone: Vec<String> = seen.keys().filter(|b| !now.contains_key(*b)).cloned().collect();
+            let now: HashMap<String, Hash> = repo
+                .list_refs()
+                .await?
+                .into_iter()
+                .filter(|(b, _)| wanted(b))
+                .collect();
+            let gone: Vec<String> = seen
+                .keys()
+                .filter(|b| !now.contains_key(*b))
+                .cloned()
+                .collect();
             for (b, h) in now {
                 changed(b, Some(h), "poll", &mut seen)?;
             }
@@ -115,14 +148,23 @@ pub async fn watch(
                 changed(b, None, "poll", &mut seen)?;
             }
         },
-        Source::GcsPubSub { subscription, token } => {
+        Source::GcsPubSub {
+            subscription,
+            token,
+        } => {
             let prefix = gcs_prefix(&repo.store.url)?;
             let client = reqwest::Client::new();
-            let base = format!("https://pubsub.googleapis.com/v1/{}", subscription.trim_start_matches('/'));
+            let base = format!(
+                "https://pubsub.googleapis.com/v1/{}",
+                subscription.trim_start_matches('/')
+            );
             loop {
                 let bearer = {
                     let t = token.clone();
-                    tokio::task::spawn_blocking(move || t.get()).await??.token.context("the credential has no token for Pub/Sub")?
+                    tokio::task::spawn_blocking(move || t.get())
+                        .await??
+                        .token
+                        .context("the credential has no token for Pub/Sub")?
                 };
                 let resp = client
                     .post(format!("{base}:pull"))
@@ -133,7 +175,8 @@ pub async fn watch(
                     .await
                     .context("pulling the subscription")?;
                 let status = resp.status();
-                let body: serde_json::Value = serde_json::from_slice(&resp.bytes().await?).unwrap_or_default();
+                let body: serde_json::Value =
+                    serde_json::from_slice(&resp.bytes().await?).unwrap_or_default();
                 if !status.is_success() {
                     bail!("Pub/Sub pull failed ({status}): {body}");
                 }
@@ -141,8 +184,13 @@ pub async fn watch(
                 let mut branches = vec![];
                 for m in body["receivedMessages"].as_array().into_iter().flatten() {
                     acks.push(m["ackId"].as_str().unwrap_or_default().to_string());
-                    let object = m["message"]["attributes"]["objectId"].as_str().unwrap_or_default();
-                    if let Some(branch) = object.strip_prefix(&prefix).and_then(|k| k.strip_prefix("refs/")) {
+                    let object = m["message"]["attributes"]["objectId"]
+                        .as_str()
+                        .unwrap_or_default();
+                    if let Some(branch) = object
+                        .strip_prefix(&prefix)
+                        .and_then(|k| k.strip_prefix("refs/"))
+                    {
                         if wanted(branch) && !branches.iter().any(|b: &String| b == branch) {
                             branches.push(branch.to_string());
                         }
@@ -172,9 +220,18 @@ pub async fn watch(
 
 /// The object-name prefix of a gs:// store's keys ("" or "repo/").
 fn gcs_prefix(url: &str) -> Result<String> {
-    let rest = url.strip_prefix("gs://").context("gcs events need a gs:// store")?;
-    let prefix = rest.split_once('/').map(|(_, p)| p.trim_matches('/')).unwrap_or("");
-    Ok(if prefix.is_empty() { String::new() } else { format!("{prefix}/") })
+    let rest = url
+        .strip_prefix("gs://")
+        .context("gcs events need a gs:// store")?;
+    let prefix = rest
+        .split_once('/')
+        .map(|(_, p)| p.trim_matches('/'))
+        .unwrap_or("");
+    Ok(if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    })
 }
 
 #[cfg(test)]

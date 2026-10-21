@@ -21,9 +21,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::blobs::{Blobs, CloneStats, clone_path};
-use crate::local::LocalRepo;
 use crate::hash::Hash;
 use crate::hooks::{self, Hooks};
+use crate::local::LocalRepo;
 use crate::manifest::{Change, Entry, Kind, Loc};
 use crate::objects::now_date;
 use crate::repo::{CommitRequest, Delta, FileInput, Repo};
@@ -48,14 +48,25 @@ pub struct KnownRef {
 }
 
 impl Head {
-    fn at(branch: &str, r: Option<(crate::objects::RefValue, crate::store::Version)>, at: Option<Hash>) -> Head {
+    fn at(
+        branch: &str,
+        r: Option<(crate::objects::RefValue, crate::store::Version)>,
+        at: Option<Hash>,
+    ) -> Head {
         match (r, at) {
             (Some((r, version)), None) => Head {
                 branch: branch.to_string(),
                 base: Some(r.commit),
-                known: Some(KnownRef { version, recent: r.recent }),
+                known: Some(KnownRef {
+                    version,
+                    recent: r.recent,
+                }),
             },
-            (_, at) => Head { branch: branch.to_string(), base: at, known: None },
+            (_, at) => Head {
+                branch: branch.to_string(),
+                base: at,
+                known: None,
+            },
         }
     }
 }
@@ -63,7 +74,11 @@ impl Head {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Staged {
-    Put { kind: KindName, size: u64, hash: Hash },
+    Put {
+        kind: KindName,
+        size: u64,
+        hash: Hash,
+    },
     Del,
 }
 
@@ -161,12 +176,19 @@ pub fn read_disk(path: &Path) -> Result<Option<(Kind, Vec<u8>)>> {
     };
     if md.file_type().is_symlink() {
         let t = std::fs::read_link(path)?;
-        return Ok(Some((Kind::Symlink, t.as_os_str().as_encoded_bytes().to_vec())));
+        return Ok(Some((
+            Kind::Symlink,
+            t.as_os_str().as_encoded_bytes().to_vec(),
+        )));
     }
     if !md.is_file() {
         return Ok(None);
     }
-    let kind = if md.permissions().mode() & 0o111 != 0 { Kind::Exec } else { Kind::File };
+    let kind = if md.permissions().mode() & 0o111 != 0 {
+        Kind::Exec
+    } else {
+        Kind::File
+    };
     Ok(Some((kind, std::fs::read(path)?)))
 }
 
@@ -178,7 +200,10 @@ fn prepare_path(root: &Path, path: &str) -> Result<PathBuf> {
         let mut p = parent.to_path_buf();
         let mut blockers = vec![];
         while p.starts_with(root) && p != root {
-            if std::fs::symlink_metadata(&p).map(|m| !m.is_dir()).unwrap_or(false) {
+            if std::fs::symlink_metadata(&p)
+                .map(|m| !m.is_dir())
+                .unwrap_or(false)
+            {
                 blockers.push(p.clone());
             }
             p.pop();
@@ -200,7 +225,10 @@ fn prepare_path(root: &Path, path: &str) -> Result<PathBuf> {
 
 fn set_mode(full: &Path, kind: Kind) -> Result<()> {
     let mode = if kind == Kind::Exec { 0o755 } else { 0o644 };
-    Ok(std::fs::set_permissions(full, std::fs::Permissions::from_mode(mode))?)
+    Ok(std::fs::set_permissions(
+        full,
+        std::fs::Permissions::from_mode(mode),
+    )?)
 }
 
 /// Set a file's mtime (and atime) to `t`, or to now.
@@ -208,12 +236,16 @@ fn set_mtime(full: &Path, t: Option<std::time::SystemTime>) -> Result<()> {
     let c = std::ffi::CString::new(full.as_os_str().as_encoded_bytes())?;
     let ts = t.map(|t| {
         let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        let s = libc::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ };
+        let s = libc::timespec {
+            tv_sec: d.as_secs() as _,
+            tv_nsec: d.subsec_nanos() as _,
+        };
         [s, s]
     });
     let ptr = ts.as_ref().map_or(std::ptr::null(), |a| a.as_ptr());
     if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), ptr, 0) } != 0 {
-        return Err(std::io::Error::last_os_error()).with_context(|| format!("setting mtime of {}", full.display()));
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("setting mtime of {}", full.display()));
     }
     Ok(())
 }
@@ -266,7 +298,10 @@ pub struct Checkout {
 impl Checkout {
     /// Clone from the repository's content store.
     pub fn for_repo(repo: &Repo) -> Checkout {
-        Checkout { blobs: repo.blobs.clone(), ..Default::default() }
+        Checkout {
+            blobs: repo.blobs.clone(),
+            ..Default::default()
+        }
     }
 
     /// The donor's mtime for `path` if the donor holds the same content.
@@ -276,7 +311,9 @@ impl Checkout {
         if !md.is_file() || md.len() != e.size {
             return None;
         }
-        (Hash::of(&std::fs::read(&full).ok()?) == e.hash).then(|| md.modified().ok()).flatten()
+        (Hash::of(&std::fs::read(&full).ok()?) == e.hash)
+            .then(|| md.modified().ok())
+            .flatten()
     }
 
     /// Write the given entries' contents to disk, fetching what the store lacks in
@@ -286,13 +323,20 @@ impl Checkout {
             return self.write_direct(repo, root, entries).await;
         };
         // Symlinks and inline files carry their bytes in the manifest; nothing to share.
-        let (direct, shared): (Vec<Entry>, Vec<Entry>) =
-            entries.iter().cloned().partition(|e| e.kind == Kind::Symlink || matches!(e.loc, Loc::Inline(_)));
+        let (direct, shared): (Vec<Entry>, Vec<Entry>) = entries
+            .iter()
+            .cloned()
+            .partition(|e| e.kind == Kind::Symlink || matches!(e.loc, Loc::Inline(_)));
         self.write_direct(repo, root, &direct).await?;
         let mut seen = HashSet::new();
-        let missing: Vec<Entry> =
-            shared.iter().filter(|e| seen.insert(e.hash) && !blobs.has(&e.hash)).cloned().collect();
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
+        let missing: Vec<Entry> = shared
+            .iter()
+            .filter(|e| seen.insert(e.hash) && !blobs.has(&e.hash))
+            .cloned()
+            .collect();
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .min(16);
         for batch in batches(&missing) {
             let data = repo.read_files(batch).await?;
             let items: Vec<(&Entry, Bytes)> = batch.iter().zip(data).collect();
@@ -300,9 +344,12 @@ impl Checkout {
             std::thread::scope(|s| {
                 let jobs: Vec<_> = items
                     .chunks(per)
-                    .map(|chunk| s.spawn(move || chunk.iter().try_for_each(|(e, d)| blobs.put(&e.hash, d))))
+                    .map(|chunk| {
+                        s.spawn(move || chunk.iter().try_for_each(|(e, d)| blobs.put(&e.hash, d)))
+                    })
                     .collect();
-                jobs.into_iter().try_for_each(|j| j.join().expect("blob writer panicked"))
+                jobs.into_iter()
+                    .try_for_each(|j| j.join().expect("blob writer panicked"))
             })?;
         }
         let per = shared.len().div_ceil(threads).max(1);
@@ -321,7 +368,8 @@ impl Checkout {
                     })
                 })
                 .collect();
-            jobs.into_iter().try_for_each(|j| j.join().expect("checkout thread panicked"))
+            jobs.into_iter()
+                .try_for_each(|j| j.join().expect("checkout thread panicked"))
         })
     }
 
@@ -373,7 +421,8 @@ pub const DEFAULT_SEED: &str = "target/\nnode_modules/\n_build/\ndeps/\n.next/\n
 
 /// Seed rules (gitignore syntax): the donor's `.pailseed`, else `DEFAULT_SEED`.
 fn seed_rules(donor: &Path) -> Result<ignore::gitignore::Gitignore> {
-    let text = std::fs::read_to_string(donor.join(".pailseed")).unwrap_or_else(|_| DEFAULT_SEED.to_string());
+    let text = std::fs::read_to_string(donor.join(".pailseed"))
+        .unwrap_or_else(|_| DEFAULT_SEED.to_string());
     let mut b = ignore::gitignore::GitignoreBuilder::new(donor);
     for line in text.lines() {
         b.add_line(None, line)?;
@@ -440,7 +489,10 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
         }
     } else {
         std::fs::copy(src, dst)?;
-        let _ = std::fs::File::options().write(true).open(dst).and_then(|f| f.set_modified(md.modified()?));
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(dst)
+            .and_then(|f| f.set_modified(md.modified()?));
     }
     Ok(())
 }
@@ -482,7 +534,17 @@ fn decode_statcache(b: &[u8]) -> Option<HashMap<String, StatEntry>> {
         let ino = u64::from_le_bytes(n8(take(&mut b, 8)?));
         let kind = Kind::from_u8(take(&mut b, 1)?[0]).ok()?;
         let hash = Hash(take(&mut b, 32)?.try_into().ok()?);
-        out.insert(path, StatEntry { mtime, mtime_ns, size, ino, kind: kind.into(), hash });
+        out.insert(
+            path,
+            StatEntry {
+                mtime,
+                mtime_ns,
+                size,
+                ino,
+                kind: kind.into(),
+                hash,
+            },
+        );
     }
     Some(out)
 }
@@ -505,8 +567,18 @@ impl Worktree {
         let local = LocalRepo::for_worktree(&dot(&root))?;
         let head: Head = read_json(&dot(&root).join("HEAD.json"))?;
         let stage_path = dot(&root).join("stage.json");
-        let stage = if stage_path.exists() { read_json(&stage_path)? } else { BTreeMap::new() };
-        Ok(Worktree { root, repo: local.repo()?, local, head, stage })
+        let stage = if stage_path.exists() {
+            read_json(&stage_path)?
+        } else {
+            BTreeMap::new()
+        };
+        Ok(Worktree {
+            root,
+            repo: local.repo()?,
+            local,
+            head,
+            stage,
+        })
     }
 
     /// Check out `branch` (at its head, or at commit `at`) into a new directory. With
@@ -536,7 +608,10 @@ impl Worktree {
         let head = match at {
             Some(h) => Head::at(branch, None, Some(h)),
             None => {
-                let r = repo.read_ref_value(branch).await?.with_context(|| format!("branch {branch} not found"))?;
+                let r = repo
+                    .read_ref_value(branch)
+                    .await?
+                    .with_context(|| format!("branch {branch} not found"))?;
                 Head::at(branch, Some(r), None)
             }
         };
@@ -549,7 +624,13 @@ impl Worktree {
         co.materialize(&repo, &root, &entries).await?;
         write_json(&dot(&root).join("HEAD.json"), &head)?;
         local.attach(&root)?;
-        let wt = Worktree { root, repo, local, head, stage: BTreeMap::new() };
+        let wt = Worktree {
+            root,
+            repo,
+            local,
+            head,
+            stage: BTreeMap::new(),
+        };
         let mut cache = HashMap::new();
         for e in &entries {
             wt.cache_stat(&mut cache, &e.path, e.kind, e.hash);
@@ -573,7 +654,9 @@ impl Worktree {
     /// The stat cache: one fixed-layout record per path. Anything unreadable is an empty
     /// cache (everything is re-hashed once), never an error.
     fn load_statcache(&self) -> HashMap<String, StatEntry> {
-        let Ok(b) = std::fs::read(self.statcache_path()) else { return HashMap::new() };
+        let Ok(b) = std::fs::read(self.statcache_path()) else {
+            return HashMap::new();
+        };
         decode_statcache(&b).unwrap_or_default()
     }
 
@@ -598,28 +681,53 @@ impl Worktree {
         Ok(())
     }
 
-    fn cache_stat(&self, cache: &mut HashMap<String, StatEntry>, path: &str, kind: Kind, hash: Hash) {
+    fn cache_stat(
+        &self,
+        cache: &mut HashMap<String, StatEntry>,
+        path: &str,
+        kind: Kind,
+        hash: Hash,
+    ) {
         if let Ok(md) = std::fs::symlink_metadata(self.root.join(path)) {
             cache.insert(
                 path.to_string(),
-                StatEntry { mtime: md.mtime(), mtime_ns: md.mtime_nsec(), size: md.size(), ino: md.ino(), kind: kind.into(), hash },
+                StatEntry {
+                    mtime: md.mtime(),
+                    mtime_ns: md.mtime_nsec(),
+                    size: md.size(),
+                    ino: md.ino(),
+                    kind: kind.into(),
+                    hash,
+                },
             );
         }
     }
 
     pub async fn base_entries(&self) -> Result<BTreeMap<String, Entry>> {
         let root = self.repo.root_of(self.head.base).await?;
-        Ok(self.repo.entries(root).await?.into_iter().map(|e| (e.path.clone(), e)).collect())
+        Ok(self
+            .repo
+            .entries(root)
+            .await?
+            .into_iter()
+            .map(|e| (e.path.clone(), e))
+            .collect())
     }
 
     /// All non-ignored paths on disk with their lstat, plus tracked paths even if an ignore
     /// rule matches them. The walk runs on all cores and stats as it goes.
-    fn disk_paths(&self, tracked: impl Iterator<Item = String>) -> HashMap<String, std::fs::Metadata> {
+    fn disk_paths(
+        &self,
+        tracked: impl Iterator<Item = String>,
+    ) -> HashMap<String, std::fs::Metadata> {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<(String, std::fs::Metadata)>>();
         let root = self.root.clone();
         ignore_walker_builder(&self.root).build_parallel().run(|| {
             // Each walker thread batches its finds and sends them when it is done.
-            struct Batch(Vec<(String, std::fs::Metadata)>, std::sync::mpsc::Sender<Vec<(String, std::fs::Metadata)>>);
+            struct Batch(
+                Vec<(String, std::fs::Metadata)>,
+                std::sync::mpsc::Sender<Vec<(String, std::fs::Metadata)>>,
+            );
             impl Drop for Batch {
                 fn drop(&mut self) {
                     let _ = self.1.send(std::mem::take(&mut self.0));
@@ -628,11 +736,16 @@ impl Worktree {
             let mut batch = Batch(vec![], tx.clone());
             let root = root.clone();
             Box::new(move |ent| {
-                let Ok(ent) = ent else { return ignore::WalkState::Continue };
+                let Ok(ent) = ent else {
+                    return ignore::WalkState::Continue;
+                };
                 if ent.file_type().is_none_or(|f| f.is_dir()) {
                     return ignore::WalkState::Continue;
                 }
-                if let (Ok(rel), Ok(md)) = (ent.path().strip_prefix(&root), ent.path().symlink_metadata()) {
+                if let (Ok(rel), Ok(md)) = (
+                    ent.path().strip_prefix(&root),
+                    ent.path().symlink_metadata(),
+                ) {
                     if let Some(s) = rel.to_str() {
                         batch.0.push((s.to_string(), md));
                     }
@@ -653,9 +766,14 @@ impl Worktree {
     }
 
     /// Hash everything on disk, reusing the stat cache for unchanged files.
-    pub fn scan(&self, tracked: impl Iterator<Item = String>) -> Result<BTreeMap<String, DiskFile>> {
+    pub fn scan(
+        &self,
+        tracked: impl Iterator<Item = String>,
+    ) -> Result<BTreeMap<String, DiskFile>> {
         let mut cache = self.load_statcache();
-        let cache_written = std::fs::metadata(self.statcache_path()).map(|m| m.mtime()).unwrap_or(0);
+        let cache_written = std::fs::metadata(self.statcache_path())
+            .map(|m| m.mtime())
+            .unwrap_or(0);
         let mut out = BTreeMap::new();
         let mut dirty = false;
         for (p, md) in self.disk_paths(tracked) {
@@ -676,14 +794,30 @@ impl Worktree {
                         Kind::File
                     };
                     if Kind::from(c.kind) == kind_now {
-                        out.insert(p, DiskFile { kind: kind_now, size: c.size, hash: c.hash });
+                        out.insert(
+                            p,
+                            DiskFile {
+                                kind: kind_now,
+                                size: c.size,
+                                hash: c.hash,
+                            },
+                        );
                         continue;
                     }
                 }
             }
-            let Some((kind, data)) = read_disk(&full)? else { continue };
+            let Some((kind, data)) = read_disk(&full)? else {
+                continue;
+            };
             let hash = Hash::of(&data);
-            out.insert(p.clone(), DiskFile { kind, size: data.len() as u64, hash });
+            out.insert(
+                p.clone(),
+                DiskFile {
+                    kind,
+                    size: data.len() as u64,
+                    hash,
+                },
+            );
             self.cache_stat(&mut cache, &p, kind, hash);
             dirty = true;
         }
@@ -698,12 +832,28 @@ impl Worktree {
     fn index_view(&self, base: &BTreeMap<String, Entry>) -> BTreeMap<String, DiskFile> {
         let mut view: BTreeMap<String, DiskFile> = base
             .iter()
-            .map(|(k, e)| (k.clone(), DiskFile { kind: e.kind, size: e.size, hash: e.hash }))
+            .map(|(k, e)| {
+                (
+                    k.clone(),
+                    DiskFile {
+                        kind: e.kind,
+                        size: e.size,
+                        hash: e.hash,
+                    },
+                )
+            })
             .collect();
         for (p, s) in &self.stage {
             match s {
                 Staged::Put { kind, size, hash } => {
-                    view.insert(p.clone(), DiskFile { kind: (*kind).into(), size: *size, hash: *hash });
+                    view.insert(
+                        p.clone(),
+                        DiskFile {
+                            kind: (*kind).into(),
+                            size: *size,
+                            hash: *hash,
+                        },
+                    );
                 }
                 Staged::Del => {
                     view.remove(p);
@@ -733,7 +883,11 @@ impl Worktree {
                 _ => {}
             }
         }
-        st.untracked = disk.keys().filter(|p| !index.contains_key(*p)).cloned().collect();
+        st.untracked = disk
+            .keys()
+            .filter(|p| !index.contains_key(*p))
+            .cloned()
+            .collect();
         Ok(st)
     }
 
@@ -741,16 +895,23 @@ impl Worktree {
     pub fn resolve(&self, cwd: &Path, args: &[String]) -> Result<Vec<String>> {
         let mut out = vec![];
         for a in args {
-            let abs = if Path::new(a).is_absolute() { PathBuf::from(a) } else { cwd.join(a) };
+            let abs = if Path::new(a).is_absolute() {
+                PathBuf::from(a)
+            } else {
+                cwd.join(a)
+            };
             let abs = normalize(&abs);
-            let rel = abs.strip_prefix(&self.root).with_context(|| format!("{a} is outside the working copy"))?;
+            let rel = abs
+                .strip_prefix(&self.root)
+                .with_context(|| format!("{a} is outside the working copy"))?;
             out.push(rel.to_string_lossy().trim_end_matches('/').to_string());
         }
         Ok(out)
     }
 
     fn matches(spec: &[String], path: &str) -> bool {
-        spec.iter().any(|s| s.is_empty() || path == s || path.starts_with(&format!("{s}/")))
+        spec.iter()
+            .any(|s| s.is_empty() || path == s || path.starts_with(&format!("{s}/")))
     }
 
     /// Stage the current disk state of the selected paths (`""` selects everything).
@@ -759,8 +920,12 @@ impl Worktree {
         let base = self.base_entries().await?;
         let index = self.index_view(&base);
         let disk = self.scan(index.keys().cloned())?;
-        let candidates: BTreeSet<String> =
-            index.keys().chain(disk.keys()).filter(|p| Self::matches(spec, p)).cloned().collect();
+        let candidates: BTreeSet<String> = index
+            .keys()
+            .chain(disk.keys())
+            .filter(|p| Self::matches(spec, p))
+            .cloned()
+            .collect();
         let pending = dot(&self.root).join("pending");
         std::fs::create_dir_all(&pending)?;
         let mut n = 0;
@@ -771,15 +936,26 @@ impl Worktree {
             let before = self.stage.get(&p).cloned();
             match disk.get(&p) {
                 Some(d) => {
-                    if base.get(&p).is_some_and(|e| e.kind == d.kind && e.hash == d.hash) {
+                    if base
+                        .get(&p)
+                        .is_some_and(|e| e.kind == d.kind && e.hash == d.hash)
+                    {
                         self.stage.remove(&p);
                     } else {
                         if index.get(&p) != Some(d) || !pending.join(d.hash.hex()).exists() {
                             // Snapshot the bytes now: later edits are not part of this stage.
-                            let (kind, data) = read_disk(&self.root.join(&p))?.context("file vanished")?;
+                            let (kind, data) =
+                                read_disk(&self.root.join(&p))?.context("file vanished")?;
                             let h = Hash::of(&data);
                             std::fs::write(pending.join(h.hex()), &data)?;
-                            self.stage.insert(p.clone(), Staged::Put { kind: kind.into(), size: data.len() as u64, hash: h });
+                            self.stage.insert(
+                                p.clone(),
+                                Staged::Put {
+                                    kind: kind.into(),
+                                    size: data.len() as u64,
+                                    hash: h,
+                                },
+                            );
                         }
                     }
                 }
@@ -829,7 +1005,11 @@ impl Worktree {
     /// commit-msg (may rewrite the message), pre-publish (sees the written commit before the
     /// CAS), then post-rewrite (when the commit was replayed onto a newer head) and
     /// post-commit. `no_verify` skips the three that can refuse. Returns the final message.
-    pub async fn commit(&mut self, message: &str, no_verify: bool) -> Result<(crate::repo::CommitOutcome, String)> {
+    pub async fn commit(
+        &mut self,
+        message: &str,
+        no_verify: bool,
+    ) -> Result<(crate::repo::CommitOutcome, String)> {
         if self.stage.is_empty() {
             bail!("nothing staged (use `pail add <path>` or `pail commit -a`)");
         }
@@ -839,7 +1019,11 @@ impl Worktree {
             hooks.run("pre-commit", &[], None)?;
             // The hook may have staged (formatted files) or unstaged paths.
             let stage_path = dot(&self.root).join("stage.json");
-            self.stage = if stage_path.exists() { read_json(&stage_path)? } else { BTreeMap::new() };
+            self.stage = if stage_path.exists() {
+                read_json(&stage_path)?
+            } else {
+                BTreeMap::new()
+            };
             if self.stage.is_empty() {
                 bail!("nothing staged after the pre-commit hook");
             }
@@ -863,7 +1047,11 @@ impl Worktree {
                 Staged::Put { kind, hash, .. } => {
                     let data = std::fs::read(pending.join(hash.hex()))
                         .with_context(|| format!("staged content for {p} is missing"))?;
-                    inputs.push(FileInput { path: p.clone(), kind: (*kind).into(), data: Bytes::from(data) });
+                    inputs.push(FileInput {
+                        path: p.clone(),
+                        kind: (*kind).into(),
+                        data: Bytes::from(data),
+                    });
                 }
                 Staged::Del => {
                     delta.insert(p.clone(), None);
@@ -882,30 +1070,43 @@ impl Worktree {
         let date = now_date();
         let pre_publish = |p: &crate::repo::Publish| -> Result<()> {
             let line = format!("{} {} {}\n", p.branch, hooks::id(p.old), p.new.hex());
-            hooks.run("pre-publish", &[&p.branch, "commit"], Some(line.as_bytes())).map(|_| ())
+            hooks
+                .run("pre-publish", &[&p.branch, "commit"], Some(line.as_bytes()))
+                .map(|_| ())
         };
         let check: Option<crate::repo::PublishCheck> =
-            if !no_verify && hooks.find("pre-publish").is_some() { Some(&pre_publish) } else { None };
+            if !no_verify && hooks.find("pre-publish").is_some() {
+                Some(&pre_publish)
+            } else {
+                None
+            };
         let out = self
             .repo
-            .commit_opts(CommitRequest {
-                branch: self.head.branch.clone(),
-                base: self.head.base,
-                delta,
-                author: who,
-                author_date: date.clone(),
-                committer: cfg.identity("committer")?,
-                committer_date: date,
-                message: message.clone(),
-                meta: BTreeMap::new(),
-            }, crate::repo::CommitOptions {
-                check,
-                uploads,
-                known_head: match (&self.head.known, self.head.base) {
-                    (Some(k), Some(base)) => Some(crate::repo::KnownHead { commit: base, version: k.version.clone(), recent: k.recent.clone() }),
-                    _ => None,
+            .commit_opts(
+                CommitRequest {
+                    branch: self.head.branch.clone(),
+                    base: self.head.base,
+                    delta,
+                    author: who,
+                    author_date: date.clone(),
+                    committer: cfg.identity("committer")?,
+                    committer_date: date,
+                    message: message.clone(),
+                    meta: BTreeMap::new(),
                 },
-            })
+                crate::repo::CommitOptions {
+                    check,
+                    uploads,
+                    known_head: match (&self.head.known, self.head.base) {
+                        (Some(k), Some(base)) => Some(crate::repo::KnownHead {
+                            commit: base,
+                            version: k.version.clone(),
+                            recent: k.recent.clone(),
+                        }),
+                        _ => None,
+                    },
+                },
+            )
             .await?;
         // The branch may have advanced under us (replayed commit). Bring in others' changes.
         let old_base = self.head.base;
@@ -913,7 +1114,10 @@ impl Worktree {
         self.head.base = Some(out.commit);
         // The version belongs to the ref at `out.head`; it is only a known head for this base
         // when the commit is the tip (not the middle of a combined batch).
-        self.head.known = (out.head == out.commit).then(|| KnownRef { version: out.version.clone(), recent: out.recent.clone() });
+        self.head.known = (out.head == out.commit).then(|| KnownRef {
+            version: out.version.clone(),
+            recent: out.recent.clone(),
+        });
         self.save_head()?;
         let staged: Vec<String> = self.stage.keys().cloned().collect();
         // The committed snapshots are now shared content: hand them to the blob store so other
@@ -935,12 +1139,19 @@ impl Worktree {
             let from = self.repo.root_of(old_base).await?;
             let to = self.repo.root_of(landed_parent).await?;
             let theirs: Vec<Change> = self.repo.diff(from, to).await?;
-            let theirs: Vec<Change> = theirs.into_iter().filter(|c| !staged.contains(&c.path)).collect();
+            let theirs: Vec<Change> = theirs
+                .into_iter()
+                .filter(|c| !staged.contains(&c.path))
+                .collect();
             self.apply_changes(&theirs).await?;
             self.set_orig_head(old_base)?;
         }
         if let Some(from) = out.replayed_from {
-            hooks.notify("post-rewrite", &["replay"], Some(format!("{} {}\n", from.hex(), out.commit.hex()).as_bytes()));
+            hooks.notify(
+                "post-rewrite",
+                &["replay"],
+                Some(format!("{} {}\n", from.hex(), out.commit.hex()).as_bytes()),
+            );
         }
         hooks.notify("post-commit", &[], None);
         Ok((out, message))
@@ -954,7 +1165,9 @@ impl Worktree {
             remove_disk(&self.root, &c.path)?;
             cache.remove(&c.path);
         }
-        Checkout::for_repo(&self.repo).materialize(&self.repo, &self.root, &writes).await?;
+        Checkout::for_repo(&self.repo)
+            .materialize(&self.repo, &self.root, &writes)
+            .await?;
         for e in &writes {
             self.cache_stat(&mut cache, &e.path, e.kind, e.hash);
         }
@@ -963,7 +1176,11 @@ impl Worktree {
 
     /// Switch the working copy to another branch. Requires a clean working copy.
     pub async fn switch(&mut self, branch: &str) -> Result<usize> {
-        let r = self.repo.read_ref_value(branch).await?.with_context(|| format!("branch {branch} not found"))?;
+        let r = self
+            .repo
+            .read_ref_value(branch)
+            .await?
+            .with_context(|| format!("branch {branch} not found"))?;
         // A branch at this working copy's base (`switch -c`, or a branch that has not moved)
         // changes no file, so local changes and the stage come along, as with Git.
         if Some(r.0.commit) == self.head.base {
@@ -986,7 +1203,11 @@ impl Worktree {
         self.head = Head::at(branch, Some(r), None);
         self.save_head()?;
         self.set_orig_head(prev)?;
-        self.hooks().notify("post-checkout", &[&hooks::id(prev), &target.hex(), "1"], None);
+        self.hooks().notify(
+            "post-checkout",
+            &[&hooks::id(prev), &target.hex(), "1"],
+            None,
+        );
         Ok(changes.len())
     }
 
@@ -1004,22 +1225,37 @@ impl Worktree {
             return Ok(0);
         }
         let st = self.status().await?;
-        let local: BTreeSet<&str> =
-            st.staged.iter().chain(st.unstaged.iter()).map(|(p, _)| p.as_str()).collect();
+        let local: BTreeSet<&str> = st
+            .staged
+            .iter()
+            .chain(st.unstaged.iter())
+            .map(|(p, _)| p.as_str())
+            .collect();
         let from = self.repo.root_of(self.head.base).await?;
         let to = self.repo.root_of(Some(head)).await?;
         let changes = self.repo.diff(from, to).await?;
-        let clash: Vec<&str> = changes.iter().map(|c| c.path.as_str()).filter(|p| local.contains(p)).collect();
+        let clash: Vec<&str> = changes
+            .iter()
+            .map(|c| c.path.as_str())
+            .filter(|p| local.contains(p))
+            .collect();
         if !clash.is_empty() {
-            bail!("sync would overwrite local changes in: {}", clash.join(", "));
+            bail!(
+                "sync would overwrite local changes in: {}",
+                clash.join(", ")
+            );
         }
         self.apply_changes(&changes).await?;
         let old = self.head.base;
         self.head.base = Some(head);
-        self.head.known = Some(KnownRef { version: r.1, recent: r.0.recent });
+        self.head.known = Some(KnownRef {
+            version: r.1,
+            recent: r.0.recent,
+        });
         self.save_head()?;
         self.set_orig_head(old)?;
-        self.hooks().notify("post-sync", &[&hooks::id(old), &head.hex()], None);
+        self.hooks()
+            .notify("post-sync", &[&hooks::id(old), &head.hex()], None);
         Ok(changes.len())
     }
 
@@ -1037,19 +1273,27 @@ impl Worktree {
             }
             n += 1;
             match self.stage.get(p) {
-                Some(Staged::Put { kind, hash, .. }) => {
-                    write_disk(&self.root, p, (*kind).into(), &std::fs::read(pending.join(hash.hex()))?)?
-                }
+                Some(Staged::Put { kind, hash, .. }) => write_disk(
+                    &self.root,
+                    p,
+                    (*kind).into(),
+                    &std::fs::read(pending.join(hash.hex()))?,
+                )?,
                 _ => fetch.push(base[p].clone()),
             }
         }
-        for p in disk.keys().filter(|p| Self::matches(spec, p) && !index.contains_key(*p)) {
+        for p in disk
+            .keys()
+            .filter(|p| Self::matches(spec, p) && !index.contains_key(*p))
+        {
             if base.contains_key(p) {
                 remove_disk(&self.root, p)?; // staged deletion
                 n += 1;
             }
         }
-        Checkout::for_repo(&self.repo).materialize(&self.repo, &self.root, &fetch).await?;
+        Checkout::for_repo(&self.repo)
+            .materialize(&self.repo, &self.root, &fetch)
+            .await?;
         Ok(n)
     }
 }

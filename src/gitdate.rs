@@ -1,7 +1,10 @@
 //! Git's date and identity formatting (date.c, ident.c), for git-compatible output.
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike,
+    Utc,
+};
 
 /// A Git timestamp: seconds since the epoch plus the author's zone as written (`+0200` → 200).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,8 +16,14 @@ pub struct GitDate {
 impl GitDate {
     /// Parse `<unix seconds> <+hhmm>`.
     pub fn parse(s: &str) -> Result<GitDate> {
-        let (secs, tz) = s.trim().split_once(' ').with_context(|| format!("bad date {s:?}"))?;
-        Ok(GitDate { secs: secs.parse()?, tz: tz.parse()? })
+        let (secs, tz) = s
+            .trim()
+            .split_once(' ')
+            .with_context(|| format!("bad date {s:?}"))?;
+        Ok(GitDate {
+            secs: secs.parse()?,
+            tz: tz.parse()?,
+        })
     }
 
     fn offset_secs(tz: i32) -> i32 {
@@ -32,7 +41,8 @@ impl GitDate {
             let tz = secs.signum() * ((secs.abs() / 3600) * 100 + (secs.abs() % 3600) / 60);
             (utc.with_timezone(&off), tz)
         } else {
-            let off = FixedOffset::east_opt(Self::offset_secs(self.tz)).unwrap_or(FixedOffset::east_opt(0).unwrap());
+            let off = FixedOffset::east_opt(Self::offset_secs(self.tz))
+                .unwrap_or(FixedOffset::east_opt(0).unwrap());
             (utc.with_timezone(&off), self.tz)
         }
     }
@@ -78,7 +88,9 @@ pub fn parse_date_mode(s: &str) -> Result<(DateMode, bool)> {
 }
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 fn tz_str(tz: i32) -> String {
     format!("{}{:04}", if tz < 0 { '-' } else { '+' }, tz.abs())
@@ -125,7 +137,10 @@ pub fn relative(secs: i64, now: i64) -> String {
         let months = total_months % 12;
         let y = format!("{years} year{}", if years == 1 { "" } else { "s" });
         if months > 0 {
-            return format!("{y}, {months} month{} ago", if months == 1 { "" } else { "s" });
+            return format!(
+                "{y}, {months} month{} ago",
+                if months == 1 { "" } else { "s" }
+            );
         }
         return format!("{y} ago");
     }
@@ -140,31 +155,53 @@ pub fn format_date(d: GitDate, mode: &DateMode, local: bool) -> String {
         _ => {}
     }
     let (t, tz) = d.local_time(local);
-    let (wd, mon) = (WEEKDAYS[t.weekday().num_days_from_sunday() as usize], MONTHS[t.month0() as usize]);
+    let (wd, mon) = (
+        WEEKDAYS[t.weekday().num_days_from_sunday() as usize],
+        MONTHS[t.month0() as usize],
+    );
     let hms = format!("{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second());
     match mode {
         DateMode::Raw => format!("{} {}", d.secs, tz_str(tz)),
         DateMode::Short => format!("{:04}-{:02}-{:02}", t.year(), t.month(), t.day()),
-        DateMode::Iso => format!("{:04}-{:02}-{:02} {hms} {}", t.year(), t.month(), t.day(), tz_str(tz)),
+        DateMode::Iso => format!(
+            "{:04}-{:02}-{:02} {hms} {}",
+            t.year(),
+            t.month(),
+            t.day(),
+            tz_str(tz)
+        ),
         DateMode::IsoStrict => {
             let z = if tz == 0 {
                 "Z".to_string()
             } else {
-                format!("{}{:02}:{:02}", if tz < 0 { '-' } else { '+' }, tz.abs() / 100, tz.abs() % 100)
+                format!(
+                    "{}{:02}:{:02}",
+                    if tz < 0 { '-' } else { '+' },
+                    tz.abs() / 100,
+                    tz.abs() % 100
+                )
             };
             format!("{:04}-{:02}-{:02}T{hms}{z}", t.year(), t.month(), t.day())
         }
         DateMode::Rfc => format!("{wd}, {} {mon} {} {hms} {}", t.day(), t.year(), tz_str(tz)),
         DateMode::Format(f) => {
             // Git hands the zone to strftime as the commit's own offset; %Z is empty unless local.
-            let f = if local { f.clone() } else { f.replace("%Z", "") };
+            let f = if local {
+                f.clone()
+            } else {
+                f.replace("%Z", "")
+            };
             let f = f.replace("%z", &tz_str(tz));
             t.format(&f).to_string()
         }
         DateMode::Human => human(d, t, tz, local),
         _ => {
             let base = format!("{wd} {mon} {} {hms} {}", t.day(), t.year());
-            if local { base } else { format!("{base} {}", tz_str(tz)) }
+            if local {
+                base
+            } else {
+                format!("{base} {}", tz_str(tz))
+            }
         }
     }
 }
@@ -177,7 +214,10 @@ fn human(d: GitDate, t: DateTime<FixedOffset>, tz: i32, local: bool) -> String {
     if (0..12 * 3600).contains(&diff) && same_tz {
         return relative(d.secs, now.timestamp());
     }
-    let (wd, mon) = (WEEKDAYS[t.weekday().num_days_from_sunday() as usize], MONTHS[t.month0() as usize]);
+    let (wd, mon) = (
+        WEEKDAYS[t.weekday().num_days_from_sunday() as usize],
+        MONTHS[t.month0() as usize],
+    );
     let mut out = String::new();
     let hide_year = t.year() == now.year();
     let within_week = hide_year && (0..6 * 86400).contains(&diff);
@@ -223,8 +263,13 @@ pub fn parse_approx(s: &str) -> Result<i64> {
         "yesterday" => return Ok(now.timestamp() - 86400),
         _ => {}
     }
-    let words: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == '.').filter(|w| !w.is_empty()).collect();
-    if words.len() >= 2 && words.last() == Some(&"ago") || (words.len() == 2 && words[0].parse::<i64>().is_ok()) {
+    let words: Vec<&str> = s
+        .split(|c: char| c.is_whitespace() || c == '.')
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.len() >= 2 && words.last() == Some(&"ago")
+        || (words.len() == 2 && words[0].parse::<i64>().is_ok())
+    {
         let n: i64 = words[0].parse().with_context(|| format!("bad date {s}"))?;
         let unit = words[1].trim_end_matches('s');
         let secs = match unit {
@@ -252,14 +297,22 @@ pub fn parse_approx(s: &str) -> Result<i64> {
     }
     for f in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"] {
         if let Ok(t) = NaiveDateTime::parse_from_str(s, f) {
-            return Ok(Local.from_local_datetime(&t).earliest().context("bad local time")?.timestamp());
+            return Ok(Local
+                .from_local_datetime(&t)
+                .earliest()
+                .context("bad local time")?
+                .timestamp());
         }
     }
     for f in ["%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"] {
         if let Ok(d) = NaiveDate::parse_from_str(s, f) {
             // Git keeps the current time of day for a bare date.
             let t = d.and_time(now.time());
-            return Ok(Local.from_local_datetime(&t).earliest().context("bad local time")?.timestamp());
+            return Ok(Local
+                .from_local_datetime(&t)
+                .earliest()
+                .context("bad local time")?
+                .timestamp());
         }
     }
     bail!("unsupported date {s:?}")
@@ -272,10 +325,22 @@ mod tests {
     #[test]
     fn formats() {
         let d = GitDate::parse("1729165696 +0200").unwrap();
-        assert_eq!(format_date(d, &DateMode::Normal, false), "Thu Oct 17 13:48:16 2024 +0200");
-        assert_eq!(format_date(d, &DateMode::Iso, false), "2024-10-17 13:48:16 +0200");
-        assert_eq!(format_date(d, &DateMode::IsoStrict, false), "2024-10-17T13:48:16+02:00");
-        assert_eq!(format_date(d, &DateMode::Rfc, false), "Thu, 17 Oct 2024 13:48:16 +0200");
+        assert_eq!(
+            format_date(d, &DateMode::Normal, false),
+            "Thu Oct 17 13:48:16 2024 +0200"
+        );
+        assert_eq!(
+            format_date(d, &DateMode::Iso, false),
+            "2024-10-17 13:48:16 +0200"
+        );
+        assert_eq!(
+            format_date(d, &DateMode::IsoStrict, false),
+            "2024-10-17T13:48:16+02:00"
+        );
+        assert_eq!(
+            format_date(d, &DateMode::Rfc, false),
+            "Thu, 17 Oct 2024 13:48:16 +0200"
+        );
         assert_eq!(format_date(d, &DateMode::Short, false), "2024-10-17");
         let d = GitDate::parse("1000 -0430").unwrap();
         assert_eq!(format_date(d, &DateMode::Raw, false), "1000 -0430");

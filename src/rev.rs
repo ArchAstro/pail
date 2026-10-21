@@ -93,7 +93,9 @@ impl Ctx {
             return Ok(bare(Repo::remote(&store_url(&s)?)?, None));
         }
         let start = match repo.or_else(|| std::env::var_os("PAIL_DIR").map(PathBuf::from)) {
-            Some(d) => std::fs::canonicalize(&d).with_context(|| format!("{} not found", d.display()))?,
+            Some(d) => {
+                std::fs::canonicalize(&d).with_context(|| format!("{} not found", d.display()))?
+            }
             None => std::fs::canonicalize(std::env::current_dir()?)?,
         };
         match crate::local::discover(&start)? {
@@ -136,7 +138,10 @@ impl Ctx {
 
     /// The branch HEAD names: a working copy's branch, else the store's default branch.
     pub async fn branch(&self) -> Result<&str> {
-        self.branch.get_or_try_init(|| async { self.default_branch().await.map(str::to_string) }).await.map(String::as_str)
+        self.branch
+            .get_or_try_init(|| async { self.default_branch().await.map(str::to_string) })
+            .await
+            .map(String::as_str)
     }
 
     /// The store's default branch (`HEAD` in the store; remembered by a local repository):
@@ -144,7 +149,11 @@ impl Ctx {
     pub async fn default_branch(&self) -> Result<&str> {
         self.default_branch
             .get_or_try_init(|| async {
-                if let Some(b) = self.head_memo().and_then(|p| std::fs::read_to_string(p).ok()).filter(|b| !b.is_empty()) {
+                if let Some(b) = self
+                    .head_memo()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .filter(|b| !b.is_empty())
+                {
                     return Ok(b.trim().to_string());
                 }
                 self.store_default_branch().await
@@ -159,7 +168,9 @@ impl Ctx {
         if self.repo.read_ref(branch).await?.is_none() {
             bail!("branch {branch} not found");
         }
-        let head = serde_json::to_vec(&StoreHead { branch: branch.to_string() })?;
+        let head = serde_json::to_vec(&StoreHead {
+            branch: branch.to_string(),
+        })?;
         self.repo.store.put(STORE_HEAD_KEY, head.into()).await?;
         if let Some(p) = self.head_memo() {
             let _ = std::fs::write(p, branch);
@@ -190,7 +201,10 @@ impl Ctx {
     pub async fn head_commit(&self) -> Result<Hash> {
         match self.head().await? {
             Some(h) => Ok(h),
-            None => bail!("your current branch '{}' does not have any commits yet", self.branch().await?),
+            None => bail!(
+                "your current branch '{}' does not have any commits yet",
+                self.branch().await?
+            ),
         }
     }
 
@@ -242,7 +256,9 @@ impl Ctx {
     pub async fn resolve(&self, spec: &str) -> Result<Hash> {
         match self.try_resolve(spec).await? {
             Some(h) => Ok(h),
-            None => bail!("ambiguous argument '{spec}': unknown revision or path not in the working tree."),
+            None => bail!(
+                "ambiguous argument '{spec}': unknown revision or path not in the working tree."
+            ),
         }
     }
 
@@ -250,7 +266,9 @@ impl Ctx {
     pub async fn try_resolve(&self, spec: &str) -> Result<Option<Hash>> {
         let cut = spec.find(['~', '^']).unwrap_or(spec.len());
         let (base, mut rest) = spec.split_at(cut);
-        let Some(mut h) = self.resolve_base(base).await? else { return Ok(None) };
+        let Some(mut h) = self.resolve_base(base).await? else {
+            return Ok(None);
+        };
         while !rest.is_empty() {
             let op = rest.as_bytes()[0];
             rest = &rest[1..];
@@ -264,7 +282,11 @@ impl Ctx {
                 continue;
             }
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-            let n: usize = if digits == 0 { 1 } else { rest[..digits].parse()? };
+            let n: usize = if digits == 0 {
+                1
+            } else {
+                rest[..digits].parse()?
+            };
             rest = &rest[digits..];
             let steps = match (op, n) {
                 (b'~', n) => n,
@@ -272,9 +294,15 @@ impl Ctx {
                 (b'^', 1) => 1,
                 (b'^', n) => {
                     let c = self.commit(&h).await?;
-                    let parents = c.meta.get("git.parents").map(|p| p.split_whitespace().count()).unwrap_or(0);
+                    let parents = c
+                        .meta
+                        .get("git.parents")
+                        .map(|p| p.split_whitespace().count())
+                        .unwrap_or(0);
                     if n <= parents {
-                        bail!("{spec}: parent {n} is a merged side branch; pail keeps first-parent history only");
+                        bail!(
+                            "{spec}: parent {n} is a merged side branch; pail keeps first-parent history only"
+                        );
                     }
                     return Ok(None);
                 }
@@ -296,7 +324,10 @@ impl Ctx {
         }
         if base == "ORIG_HEAD" {
             // Recorded by commands that move a working copy: switch, sync, a replayed commit.
-            let wt = self.worktree.as_ref().context("ORIG_HEAD needs a working copy")?;
+            let wt = self
+                .worktree
+                .as_ref()
+                .context("ORIG_HEAD needs a working copy")?;
             return match std::fs::read_to_string(wt.join(crate::local::DOT).join("ORIG_HEAD")) {
                 Ok(s) => Ok(Some(Hash::from_hex(s.trim())?)),
                 Err(_) => Ok(None),
@@ -325,7 +356,13 @@ impl Ctx {
         if self.repo.graph().is_some() {
             // Bring every branch into the graph, then look again; pail ids it still doesn't
             // know are listed from the store.
-            let tips: Vec<Hash> = self.repo.list_refs().await?.into_iter().map(|(_, h)| h).collect();
+            let tips: Vec<Hash> = self
+                .repo
+                .list_refs()
+                .await?
+                .into_iter()
+                .map(|(_, h)| h)
+                .collect();
             self.repo.ensure_graph(&tips).await?;
             if let Some(h) = self.graph_lookup(&base)? {
                 return Ok(Some(h));
@@ -355,7 +392,12 @@ impl Ctx {
                     found.push(*h);
                 }
             } else {
-                found.extend(idx.to_pail.iter().filter(|(g, _)| g.starts_with(&base)).map(|(_, h)| *h));
+                found.extend(
+                    idx.to_pail
+                        .iter()
+                        .filter(|(g, _)| g.starts_with(&base))
+                        .map(|(_, h)| *h),
+                );
             }
         }
         found.sort();
@@ -369,7 +411,9 @@ impl Ctx {
 
     /// A unique commit for a hex prefix (pail or Git id) among those the graph holds.
     fn graph_lookup(&self, hex: &str) -> Result<Option<Hash>> {
-        let Some(g) = self.repo.graph() else { return Ok(None) };
+        let Some(g) = self.repo.graph() else {
+            return Ok(None);
+        };
         let v = g.view();
         if hex.len() == 64 {
             return Ok(Hash::from_hex(hex).ok().filter(|h| v.contains(h)));
@@ -422,7 +466,11 @@ impl Ctx {
         v.sort_unstable();
         let mut len = min;
         for w in v.windows(2) {
-            let common = w[0].bytes().zip(w[1].bytes()).take_while(|(a, b)| a == b).count();
+            let common = w[0]
+                .bytes()
+                .zip(w[1].bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
             len = len.max(common + 1);
         }
         len

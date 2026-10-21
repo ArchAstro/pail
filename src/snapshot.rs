@@ -55,7 +55,11 @@ impl Node {
 
 /// Upper bound of the keys under `dir/` in byte order: `dir0` ('0' follows '/').
 fn dir_bounds(dir: &str) -> (String, String) {
-    if dir.is_empty() { (String::new(), "\u{10FFFF}".to_string()) } else { (format!("{dir}/"), format!("{dir}0")) }
+    if dir.is_empty() {
+        (String::new(), "\u{10FFFF}".to_string())
+    } else {
+        (format!("{dir}/"), format!("{dir}0"))
+    }
 }
 
 impl<'a> Snapshot<'a> {
@@ -76,8 +80,14 @@ impl<'a> Snapshot<'a> {
                 break;
             }
             let p = self.repo.page(&c.hash).await?;
-            let Page::Leaf(es) = &*p else { bail!("expected a leaf page") };
-            out.extend(es.iter().filter(|e| e.path.as_str() >= lo && e.path.as_str() < hi).cloned());
+            let Page::Leaf(es) = &*p else {
+                bail!("expected a leaf page")
+            };
+            out.extend(
+                es.iter()
+                    .filter(|e| e.path.as_str() >= lo && e.path.as_str() < hi)
+                    .cloned(),
+            );
             if c.key.as_str() >= hi {
                 break;
             }
@@ -101,7 +111,13 @@ impl<'a> Snapshot<'a> {
         let path = path.trim_matches('/');
         if !path.is_empty() {
             if let Some(e) = self.file(path).await? {
-                return Ok(Some(Node { path: e.path.clone(), kind: e.kind.into(), size: e.size, files: 1, entry: Some(e) }));
+                return Ok(Some(Node {
+                    path: e.path.clone(),
+                    kind: e.kind.into(),
+                    size: e.size,
+                    files: 1,
+                    entry: Some(e),
+                }));
             }
         }
         let under = self.walk(path).await?;
@@ -109,7 +125,13 @@ impl<'a> Snapshot<'a> {
             return Ok(None);
         }
         let size = under.iter().map(|e| e.size).sum();
-        Ok(Some(Node { path: path.to_string(), kind: NodeKind::Dir, size, files: under.len() as u64, entry: None }))
+        Ok(Some(Node {
+            path: path.to_string(),
+            kind: NodeKind::Dir,
+            size,
+            files: under.len() as u64,
+            entry: None,
+        }))
     }
 
     /// The immediate children of a directory, in Git tree order (byte order of full paths).
@@ -127,15 +149,31 @@ impl<'a> Snapshot<'a> {
         for e in under {
             let rest = &e.path[skip..];
             match rest.split_once('/') {
-                None => out.push(Node { path: e.path.clone(), kind: e.kind.into(), size: e.size, files: 1, entry: Some(e) }),
+                None => out.push(Node {
+                    path: e.path.clone(),
+                    kind: e.kind.into(),
+                    size: e.size,
+                    files: 1,
+                    entry: Some(e),
+                }),
                 Some((name, _)) => {
-                    let path = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
+                    let path = if dir.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{dir}/{name}")
+                    };
                     match out.last_mut() {
                         Some(n) if n.kind == NodeKind::Dir && n.path == path => {
                             n.size += e.size;
                             n.files += 1;
                         }
-                        _ => out.push(Node { path, kind: NodeKind::Dir, size: e.size, files: 1, entry: None }),
+                        _ => out.push(Node {
+                            path,
+                            kind: NodeKind::Dir,
+                            size: e.size,
+                            files: 1,
+                            entry: None,
+                        }),
                     }
                 }
             }
@@ -145,8 +183,15 @@ impl<'a> Snapshot<'a> {
 
     /// A file's bytes (a symlink's target).
     pub async fn read(&self, path: &str) -> Result<Bytes> {
-        let e = self.file(path).await?.with_context(|| format!("path '{path}' does not exist in the commit"))?;
-        Ok(self.repo.read_files(std::slice::from_ref(&e)).await?.remove(0))
+        let e = self
+            .file(path)
+            .await?
+            .with_context(|| format!("path '{path}' does not exist in the commit"))?;
+        Ok(self
+            .repo
+            .read_files(std::slice::from_ref(&e))
+            .await?
+            .remove(0))
     }
 
     /// Bytes `[offset, offset+len)` of a file, clamped to its size.

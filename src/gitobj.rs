@@ -18,10 +18,19 @@ use crate::snapshot::Snapshot;
 
 /// What an object name resolves to.
 pub enum Object {
-    Commit { hash: Hash, commit: std::sync::Arc<Commit> },
+    Commit {
+        hash: Hash,
+        commit: std::sync::Arc<Commit>,
+    },
     /// A directory of a commit ("" for the root).
-    Tree { commit: Hash, path: String },
-    Blob { commit: Hash, entry: Entry },
+    Tree {
+        commit: Hash,
+        path: String,
+    },
+    Blob {
+        commit: Hash,
+        entry: Entry,
+    },
 }
 
 impl Object {
@@ -61,17 +70,26 @@ pub struct IdIndex {
 
 impl IdIndex {
     pub fn new(path: Option<std::path::PathBuf>) -> IdIndex {
-        IdIndex { path, map: std::sync::OnceLock::new() }
+        IdIndex {
+            path,
+            map: std::sync::OnceLock::new(),
+        }
     }
 
     fn map(&self) -> &std::sync::Mutex<HashMap<Hash, String>> {
         self.map.get_or_init(|| {
-            let text = self.path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+            let text = self
+                .path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
             let m = text
                 .lines()
                 .filter_map(|l| {
                     let (h, g) = l.split_once(' ')?;
-                    (g.len() == 40).then(|| Some((Hash::from_hex(h).ok()?, g.to_string()))).flatten()
+                    (g.len() == 40)
+                        .then(|| Some((Hash::from_hex(h).ok()?, g.to_string())))
+                        .flatten()
                 })
                 .collect();
             std::sync::Mutex::new(m)
@@ -95,7 +113,11 @@ impl IdIndex {
             buf.push_str(&format!("{} {g}\n", h.hex()));
         }
         // O_APPEND: concurrent writers interleave whole writes.
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+        {
             let _ = f.write_all(buf.as_bytes());
         }
     }
@@ -157,17 +179,30 @@ impl<'a> GitObjects<'a> {
     /// Resolve `<rev>`, `<rev>^{tree}`, `<rev>:<path>`.
     pub async fn resolve(&self, name: &str) -> Result<Object> {
         if let Some((rev, path)) = name.split_once(':') {
-            let commit = if rev.is_empty() { self.ctx.head_commit().await? } else { self.ctx.resolve(rev).await? };
+            let commit = if rev.is_empty() {
+                self.ctx.head_commit().await?
+            } else {
+                self.ctx.resolve(rev).await?
+            };
             let path = path.trim_start_matches("./").trim_matches('/');
             let snap = Snapshot::open(&self.ctx.repo, commit).await?;
             return match snap.stat(path).await? {
-                Some(n) if n.entry.is_some() => Ok(Object::Blob { commit, entry: n.entry.unwrap() }),
-                Some(_) => Ok(Object::Tree { commit, path: path.to_string() }),
+                Some(n) if n.entry.is_some() => Ok(Object::Blob {
+                    commit,
+                    entry: n.entry.unwrap(),
+                }),
+                Some(_) => Ok(Object::Tree {
+                    commit,
+                    path: path.to_string(),
+                }),
                 None => bail!("path '{path}' does not exist in '{rev}'"),
             };
         }
         if let Some(rev) = name.strip_suffix("^{tree}") {
-            return Ok(Object::Tree { commit: self.ctx.resolve(rev).await?, path: String::new() });
+            return Ok(Object::Tree {
+                commit: self.ctx.resolve(rev).await?,
+                path: String::new(),
+            });
         }
         let hash = self.ctx.resolve(name).await?;
         let commit = self.ctx.commit(&hash).await?;
@@ -176,7 +211,12 @@ impl<'a> GitObjects<'a> {
 
     /// Items of a directory, with Git ids for blobs and subtrees (subtree ids hash
     /// everything under them).
-    pub async fn tree_items(&self, commit: Hash, dir: &str, recursive: bool) -> Result<Vec<TreeItem>> {
+    pub async fn tree_items(
+        &self,
+        commit: Hash,
+        dir: &str,
+        recursive: bool,
+    ) -> Result<Vec<TreeItem>> {
         let snap = Snapshot::open(&self.ctx.repo, commit).await?;
         let files = snap.walk(dir).await?;
         if files.is_empty() && !dir.is_empty() {
@@ -184,19 +224,39 @@ impl<'a> GitObjects<'a> {
         }
         let ids = self.blob_ids(&files).await?;
         let skip = if dir.is_empty() { 0 } else { dir.len() + 1 };
-        let rel: Vec<(String, &Entry)> = files.iter().map(|e| (e.path[skip..].to_string(), e)).collect();
+        let rel: Vec<(String, &Entry)> = files
+            .iter()
+            .map(|e| (e.path[skip..].to_string(), e))
+            .collect();
         let tree_ids = subtree_ids(&rel, &ids)?;
-        let full = |r: &str| if dir.is_empty() { r.to_string() } else { format!("{dir}/{r}") };
+        let full = |r: &str| {
+            if dir.is_empty() {
+                r.to_string()
+            } else {
+                format!("{dir}/{r}")
+            }
+        };
         let mut items = vec![];
         let mut seen = std::collections::HashSet::new();
         for (r, e) in &rel {
             let parts: Vec<&str> = r.split('/').collect();
-            let depth = if recursive { parts.len() - 1 } else { parts.len().min(2) - 1 };
+            let depth = if recursive {
+                parts.len() - 1
+            } else {
+                parts.len().min(2) - 1
+            };
             // Directories on the way: all of them when recursive, the first otherwise.
             for i in 0..depth {
                 let d = parts[..=i].join("/");
                 if seen.insert(d.clone()) {
-                    items.push(TreeItem { mode: "40000", kind: "tree", oid: tree_ids[&d].clone(), name: parts[i].to_string(), path: full(&d), size: None });
+                    items.push(TreeItem {
+                        mode: "40000",
+                        kind: "tree",
+                        oid: tree_ids[&d].clone(),
+                        name: parts[i].to_string(),
+                        path: full(&d),
+                        size: None,
+                    });
                 }
             }
             if recursive || parts.len() == 1 {
@@ -237,8 +297,13 @@ impl<'a> GitObjects<'a> {
         let files = snap.walk(dir).await?;
         let ids = self.blob_ids(&files).await?;
         let skip = if dir.is_empty() { 0 } else { dir.len() + 1 };
-        let rel: Vec<(String, &Entry)> = files.iter().map(|e| (e.path[skip..].to_string(), e)).collect();
-        Ok(subtree_ids(&rel, &ids)?.remove("").unwrap_or_else(|| object_id("tree", b"")))
+        let rel: Vec<(String, &Entry)> = files
+            .iter()
+            .map(|e| (e.path[skip..].to_string(), e))
+            .collect();
+        Ok(subtree_ids(&rel, &ids)?
+            .remove("")
+            .unwrap_or_else(|| object_id("tree", b"")))
     }
 
     /// The raw tree object of a directory.
@@ -259,7 +324,10 @@ impl<'a> GitObjects<'a> {
             Some(x) => hex::decode(x)?,
             None => c.message.clone().into_bytes(),
         };
-        let extra_headers = match (c.meta.get("git.extra_headers"), c.meta.get("git.extra_headers_hex")) {
+        let extra_headers = match (
+            c.meta.get("git.extra_headers"),
+            c.meta.get("git.extra_headers_hex"),
+        ) {
             (Some(s), _) => s.clone().into_bytes(),
             (_, Some(x)) => hex::decode(x)?,
             _ => vec![],
@@ -282,7 +350,9 @@ impl<'a> GitObjects<'a> {
         Ok(match o {
             Object::Commit { hash, commit } => self.ctx.id(hash, commit),
             Object::Tree { commit, path } => self.tree_id(*commit, path).await?,
-            Object::Blob { entry, .. } => self.blob_ids(std::slice::from_ref(entry)).await?[&entry.hash].clone(),
+            Object::Blob { entry, .. } => {
+                self.blob_ids(std::slice::from_ref(entry)).await?[&entry.hash].clone()
+            }
         })
     }
 
@@ -290,7 +360,12 @@ impl<'a> GitObjects<'a> {
         Ok(match o {
             Object::Commit { hash, commit } => self.commit_bytes(hash, commit).await?.into(),
             Object::Tree { commit, path } => self.tree_bytes(*commit, path).await?.into(),
-            Object::Blob { entry, .. } => self.ctx.repo.read_files(std::slice::from_ref(entry)).await?.remove(0),
+            Object::Blob { entry, .. } => self
+                .ctx
+                .repo
+                .read_files(std::slice::from_ref(entry))
+                .await?
+                .remove(0),
         })
     }
 
@@ -309,7 +384,10 @@ fn tree_key(t: &TreeItem) -> Vec<u8> {
 }
 
 /// Git ids of every directory (relative path, "" for the top) in a list of files.
-fn subtree_ids(files: &[(String, &Entry)], blob_ids: &HashMap<Hash, String>) -> Result<HashMap<String, String>> {
+fn subtree_ids(
+    files: &[(String, &Entry)],
+    blob_ids: &HashMap<Hash, String>,
+) -> Result<HashMap<String, String>> {
     enum Node {
         Blob(&'static str, [u8; 20]),
         Dir(BTreeMap<String, Node>),
@@ -320,22 +398,34 @@ fn subtree_ids(files: &[(String, &Entry)], blob_ids: &HashMap<Hash, String>) -> 
         let name = parts.pop().unwrap().to_string();
         let mut dir = &mut root;
         for p in parts {
-            let n = dir.entry(p.to_string()).or_insert_with(|| Node::Dir(BTreeMap::new()));
+            let n = dir
+                .entry(p.to_string())
+                .or_insert_with(|| Node::Dir(BTreeMap::new()));
             dir = match n {
                 Node::Dir(d) => d,
                 Node::Blob(..) => bail!("{path}: a file is also used as a directory"),
             };
         }
-        let raw: [u8; 20] = hex::decode(&blob_ids[&e.hash])?.try_into().map_err(|_| anyhow::anyhow!("bad blob id"))?;
+        let raw: [u8; 20] = hex::decode(&blob_ids[&e.hash])?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("bad blob id"))?;
         dir.insert(name, Node::Blob(mode_for_kind(e.kind), raw));
     }
-    fn write(prefix: &str, dir: &BTreeMap<String, Node>, out: &mut HashMap<String, String>) -> [u8; 20] {
+    fn write(
+        prefix: &str,
+        dir: &BTreeMap<String, Node>,
+        out: &mut HashMap<String, String>,
+    ) -> [u8; 20] {
         let mut items: Vec<(Vec<u8>, &str, [u8; 20], &str)> = dir
             .iter()
             .map(|(name, n)| match n {
                 Node::Blob(mode, oid) => (name.as_bytes().to_vec(), *mode, *oid, name.as_str()),
                 Node::Dir(d) => {
-                    let p = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+                    let p = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}/{name}")
+                    };
                     let mut k = name.as_bytes().to_vec();
                     k.push(b'/');
                     (k, "40000", write(&p, d, out), name.as_str())

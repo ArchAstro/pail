@@ -104,7 +104,9 @@ impl DiffOpts {
                     self.stat_count = v.parse().ok();
                 } else if let Some(v) = a.strip_prefix("-U").or(a.strip_prefix("--unified=")) {
                     self.patch = true;
-                    self.context = v.parse().map_err(|_| crate::gitlog::Fatal(format!("bad context {v}")))?;
+                    self.context = v
+                        .parse()
+                        .map_err(|_| crate::gitlog::Fatal(format!("bad context {v}")))?;
                 } else if let Some(v) = a.strip_prefix("-M").or(a.strip_prefix("--find-renames=")) {
                     self.renames = true;
                     self.rename_score = v.trim_end_matches('%').parse().unwrap_or(50);
@@ -117,7 +119,15 @@ impl DiffOpts {
     }
 
     pub fn any_output(&self) -> bool {
-        !self.no_patch && (self.name_only || self.name_status || self.raw || self.stat || self.numstat || self.shortstat || self.summary || self.patch)
+        !self.no_patch
+            && (self.name_only
+                || self.name_status
+                || self.raw
+                || self.stat
+                || self.numstat
+                || self.shortstat
+                || self.summary
+                || self.patch)
     }
 
     pub fn stat_and_patch(&self) -> bool {
@@ -136,17 +146,27 @@ pub struct FilePair {
 
 impl FilePair {
     fn old_path(&self) -> &str {
-        self.old.as_ref().or(self.new.as_ref()).map(|e| e.path.as_str()).unwrap()
+        self.old
+            .as_ref()
+            .or(self.new.as_ref())
+            .map(|e| e.path.as_str())
+            .unwrap()
     }
     fn new_path(&self) -> &str {
-        self.new.as_ref().or(self.old.as_ref()).map(|e| e.path.as_str()).unwrap()
+        self.new
+            .as_ref()
+            .or(self.old.as_ref())
+            .map(|e| e.path.as_str())
+            .unwrap()
     }
     fn status(&self) -> String {
         match (&self.old, &self.new, self.rename) {
             (_, _, Some(s)) => format!("R{s:03}"),
             (None, Some(_), _) => "A".into(),
             (Some(_), None, _) => "D".into(),
-            (Some(a), Some(b), _) if (a.kind == Kind::Symlink) != (b.kind == Kind::Symlink) => "T".into(),
+            (Some(a), Some(b), _) if (a.kind == Kind::Symlink) != (b.kind == Kind::Symlink) => {
+                "T".into()
+            }
             _ => "M".into(),
         }
     }
@@ -155,7 +175,9 @@ impl FilePair {
 /// Git's C-style quoting of paths with control characters, quotes, backslashes or non-ASCII
 /// bytes (core.quotePath).
 pub fn quote_path(p: &str) -> String {
-    let needs = p.bytes().any(|b| b < 0x20 || b >= 0x7f || b == b'"' || b == b'\\');
+    let needs = p
+        .bytes()
+        .any(|b| b < 0x20 || b >= 0x7f || b == b'"' || b == b'\\');
     if !needs {
         return p.to_string();
     }
@@ -182,7 +204,11 @@ pub fn quote_path(p: &str) -> String {
 /// `prefix/name` quoted as one unit, as diff headers do.
 fn quote_prefixed(prefix: &str, p: &str) -> String {
     let q = quote_path(p);
-    if q.starts_with('"') { format!("\"{prefix}{}", &q[1..]) } else { format!("{prefix}{p}") }
+    if q.starts_with('"') {
+        format!("\"{prefix}{}", &q[1..])
+    } else {
+        format!("{prefix}{p}")
+    }
 }
 
 const MAX_SCORE: u64 = 60000;
@@ -239,7 +265,11 @@ fn similarity(src: &[u8], dst: &[u8], min_score: u64) -> u64 {
             copied += (*n).min(*m);
         }
     }
-    if max_size == 0 { MAX_SCORE } else { copied * MAX_SCORE / max_size }
+    if max_size == 0 {
+        MAX_SCORE
+    } else {
+        copied * MAX_SCORE / max_size
+    }
 }
 
 pub struct DiffPrinter<'a> {
@@ -254,8 +284,20 @@ pub struct DiffPrinter<'a> {
 }
 
 impl<'a> DiffPrinter<'a> {
-    pub async fn new(ctx: &'a Ctx, o: &'a DiffOpts, color: bool, abbrev: usize) -> Result<DiffPrinter<'a>> {
-        Ok(DiffPrinter { ctx, o, color, abbrev, prefetched: Default::default(), scripts: Default::default() })
+    pub async fn new(
+        ctx: &'a Ctx,
+        o: &'a DiffOpts,
+        color: bool,
+        abbrev: usize,
+    ) -> Result<DiffPrinter<'a>> {
+        Ok(DiffPrinter {
+            ctx,
+            o,
+            color,
+            abbrev,
+            prefetched: Default::default(),
+            scripts: Default::default(),
+        })
     }
 
     /// Entries whose contents the requested output needs: all of them for stats, patches and
@@ -264,7 +306,11 @@ impl<'a> DiffPrinter<'a> {
         if !self.o.any_output() {
             return vec![];
         }
-        let full = self.o.stat || self.o.numstat || self.o.shortstat || (self.o.patch && !self.o.no_patch) || self.o.raw;
+        let full = self.o.stat
+            || self.o.numstat
+            || self.o.shortstat
+            || (self.o.patch && !self.o.no_patch)
+            || self.o.raw;
         if full {
             return cs.iter().flat_map(|c| [&c.old, &c.new]).flatten().collect();
         }
@@ -276,7 +322,11 @@ impl<'a> DiffPrinter<'a> {
         if !(adds && dels) {
             return vec![];
         }
-        cs.iter().filter(|c| c.old.is_none() || c.new.is_none()).flat_map(|c| [&c.old, &c.new]).flatten().collect()
+        cs.iter()
+            .filter(|c| c.old.is_none() || c.new.is_none())
+            .flat_map(|c| [&c.old, &c.new])
+            .flatten()
+            .collect()
     }
 
     /// Give old versions named only by hash (from change lists) a location: the local cache
@@ -286,7 +336,9 @@ impl<'a> DiffPrinter<'a> {
         let mut out = Vec::with_capacity(entries.len());
         let mut root = None;
         for e in entries {
-            if !matches!(e.loc, crate::manifest::Loc::Unresolved) || blobs.is_some_and(|b| b.has(&e.hash)) {
+            if !matches!(e.loc, crate::manifest::Loc::Unresolved)
+                || blobs.is_some_and(|b| b.has(&e.hash))
+            {
                 out.push(e);
                 continue;
             }
@@ -295,7 +347,11 @@ impl<'a> DiffPrinter<'a> {
             }
             match self.ctx.repo.get_entry(root.unwrap(), &e.path).await? {
                 Some(found) if found.hash == e.hash => out.push(found),
-                _ => anyhow::bail!("{}: old version {} not found in the parent commit", e.path, e.hash.short()),
+                _ => anyhow::bail!(
+                    "{}: old version {} not found in the parent commit",
+                    e.path,
+                    e.hash.short()
+                ),
             }
         }
         Ok(out)
@@ -307,14 +363,22 @@ impl<'a> DiffPrinter<'a> {
         let mut want: Vec<Entry> = vec![];
         let mut seen = std::collections::HashSet::new();
         for s in shown {
-            let Some(cs) = s.changes.as_deref() else { continue };
-            let mine: Vec<Entry> = self.wanted(cs).into_iter().filter(|e| seen.insert(e.hash)).cloned().collect();
+            let Some(cs) = s.changes.as_deref() else {
+                continue;
+            };
+            let mine: Vec<Entry> = self
+                .wanted(cs)
+                .into_iter()
+                .filter(|e| seen.insert(e.hash))
+                .cloned()
+                .collect();
             want.extend(self.locate(s.commit.parent, mine).await?);
         }
         let data = self.ctx.repo.read_files(&want).await?;
         let data: HashMap<Hash, Bytes> = want.iter().map(|e| e.hash).zip(data).collect();
         // Line diffs for every modified text file in the batch, spread over the cores.
-        let lines = self.o.stat || self.o.numstat || self.o.shortstat || (self.o.patch && !self.o.no_patch);
+        let lines =
+            self.o.stat || self.o.numstat || self.o.shortstat || (self.o.patch && !self.o.no_patch);
         let mut jobs: Vec<(Hash, Hash)> = vec![];
         if lines {
             let mut seen = std::collections::HashSet::new();
@@ -328,7 +392,9 @@ impl<'a> DiffPrinter<'a> {
                 }
             }
         }
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(16);
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .min(16);
         let mut computed: Vec<((Hash, Hash), Vec<crate::xdiff::Change>)> = vec![];
         std::thread::scope(|sc| {
             let handles: Vec<_> = jobs
@@ -353,13 +419,20 @@ impl<'a> DiffPrinter<'a> {
                 computed.extend(h.join().expect("diff thread panicked"));
             }
         });
-        *self.scripts.lock().unwrap() = computed.into_iter().map(|(k, v)| (k, std::sync::Arc::new(v))).collect();
+        *self.scripts.lock().unwrap() = computed
+            .into_iter()
+            .map(|(k, v)| (k, std::sync::Arc::new(v)))
+            .collect();
         *self.prefetched.lock().unwrap() = data;
         Ok(())
     }
 
     /// Contents of every entry in the changes, by content hash.
-    pub async fn load(&self, parent: Option<Hash>, changes: &[Change]) -> Result<HashMap<Hash, Bytes>> {
+    pub async fn load(
+        &self,
+        parent: Option<Hash>,
+        changes: &[Change],
+    ) -> Result<HashMap<Hash, Bytes>> {
         let mut out = HashMap::new();
         let mut want: Vec<Entry> = vec![];
         {
@@ -391,12 +464,26 @@ impl<'a> DiffPrinter<'a> {
         let mut dels: Vec<&Entry> = vec![];
         for c in changes {
             match (&c.old, &c.new) {
-                (Some(a), Some(b)) if (a.kind == Kind::Symlink) != (b.kind == Kind::Symlink) && self.o.patch => {
+                (Some(a), Some(b))
+                    if (a.kind == Kind::Symlink) != (b.kind == Kind::Symlink) && self.o.patch =>
+                {
                     // A type change shows as a deletion plus an addition.
-                    pairs.push(FilePair { old: Some(a.clone()), new: None, rename: None });
-                    pairs.push(FilePair { old: None, new: Some(b.clone()), rename: None });
+                    pairs.push(FilePair {
+                        old: Some(a.clone()),
+                        new: None,
+                        rename: None,
+                    });
+                    pairs.push(FilePair {
+                        old: None,
+                        new: Some(b.clone()),
+                        rename: None,
+                    });
                 }
-                (Some(a), Some(b)) => pairs.push(FilePair { old: Some(a.clone()), new: Some(b.clone()), rename: None }),
+                (Some(a), Some(b)) => pairs.push(FilePair {
+                    old: Some(a.clone()),
+                    new: Some(b.clone()),
+                    rename: None,
+                }),
                 (None, Some(b)) => adds.push(b),
                 (Some(a), None) => dels.push(a),
                 (None, None) => {}
@@ -411,8 +498,16 @@ impl<'a> DiffPrinter<'a> {
                     continue;
                 }
                 let base = a.path.rsplit('/').next();
-                let cands: Vec<usize> = (0..dels.len()).filter(|&d| !used_del[d] && dels[d].hash == a.hash && dels[d].kind != Kind::Symlink).collect();
-                let pick = cands.iter().copied().find(|&d| dels[d].path.rsplit('/').next() == base).or(cands.first().copied());
+                let cands: Vec<usize> = (0..dels.len())
+                    .filter(|&d| {
+                        !used_del[d] && dels[d].hash == a.hash && dels[d].kind != Kind::Symlink
+                    })
+                    .collect();
+                let pick = cands
+                    .iter()
+                    .copied()
+                    .find(|&d| dels[d].path.rsplit('/').next() == base)
+                    .or(cands.first().copied());
                 if let Some(d) = pick {
                     used_del[d] = true;
                     matched_add[ai] = Some((d, 100u32));
@@ -420,17 +515,29 @@ impl<'a> DiffPrinter<'a> {
             }
             // Inexact renames (Git's estimate_similarity), best score first.
             let min_score = self.o.rename_score as u64 * MAX_SCORE / 100;
-            let rest_adds: Vec<usize> = (0..adds.len()).filter(|&i| matched_add[i].is_none() && adds[i].kind != Kind::Symlink).collect();
-            let rest_dels: Vec<usize> = (0..dels.len()).filter(|&i| !used_del[i] && dels[i].kind != Kind::Symlink).collect();
-            if !rest_adds.is_empty() && !rest_dels.is_empty() && rest_adds.len() * rest_dels.len() <= 1000 * 1000 {
+            let rest_adds: Vec<usize> = (0..adds.len())
+                .filter(|&i| matched_add[i].is_none() && adds[i].kind != Kind::Symlink)
+                .collect();
+            let rest_dels: Vec<usize> = (0..dels.len())
+                .filter(|&i| !used_del[i] && dels[i].kind != Kind::Symlink)
+                .collect();
+            if !rest_adds.is_empty()
+                && !rest_dels.is_empty()
+                && rest_adds.len() * rest_dels.len() <= 1000 * 1000
+            {
                 let mut cands: Vec<(u64, usize, usize)> = vec![];
                 for &ai in &rest_adds {
-                    let Some(dst) = data.get(&adds[ai].hash) else { continue };
+                    let Some(dst) = data.get(&adds[ai].hash) else {
+                        continue;
+                    };
                     for &di in &rest_dels {
-                        let Some(src) = data.get(&dels[di].hash) else { continue };
+                        let Some(src) = data.get(&dels[di].hash) else {
+                            continue;
+                        };
                         let mut score = similarity(src, dst, min_score);
                         if score >= min_score {
-                            if dels[di].path.rsplit('/').next() == adds[ai].path.rsplit('/').next() {
+                            if dels[di].path.rsplit('/').next() == adds[ai].path.rsplit('/').next()
+                            {
                                 score += 1; // basename tie-break, as Git's name score
                             }
                             cands.push((score, ai, di));
@@ -450,31 +557,56 @@ impl<'a> DiffPrinter<'a> {
         }
         for (ai, a) in adds.iter().enumerate() {
             match matched_add[ai] {
-                Some((d, s)) => pairs.push(FilePair { old: Some(dels[d].clone()), new: Some((*a).clone()), rename: Some(s) }),
-                None => pairs.push(FilePair { old: None, new: Some((*a).clone()), rename: None }),
+                Some((d, s)) => pairs.push(FilePair {
+                    old: Some(dels[d].clone()),
+                    new: Some((*a).clone()),
+                    rename: Some(s),
+                }),
+                None => pairs.push(FilePair {
+                    old: None,
+                    new: Some((*a).clone()),
+                    rename: None,
+                }),
             }
         }
         for (di, d) in dels.iter().enumerate() {
             if !used_del[di] {
-                pairs.push(FilePair { old: Some((*d).clone()), new: None, rename: None });
+                pairs.push(FilePair {
+                    old: Some((*d).clone()),
+                    new: None,
+                    rename: None,
+                });
             }
         }
         // Git's queue order: by destination path (renames sort by their new name).
-        pairs.sort_by(|a, b| a.new_path().cmp(b.new_path()).then(a.new.is_some().cmp(&b.new.is_some())));
+        pairs.sort_by(|a, b| {
+            a.new_path()
+                .cmp(b.new_path())
+                .then(a.new.is_some().cmp(&b.new.is_some()))
+        });
         pairs
     }
 
     fn blob_id(&self, e: &Entry, data: &HashMap<Hash, Bytes>) -> String {
-        crate::gitobj::blob_id_of(&self.ctx.repo, &e.hash, data.get(&e.hash).map(|b| &b[..]).unwrap_or(b""))
+        crate::gitobj::blob_id_of(
+            &self.ctx.repo,
+            &e.hash,
+            data.get(&e.hash).map(|b| &b[..]).unwrap_or(b""),
+        )
     }
 
     fn abbrev_id(&self, id: &str) -> String {
-        if self.o.full_index { id.to_string() } else { id[..self.abbrev.min(id.len())].to_string() }
+        if self.o.full_index {
+            id.to_string()
+        } else {
+            id[..self.abbrev.min(id.len())].to_string()
+        }
     }
 
     pub async fn print(&self, s: &Shown, changes: &[Change], out: &mut dyn Write) -> Result<()> {
         let needed: Vec<Change> = {
-            let w: std::collections::HashSet<Hash> = self.wanted(changes).iter().map(|e| e.hash).collect();
+            let w: std::collections::HashSet<Hash> =
+                self.wanted(changes).iter().map(|e| e.hash).collect();
             changes
                 .iter()
                 .map(|c| Change {
@@ -490,14 +622,25 @@ impl<'a> DiffPrinter<'a> {
         } else {
             let mut o2 = self.o.clone();
             o2.renames = false;
-            let p = DiffPrinter { ctx: self.ctx, o: &o2, color: self.color, abbrev: self.abbrev, prefetched: Default::default(), scripts: Default::default() };
+            let p = DiffPrinter {
+                ctx: self.ctx,
+                o: &o2,
+                color: self.color,
+                abbrev: self.abbrev,
+                prefetched: Default::default(),
+                scripts: Default::default(),
+            };
             p.pairs(changes, &data)
         };
         let mut sep = false;
         if self.o.raw || self.o.name_only || self.o.name_status {
             for p in &pairs {
                 if self.o.raw {
-                    let mode = |e: &Option<Entry>| e.as_ref().map(|e| mode_for_kind(e.kind)).unwrap_or("000000");
+                    let mode = |e: &Option<Entry>| {
+                        e.as_ref()
+                            .map(|e| mode_for_kind(e.kind))
+                            .unwrap_or("000000")
+                    };
                     let id = |e: &Option<Entry>| match e {
                         Some(e) => self.abbrev_id(&self.blob_id(e, &data)),
                         None => "0".repeat(if self.o.full_index { 40 } else { self.abbrev }),
@@ -508,10 +651,23 @@ impl<'a> DiffPrinter<'a> {
                     } else {
                         quote_path(p.new_path())
                     };
-                    writeln!(out, ":{} {} {} {} {st}\t{names}", mode(&p.old), mode(&p.new), id(&p.old), id(&p.new))?;
+                    writeln!(
+                        out,
+                        ":{} {} {} {} {st}\t{names}",
+                        mode(&p.old),
+                        mode(&p.new),
+                        id(&p.old),
+                        id(&p.new)
+                    )?;
                 } else if self.o.name_status {
                     if p.rename.is_some() {
-                        writeln!(out, "{}\t{}\t{}", p.status(), quote_path(p.old_path()), quote_path(p.new_path()))?;
+                        writeln!(
+                            out,
+                            "{}\t{}\t{}",
+                            p.status(),
+                            quote_path(p.old_path()),
+                            quote_path(p.new_path())
+                        )?;
                     } else {
                         writeln!(out, "{}\t{}", p.status(), quote_path(p.new_path()))?;
                     }
@@ -522,7 +678,11 @@ impl<'a> DiffPrinter<'a> {
             sep = true;
         }
         let needs_counts = self.o.stat || self.o.numstat || self.o.shortstat;
-        let counts: Vec<Counts> = if needs_counts { pairs.iter().map(|p| self.counts(p, &data)).collect() } else { vec![] };
+        let counts: Vec<Counts> = if needs_counts {
+            pairs.iter().map(|p| self.counts(p, &data)).collect()
+        } else {
+            vec![]
+        };
         if self.o.numstat {
             for (p, c) in pairs.iter().zip(&counts) {
                 let name = stat_name(p);
@@ -547,11 +707,35 @@ impl<'a> DiffPrinter<'a> {
         if self.o.summary {
             for p in &pairs {
                 match (&p.old, &p.new, p.rename) {
-                    (Some(_), Some(_), Some(s)) => writeln!(out, " rename {} ({s}%)", rename_name(p.old_path(), p.new_path()))?,
-                    (None, Some(n), _) => writeln!(out, " create mode {} {}", mode_for_kind(n.kind), quote_path(&n.path))?,
-                    (Some(o), None, _) => writeln!(out, " delete mode {} {}", mode_for_kind(o.kind), quote_path(&o.path))?,
-                    (Some(o), Some(n), _) if o.kind != n.kind && o.kind != Kind::Symlink && n.kind != Kind::Symlink => {
-                        writeln!(out, " mode change {} => {} {}", mode_for_kind(o.kind), mode_for_kind(n.kind), quote_path(&n.path))?
+                    (Some(_), Some(_), Some(s)) => writeln!(
+                        out,
+                        " rename {} ({s}%)",
+                        rename_name(p.old_path(), p.new_path())
+                    )?,
+                    (None, Some(n), _) => writeln!(
+                        out,
+                        " create mode {} {}",
+                        mode_for_kind(n.kind),
+                        quote_path(&n.path)
+                    )?,
+                    (Some(o), None, _) => writeln!(
+                        out,
+                        " delete mode {} {}",
+                        mode_for_kind(o.kind),
+                        quote_path(&o.path)
+                    )?,
+                    (Some(o), Some(n), _)
+                        if o.kind != n.kind
+                            && o.kind != Kind::Symlink
+                            && n.kind != Kind::Symlink =>
+                    {
+                        writeln!(
+                            out,
+                            " mode change {} => {} {}",
+                            mode_for_kind(o.kind),
+                            mode_for_kind(n.kind),
+                            quote_path(&n.path)
+                        )?
                     }
                     _ => {}
                 }
@@ -597,7 +781,11 @@ impl<'a> DiffPrinter<'a> {
         if width < 16 + 6 + nw {
             width = 16 + 6 + nw;
         }
-        let mut graph_width: i64 = if max_change as i64 + 4 > bin_width as i64 { max_change as i64 } else { bin_width as i64 - 4 };
+        let mut graph_width: i64 = if max_change as i64 + 4 > bin_width as i64 {
+            max_change as i64
+        } else {
+            bin_width as i64 - 4
+        };
         if let Some(g) = self.o.stat_graph_width {
             if (g as i64) < graph_width {
                 graph_width = g as i64;
@@ -625,7 +813,11 @@ impl<'a> DiffPrinter<'a> {
                 graph_width = width - nw - 6 - name_width;
             }
         }
-        let (add_c, del_c, reset) = if self.color { ("\x1b[32m", "\x1b[31m", "\x1b[m") } else { ("", "", "") };
+        let (add_c, del_c, reset) = if self.color {
+            ("\x1b[32m", "\x1b[31m", "\x1b[m")
+        } else {
+            ("", "", "")
+        };
         for i in 0..count {
             let c = &counts[i];
             let mut name: &str = &names[i];
@@ -648,17 +840,33 @@ impl<'a> DiffPrinter<'a> {
             }
             let padding = (len - width_of(name) as i64).max(0) as usize;
             if c.binary {
-                write!(out, " {prefix}{name}{:padding$} | {:>nw$}", "", "Bin", nw = number_width)?;
+                write!(
+                    out,
+                    " {prefix}{name}{:padding$} | {:>nw$}",
+                    "",
+                    "Bin",
+                    nw = number_width
+                )?;
                 if c.added == 0 && c.deleted == 0 {
                     out.write_all(b"\n")?;
                     continue;
                 }
-                writeln!(out, " {del_c}{}{reset} -> {add_c}{}{reset} bytes", c.deleted, c.added)?;
+                writeln!(
+                    out,
+                    " {del_c}{}{reset} -> {add_c}{}{reset} bytes",
+                    c.deleted, c.added
+                )?;
                 continue;
             }
             let (mut add, mut del) = (c.added as i64, c.deleted as i64);
             if graph_width <= max_change as i64 {
-                let scale = |it: i64| if it == 0 { 0 } else { 1 + it * (graph_width - 1) / max_change as i64 };
+                let scale = |it: i64| {
+                    if it == 0 {
+                        0
+                    } else {
+                        1 + it * (graph_width - 1) / max_change as i64
+                    }
+                };
                 let mut total = scale(add + del);
                 if total < 2 && add > 0 && del > 0 {
                     total = 2;
@@ -672,7 +880,14 @@ impl<'a> DiffPrinter<'a> {
                 }
             }
             let n = c.added + c.deleted;
-            write!(out, " {prefix}{name}{:padding$} | {:>nw$}{}", "", n, if n > 0 { " " } else { "" }, nw = number_width)?;
+            write!(
+                out,
+                " {prefix}{name}{:padding$} | {:>nw$}{}",
+                "",
+                n,
+                if n > 0 { " " } else { "" },
+                nw = number_width
+            )?;
             if add > 0 {
                 write!(out, "{add_c}{}{reset}", "+".repeat(add as usize))?;
             }
@@ -692,17 +907,35 @@ impl<'a> DiffPrinter<'a> {
 
     fn patch(&self, p: &FilePair, data: &HashMap<Hash, Bytes>, out: &mut dyn Write) -> Result<()> {
         let (a, b) = (p.old_path(), p.new_path());
-        writeln!(out, "diff --git {} {}", quote_prefixed("a/", a), quote_prefixed("b/", b))?;
+        writeln!(
+            out,
+            "diff --git {} {}",
+            quote_prefixed("a/", a),
+            quote_prefixed("b/", b)
+        )?;
         let empty = Bytes::new();
-        let old = p.old.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
-        let new = p.new.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
+        let old = p
+            .old
+            .as_ref()
+            .map(|e| data.get(&e.hash).unwrap_or(&empty))
+            .unwrap_or(&empty);
+        let new = p
+            .new
+            .as_ref()
+            .map(|e| data.get(&e.hash).unwrap_or(&empty))
+            .unwrap_or(&empty);
         let mut index_mode = None;
         match (&p.old, &p.new) {
             (None, Some(n)) => writeln!(out, "new file mode {}", mode_for_kind(n.kind))?,
             (Some(o), None) => writeln!(out, "deleted file mode {}", mode_for_kind(o.kind))?,
             (Some(o), Some(n)) => {
                 if o.kind != n.kind {
-                    writeln!(out, "old mode {}\nnew mode {}", mode_for_kind(o.kind), mode_for_kind(n.kind))?;
+                    writeln!(
+                        out,
+                        "old mode {}\nnew mode {}",
+                        mode_for_kind(o.kind),
+                        mode_for_kind(n.kind)
+                    )?;
                 } else {
                     index_mode = Some(mode_for_kind(n.kind));
                 }
@@ -710,7 +943,12 @@ impl<'a> DiffPrinter<'a> {
             _ => {}
         }
         if let Some(s) = p.rename {
-            writeln!(out, "similarity index {s}%\nrename from {}\nrename to {}", quote_path(a), quote_path(b))?;
+            writeln!(
+                out,
+                "similarity index {s}%\nrename from {}\nrename to {}",
+                quote_path(a),
+                quote_path(b)
+            )?;
         }
         let same = match (&p.old, &p.new) {
             (Some(o), Some(n)) => o.hash == n.hash,
@@ -728,8 +966,16 @@ impl<'a> DiffPrinter<'a> {
             None => writeln!(out, "index {}..{}", id(&p.old), id(&p.new))?,
         }
         let binary = is_binary(old) || is_binary(new);
-        let la = if p.old.is_some() { quote_prefixed("a/", a) } else { "/dev/null".into() };
-        let lb = if p.new.is_some() { quote_prefixed("b/", b) } else { "/dev/null".into() };
+        let la = if p.old.is_some() {
+            quote_prefixed("a/", a)
+        } else {
+            "/dev/null".into()
+        };
+        let lb = if p.new.is_some() {
+            quote_prefixed("b/", b)
+        } else {
+            "/dev/null".into()
+        };
         if binary {
             writeln!(out, "Binary files {la} and {lb} differ")?;
             return Ok(());
@@ -752,7 +998,11 @@ fn decimal_width(n: u64) -> usize {
 }
 
 fn term_columns() -> usize {
-    if let Some(c) = std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()).filter(|&c: &usize| c > 0) {
+    if let Some(c) = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .filter(|&c: &usize| c > 0)
+    {
         return c;
     }
     use std::io::IsTerminal;
@@ -768,10 +1018,16 @@ fn term_columns() -> usize {
 pub fn stat_summary(files: usize, adds: u64, dels: u64) -> String {
     let mut s = format!(" {files} file{} changed", if files == 1 { "" } else { "s" });
     if adds > 0 || dels == 0 {
-        s.push_str(&format!(", {adds} insertion{}(+)", if adds == 1 { "" } else { "s" }));
+        s.push_str(&format!(
+            ", {adds} insertion{}(+)",
+            if adds == 1 { "" } else { "s" }
+        ));
     }
     if dels > 0 || adds == 0 {
-        s.push_str(&format!(", {dels} deletion{}(-)", if dels == 1 { "" } else { "s" }));
+        s.push_str(&format!(
+            ", {dels} deletion{}(-)",
+            if dels == 1 { "" } else { "s" }
+        ));
     }
     s
 }
@@ -825,7 +1081,11 @@ fn rename_name(a: &str, b: &str) -> String {
 }
 
 fn stat_name(p: &FilePair) -> String {
-    if p.rename.is_some() { rename_name(p.old_path(), p.new_path()) } else { quote_path(p.new_path()) }
+    if p.rename.is_some() {
+        rename_name(p.old_path(), p.new_path())
+    } else {
+        quote_path(p.new_path())
+    }
 }
 
 struct Counts {
@@ -836,8 +1096,16 @@ struct Counts {
 
 impl DiffPrinter<'_> {
     /// The line diff for a pair: precomputed for the batch, or computed now.
-    fn script(&self, p: &FilePair, old: &[u8], new: &[u8]) -> std::sync::Arc<Vec<crate::xdiff::Change>> {
-        let key = (p.old.as_ref().map(|e| e.hash), p.new.as_ref().map(|e| e.hash));
+    fn script(
+        &self,
+        p: &FilePair,
+        old: &[u8],
+        new: &[u8],
+    ) -> std::sync::Arc<Vec<crate::xdiff::Change>> {
+        let key = (
+            p.old.as_ref().map(|e| e.hash),
+            p.new.as_ref().map(|e| e.hash),
+        );
         if let (Some(a), Some(b)) = key {
             if let Some(s) = self.scripts.lock().unwrap().get(&(a, b)) {
                 return s.clone();
@@ -848,26 +1116,76 @@ impl DiffPrinter<'_> {
 
     fn counts(&self, p: &FilePair, data: &HashMap<Hash, Bytes>) -> Counts {
         let empty = Bytes::new();
-        let old = p.old.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
-        let new = p.new.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
-        if is_binary(old) || is_binary(new) || p.old.as_ref().zip(p.new.as_ref()).is_some_and(|(a, b)| a.hash == b.hash) {
+        let old = p
+            .old
+            .as_ref()
+            .map(|e| data.get(&e.hash).unwrap_or(&empty))
+            .unwrap_or(&empty);
+        let new = p
+            .new
+            .as_ref()
+            .map(|e| data.get(&e.hash).unwrap_or(&empty))
+            .unwrap_or(&empty);
+        if is_binary(old)
+            || is_binary(new)
+            || p.old
+                .as_ref()
+                .zip(p.new.as_ref())
+                .is_some_and(|(a, b)| a.hash == b.hash)
+        {
             return counts(p, data);
         }
         let script = self.script(p, old, new);
-        Counts { added: script.iter().map(|c| c.chg2 as u64).sum(), deleted: script.iter().map(|c| c.chg1 as u64).sum(), binary: false }
+        Counts {
+            added: script.iter().map(|c| c.chg2 as u64).sum(),
+            deleted: script.iter().map(|c| c.chg1 as u64).sum(),
+            binary: false,
+        }
     }
 }
 
 fn counts(p: &FilePair, data: &HashMap<Hash, Bytes>) -> Counts {
     let empty = Bytes::new();
-    let old = p.old.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
-    let new = p.new.as_ref().map(|e| data.get(&e.hash).unwrap_or(&empty)).unwrap_or(&empty);
+    let old = p
+        .old
+        .as_ref()
+        .map(|e| data.get(&e.hash).unwrap_or(&empty))
+        .unwrap_or(&empty);
+    let new = p
+        .new
+        .as_ref()
+        .map(|e| data.get(&e.hash).unwrap_or(&empty))
+        .unwrap_or(&empty);
     if is_binary(old) || is_binary(new) {
-        let same = p.old.as_ref().zip(p.new.as_ref()).is_some_and(|(a, b)| a.hash == b.hash);
-        return if same { Counts { added: 0, deleted: 0, binary: true } } else { Counts { added: new.len() as u64, deleted: old.len() as u64, binary: true } };
+        let same = p
+            .old
+            .as_ref()
+            .zip(p.new.as_ref())
+            .is_some_and(|(a, b)| a.hash == b.hash);
+        return if same {
+            Counts {
+                added: 0,
+                deleted: 0,
+                binary: true,
+            }
+        } else {
+            Counts {
+                added: new.len() as u64,
+                deleted: old.len() as u64,
+                binary: true,
+            }
+        };
     }
-    if p.old.as_ref().zip(p.new.as_ref()).is_some_and(|(a, b)| a.hash == b.hash) {
-        return Counts { added: 0, deleted: 0, binary: false };
+    if p.old
+        .as_ref()
+        .zip(p.new.as_ref())
+        .is_some_and(|(a, b)| a.hash == b.hash)
+    {
+        return Counts {
+            added: 0,
+            deleted: 0,
+            binary: false,
+        };
     }
     let (_, _, script) = crate::xdiff::diff(old, new);
     Counts {
@@ -898,9 +1216,20 @@ fn func_name(line: &[u8]) -> Option<&[u8]> {
 /// Unified hunks exactly as xdl_emit_diff writes them: changes grouped when at most
 /// 2*ctx lines apart, trailing context bounded by both files, function names searched
 /// backwards from each hunk to the previous one.
-fn emit_hunks(old: &[u8], new: &[u8], script: &[crate::xdiff::Change], ctx: usize, color: bool, out: &mut dyn Write) -> Result<()> {
+fn emit_hunks(
+    old: &[u8],
+    new: &[u8],
+    script: &[crate::xdiff::Change],
+    ctx: usize,
+    color: bool,
+    out: &mut dyn Write,
+) -> Result<()> {
     let (la, lb) = (crate::xdiff::records(old), crate::xdiff::records(new));
-    let (c_frag, c_old, c_new, c_reset) = if color { ("\x1b[36m", "\x1b[31m", "\x1b[32m", "\x1b[m") } else { ("", "", "", "") };
+    let (c_frag, c_old, c_new, c_reset) = if color {
+        ("\x1b[36m", "\x1b[31m", "\x1b[32m", "\x1b[m")
+    } else {
+        ("", "", "", "")
+    };
     let emit = |out: &mut dyn Write, sign: &str, color: &str, line: &[u8]| -> Result<()> {
         out.write_all(color.as_bytes())?;
         out.write_all(sign.as_bytes())?;
@@ -920,13 +1249,17 @@ fn emit_hunks(old: &[u8], new: &[u8], script: &[crate::xdiff::Change], ctx: usiz
     let mut i = 0;
     while i < script.len() {
         let mut j = i;
-        while j + 1 < script.len() && (script[j + 1].i1 as i64 - (script[j].i1 + script[j].chg1) as i64) <= 2 * ctx {
+        while j + 1 < script.len()
+            && (script[j + 1].i1 as i64 - (script[j].i1 + script[j].chg1) as i64) <= 2 * ctx
+        {
             j += 1;
         }
         let (xch, xche) = (script[i], script[j]);
         let s1 = (xch.i1 as i64 - ctx).max(0);
         let s2 = (xch.i2 as i64 - ctx).max(0);
-        let lctx = ctx.min(la.len() as i64 - (xche.i1 + xche.chg1) as i64).min(lb.len() as i64 - (xche.i2 + xche.chg2) as i64);
+        let lctx = ctx
+            .min(la.len() as i64 - (xche.i1 + xche.chg1) as i64)
+            .min(lb.len() as i64 - (xche.i2 + xche.chg2) as i64);
         let e1 = (xche.i1 + xche.chg1) as i64 + lctx;
         let e2 = (xche.i2 + xche.chg2) as i64 + lctx;
         let mut l = s1 - 1;

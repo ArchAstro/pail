@@ -41,7 +41,9 @@ pub fn encode_blob(raw: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_blob(stored: &[u8], raw_len: u64) -> Result<Vec<u8>> {
-    let Some((&codec, data)) = stored.split_first() else { bail!("empty blob") };
+    let Some((&codec, data)) = stored.split_first() else {
+        bail!("empty blob")
+    };
     match codec {
         CODEC_RAW => Ok(data.to_vec()),
         CODEC_ZSTD => Ok(zstd::bulk::decompress(data, raw_len as usize)?),
@@ -70,7 +72,8 @@ impl PackBuilder {
         let enc = encode_blob(raw);
         let off = self.buf.len() as u64;
         self.buf.extend_from_slice(&enc);
-        self.index.push((hash, off, enc.len() as u64, raw.len() as u64));
+        self.index
+            .push((hash, off, enc.len() as u64, raw.len() as u64));
         (off, enc.len() as u64)
     }
 
@@ -121,7 +124,9 @@ mod tests {
 
     #[test]
     fn chunks_cover_input() {
-        let data: Vec<u8> = (0..5_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let data: Vec<u8> = (0..5_000_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         let spans = chunk_spans(&data);
         assert!(spans.len() > 1);
         let total: usize = spans.iter().map(|s| s.1).sum();

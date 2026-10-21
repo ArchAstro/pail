@@ -82,10 +82,22 @@ impl GraphView {
         let idx = map(&dir.join(IDX)).filter(|m| m.len() >= HEADER && &m[..8] == MAGIC);
         let dat = map(&dir.join(DAT));
         let (count, git_count, ap, ag) = match &idx {
-            Some(m) => (read_u64(m, 8) as usize, read_u64(m, 16) as usize, m[32] as usize, m[33] as usize),
+            Some(m) => (
+                read_u64(m, 8) as usize,
+                read_u64(m, 16) as usize,
+                m[32] as usize,
+                m[33] as usize,
+            ),
             None => (0, 0, 7, 7),
         };
-        GraphView { idx, dat, count, git_count, abbrev_pail: ap.max(7), abbrev_git: ag.max(7) }
+        GraphView {
+            idx,
+            dat,
+            count,
+            git_count,
+            abbrev_pail: ap.max(7),
+            abbrev_git: ag.max(7),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -139,7 +151,9 @@ impl GraphView {
         struct Meta {
             c: Commit,
         }
-        serde_json::from_slice::<Meta>(self.record(h)?).ok().map(|m| m.c)
+        serde_json::from_slice::<Meta>(self.record(h)?)
+            .ok()
+            .map(|m| m.c)
     }
 
     /// Paths the commit changed, when it records a change list.
@@ -150,13 +164,23 @@ impl GraphView {
             p: Option<std::borrow::Cow<'a, str>>,
         }
         let r: Paths = serde_json::from_slice(self.record(h)?).ok()?;
-        r.p.map(|p| if p.is_empty() { vec![] } else { p.split('\n').map(str::to_string).collect() })
+        r.p.map(|p| {
+            if p.is_empty() {
+                vec![]
+            } else {
+                p.split('\n').map(str::to_string).collect()
+            }
+        })
     }
 
     /// Pail ids starting with a hex prefix.
     pub fn pail_prefix(&self, prefix: &str) -> Vec<Hash> {
         let lo = self.lower_bound(prefix, self.count, |i| self.entry(i).0);
-        (lo..self.count).map(|i| self.entry(i).0).take_while(|id| hex::encode(id).starts_with(prefix)).map(|id| Hash(id.try_into().unwrap())).collect()
+        (lo..self.count)
+            .map(|i| self.entry(i).0)
+            .take_while(|id| hex::encode(id).starts_with(prefix))
+            .map(|id| Hash(id.try_into().unwrap()))
+            .collect()
     }
 
     /// Pail ids of commits whose Git id starts with a hex prefix.
@@ -195,7 +219,10 @@ impl Graph {
         let dir = dir.to_path_buf();
         std::fs::create_dir_all(&dir)?;
         let view = GraphView::open(&dir);
-        Ok(Graph { dir, view: std::sync::RwLock::new(Arc::new(view)) })
+        Ok(Graph {
+            dir,
+            view: std::sync::RwLock::new(Arc::new(view)),
+        })
     }
 
     pub fn view(&self) -> Arc<GraphView> {
@@ -208,14 +235,24 @@ impl Graph {
         let lock = std::fs::File::create(self.dir.join("lock"))?;
         lock.lock_exclusive()?;
         let current = GraphView::open(&self.dir);
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join(DAT))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(DAT))?;
         let mut buf = vec![];
         for (h, c) in commits {
             if current.contains(h) {
                 continue;
             }
-            let slim = Commit { changes: None, ..(**c).clone() };
-            let paths = c.changes.as_ref().and_then(|cs| cs.parse().ok()).map(|m| m.into_keys().collect::<Vec<_>>().join("\n"));
+            let slim = Commit {
+                changes: None,
+                ..(**c).clone()
+            };
+            let paths = c
+                .changes
+                .as_ref()
+                .and_then(|cs| cs.parse().ok())
+                .map(|m| m.into_keys().collect::<Vec<_>>().join("\n"));
             let json = serde_json::to_vec(&serde_json::json!({ "c": slim, "p": paths }))?;
             let git: [u8; 20] = c
                 .meta
@@ -254,14 +291,27 @@ impl Graph {
             off += 4 + len;
         }
         if off < dat.len() {
-            std::fs::OpenOptions::new().write(true).open(&dat_path)?.set_len(off as u64)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&dat_path)?
+                .set_len(off as u64)?;
         }
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         rows.dedup_by(|a, b| a.0 == b.0);
-        let mut gits: Vec<([u8; 20], u32)> =
-            rows.iter().enumerate().filter(|(_, r)| r.2 != [0; 20]).map(|(i, r)| (r.2, i as u32)).collect();
+        let mut gits: Vec<([u8; 20], u32)> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.2 != [0; 20])
+            .map(|(i, r)| (r.2, i as u32))
+            .collect();
         gits.sort();
-        let abbrev = |ids: Vec<&[u8]>| ids.windows(2).map(|w| common_nibbles(w[0], w[1]) + 1).max().unwrap_or(0).max(7);
+        let abbrev = |ids: Vec<&[u8]>| {
+            ids.windows(2)
+                .map(|w| common_nibbles(w[0], w[1]) + 1)
+                .max()
+                .unwrap_or(0)
+                .max(7)
+        };
         let ap = abbrev(rows.iter().map(|r| &r.0[..]).collect());
         let ag = abbrev(gits.iter().map(|g| &g.0[..]).collect());
         let mut out = Vec::with_capacity(HEADER + rows.len() * ENTRY + gits.len() * GIT_ENTRY);

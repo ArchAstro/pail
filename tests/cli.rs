@@ -4,7 +4,9 @@ use std::process::Command;
 /// A global config file private to this test process (never the user's).
 fn global_config() -> std::path::PathBuf {
     static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path().join("config")
+    DIR.get_or_init(|| tempfile::tempdir().unwrap())
+        .path()
+        .join("config")
 }
 
 fn cmd(dir: &Path, args: &[&str]) -> Command {
@@ -21,7 +23,11 @@ fn cmd(dir: &Path, args: &[&str]) -> Command {
 
 fn pail(dir: &Path, args: &[&str]) -> String {
     let out = cmd(dir, args).output().unwrap();
-    let s = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let s = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(out.status.success(), "pail {args:?} failed:\n{s}");
     s
 }
@@ -65,7 +71,11 @@ fn end_to_end_workflow() {
     pail(&b, &["add", "-A"]);
     let out = pail(&b, &["commit", "-m", "bob"]);
     assert!(out.contains("[main"), "{out}");
-    assert_eq!(std::fs::read_to_string(b.join("src/lib.rs")).unwrap(), "v1", "bob picked up alice's file");
+    assert_eq!(
+        std::fs::read_to_string(b.join("src/lib.rs")).unwrap(),
+        "v1",
+        "bob picked up alice's file"
+    );
 
     // Alice syncs, then both edit the same file: the stale one conflicts.
     pail(&a, &["restore", "src/lib.rs"]);
@@ -89,9 +99,15 @@ fn end_to_end_workflow() {
     pail(&a, &["sync"]);
     assert_eq!(std::fs::read_to_string(a.join("feature.txt")).unwrap(), "f");
     let log = pail(&a, &["log", "--oneline"]);
-    assert!(log.lines().next().unwrap().contains("Land feature"), "{log}");
+    assert!(
+        log.lines().next().unwrap().contains("Land feature"),
+        "{log}"
+    );
     let branches = pail(&a, &["branch"]);
-    assert!(branches.contains("* main") && branches.contains("feature"), "{branches}");
+    assert!(
+        branches.contains("* main") && branches.contains("feature"),
+        "{branches}"
+    );
 
     // Symlinks and exec bits survive a fresh clone.
     std::os::unix::fs::symlink("feature.txt", a.join("link")).unwrap();
@@ -102,8 +118,21 @@ fn end_to_end_workflow() {
     pail(&a, &["commit", "-m", "link + exec"]);
     pail(&t, &["clone", &store, "carol"]);
     let c = t.join("carol");
-    assert_eq!(std::fs::read_link(c.join("link")).unwrap().to_str().unwrap(), "feature.txt");
-    assert_eq!(std::fs::metadata(c.join("run.sh")).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(
+        std::fs::read_link(c.join("link"))
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "feature.txt"
+    );
+    assert_eq!(
+        std::fs::metadata(c.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
     assert!(pail(&c, &["status"]).contains("clean"));
 }
 
@@ -130,7 +159,10 @@ fn gc_removes_only_unreachable() {
     let out = pail(&w, &["gc", "--grace-hours", "0"]);
     assert!(!out.contains("deleted 0 object(s)"), "{out}");
     pail(&t, &["clone", &store, "after"]);
-    assert_eq!(std::fs::read_to_string(t.join("after/keep.txt")).unwrap(), "k".repeat(500));
+    assert_eq!(
+        std::fs::read_to_string(t.join("after/keep.txt")).unwrap(),
+        "k".repeat(500)
+    );
     assert!(!t.join("after/doomed.txt").exists());
 }
 
@@ -156,12 +188,17 @@ fn worktrees_share_content_and_build_output() {
     let a = t.join("a");
 
     let lib = "pub fn f() {}\n".repeat(100);
-    let big: Vec<u8> = (0..3u32 << 20).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    let big: Vec<u8> = (0..3u32 << 20)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
     write(&a.join("src/lib.rs"), &lib);
     write(&a.join("README.md"), &"readme ".repeat(20));
     write(&a.join("tiny"), "inline");
     std::fs::write(a.join("big.bin"), &big).unwrap();
-    write(&a.join("run.sh"), &format!("#!/bin/sh\n{}", "echo hi\n".repeat(20)));
+    write(
+        &a.join("run.sh"),
+        &format!("#!/bin/sh\n{}", "echo hi\n".repeat(20)),
+    );
     std::fs::set_permissions(a.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink("src/lib.rs", a.join("link")).unwrap();
     write(&a.join(".gitignore"), "target/\n.env\nscratch/\n");
@@ -173,28 +210,76 @@ fn worktrees_share_content_and_build_output() {
     write(&a.join("scratch/huge.log"), "ignored but not build output");
     // Build tools compare mtimes: sources older than outputs mean "up to date".
     let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-    std::fs::File::options().write(true).open(a.join("src/lib.rs")).unwrap().set_modified(old).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(a.join("src/lib.rs"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     // An unstaged edit in the donor: the new worktree gets the base version with a fresh mtime.
     write(&a.join("README.md"), "edited in a");
     let started = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
 
     let out = pail(&a, &["worktree", "add", "../b", "-b", "feat"]);
-    assert!(out.contains("seeded 2 ignored path(s)") && out.contains(".env") && out.contains("target"), "{out}");
+    assert!(
+        out.contains("seeded 2 ignored path(s)") && out.contains(".env") && out.contains("target"),
+        "{out}"
+    );
     let b = t.join("b");
     assert_eq!(std::fs::read_to_string(b.join("src/lib.rs")).unwrap(), lib);
     assert_eq!(std::fs::read(b.join("big.bin")).unwrap(), big);
-    assert_eq!(std::fs::read_to_string(b.join("README.md")).unwrap(), "readme ".repeat(20));
-    assert_eq!(std::fs::read_link(b.join("link")).unwrap().to_str().unwrap(), "src/lib.rs");
-    assert_eq!(std::fs::metadata(b.join("run.sh")).unwrap().permissions().mode() & 0o777, 0o755);
-    assert_eq!(std::fs::metadata(b.join("src/lib.rs")).unwrap().permissions().mode() & 0o777, 0o644);
-    assert_eq!(std::fs::read_to_string(b.join("target/debug/app")).unwrap(), "binary".repeat(1000));
+    assert_eq!(
+        std::fs::read_to_string(b.join("README.md")).unwrap(),
+        "readme ".repeat(20)
+    );
+    assert_eq!(
+        std::fs::read_link(b.join("link"))
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "src/lib.rs"
+    );
+    assert_eq!(
+        std::fs::metadata(b.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        std::fs::metadata(b.join("src/lib.rs"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.join("target/debug/app")).unwrap(),
+        "binary".repeat(1000)
+    );
     assert_eq!(std::fs::read_to_string(b.join(".env")).unwrap(), "SECRET=1");
-    assert!(!b.join("scratch").exists(), "only build output and env files are seeded by default");
-    assert_eq!(mtime(&b.join("src/lib.rs")), old, "identical file keeps the donor's mtime");
-    assert!(mtime(&b.join("README.md")) >= started, "differing file gets a fresh mtime");
+    assert!(
+        !b.join("scratch").exists(),
+        "only build output and env files are seeded by default"
+    );
+    assert_eq!(
+        mtime(&b.join("src/lib.rs")),
+        old,
+        "identical file keeps the donor's mtime"
+    );
+    assert!(
+        mtime(&b.join("README.md")) >= started,
+        "differing file gets a fresh mtime"
+    );
     let repo = a.join(".pail");
     assert!(blob_path(&repo, lib.as_bytes()).exists() && blob_path(&repo, &big).exists());
-    assert_eq!(std::fs::read_to_string(b.join(".pail/repo")).unwrap(), repo.to_str().unwrap(), "linked to a's repository");
+    assert_eq!(
+        std::fs::read_to_string(b.join(".pail/repo")).unwrap(),
+        repo.to_str().unwrap(),
+        "linked to a's repository"
+    );
     if cfg!(target_vendor = "apple") {
         assert!(out.contains("MB cloned"), "APFS should clone: {out}");
     }
@@ -202,17 +287,29 @@ fn worktrees_share_content_and_build_output() {
     assert!(st.contains("on feat") && st.contains("clean"), "{st}");
 
     // Editing a clone in place touches neither the blob store nor the donor.
-    let mut f = std::fs::File::options().write(true).open(b.join("src/lib.rs")).unwrap();
+    let mut f = std::fs::File::options()
+        .write(true)
+        .open(b.join("src/lib.rs"))
+        .unwrap();
     f.seek(std::io::SeekFrom::Start(0)).unwrap();
     f.write_all(b"XXXX").unwrap();
     drop(f);
-    let mut f = std::fs::File::options().write(true).open(b.join("target/debug/app")).unwrap();
+    let mut f = std::fs::File::options()
+        .write(true)
+        .open(b.join("target/debug/app"))
+        .unwrap();
     f.write_all(b"REBUILT").unwrap();
     drop(f);
     assert_eq!(std::fs::read_to_string(a.join("src/lib.rs")).unwrap(), lib);
-    assert_eq!(std::fs::read_to_string(a.join("target/debug/app")).unwrap(), "binary".repeat(1000));
+    assert_eq!(
+        std::fs::read_to_string(a.join("target/debug/app")).unwrap(),
+        "binary".repeat(1000)
+    );
     let stored = blob_path(&repo, lib.as_bytes());
-    assert_eq!(pail::hash::Hash::of(&std::fs::read(&stored).unwrap()), pail::hash::Hash::of(lib.as_bytes()));
+    assert_eq!(
+        pail::hash::Hash::of(&std::fs::read(&stored).unwrap()),
+        pail::hash::Hash::of(lib.as_bytes())
+    );
     assert!(pail(&b, &["status"]).contains("M src/lib.rs"));
 
     // Committed content goes into the blob store for the next worktree to clone.
@@ -222,17 +319,32 @@ fn worktrees_share_content_and_build_output() {
     assert!(blob_path(&repo, "fresh content ".repeat(10).as_bytes()).exists());
 
     // Without clone support, the same result by copying.
-    let out = cmd(&a, &["worktree", "add", "../c", "--branch", "feat"]).env("PAIL_CLONE", "off").output().unwrap();
+    let out = cmd(&a, &["worktree", "add", "../c", "--branch", "feat"])
+        .env("PAIL_CLONE", "off")
+        .output()
+        .unwrap();
     let out = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.contains("0 KB cloned") && out.contains("0 cloned, 2 copied"), "{out}");
+    assert!(
+        out.contains("0 KB cloned") && out.contains("0 cloned, 2 copied"),
+        "{out}"
+    );
     let c = t.join("c");
-    assert_eq!(std::fs::read_to_string(c.join("new.txt")).unwrap(), "fresh content ".repeat(10));
+    assert_eq!(
+        std::fs::read_to_string(c.join("new.txt")).unwrap(),
+        "fresh content ".repeat(10)
+    );
     assert_eq!(std::fs::read(c.join("big.bin")).unwrap(), big);
-    assert_eq!(std::fs::read_to_string(c.join("target/debug/app")).unwrap(), "binary".repeat(1000));
+    assert_eq!(
+        std::fs::read_to_string(c.join("target/debug/app")).unwrap(),
+        "binary".repeat(1000)
+    );
 
     let list = pail(&a, &["worktree", "list"]);
     assert!(list.contains(&format!("* {}", a.display())), "{list}");
-    assert!(list.contains("feat") && list.contains(&c.display().to_string()), "{list}");
+    assert!(
+        list.contains("feat") && list.contains(&c.display().to_string()),
+        "{list}"
+    );
     let err = pail_fails(&a, &["worktree", "remove", "../b"]);
     assert!(err.contains("uncommitted"), "{err}");
     pail(&a, &["worktree", "remove", "../b", "--force"]);
@@ -270,22 +382,52 @@ fn bare_store_inspection() {
     };
     // Bare HEAD is the store's default branch.
     let subjects = bare_cmd(&["log", "--format=%s"]);
-    assert_eq!(subjects, "third: util\nsecond\nfirst\nInitial empty commit\n");
-    assert_eq!(pail(&w, &["log", "--format=%s", "-2"]), "third: util\nsecond\n");
+    assert_eq!(
+        subjects,
+        "third: util\nsecond\nfirst\nInitial empty commit\n"
+    );
+    assert_eq!(
+        pail(&w, &["log", "--format=%s", "-2"]),
+        "third: util\nsecond\n"
+    );
     let medium = bare_cmd(&["log", "-1", "--skip=2"]);
-    assert!(medium.starts_with("commit ") && medium.contains("Author: Tester <t@example.com>\nDate:   "), "{medium}");
-    assert!(medium.ends_with("\n\n    first\n    \n    body line\n"), "{medium:?}");
-    assert_eq!(bare_cmd(&["log", "--format=%s", "--", "src/util"]), "third: util\n");
+    assert!(
+        medium.starts_with("commit ")
+            && medium.contains("Author: Tester <t@example.com>\nDate:   "),
+        "{medium}"
+    );
+    assert!(
+        medium.ends_with("\n\n    first\n    \n    body line\n"),
+        "{medium:?}"
+    );
+    assert_eq!(
+        bare_cmd(&["log", "--format=%s", "--", "src/util"]),
+        "third: util\n"
+    );
     let ns = bare_cmd(&["log", "--format=%s", "--name-status", "-1", "HEAD~1"]);
     assert_eq!(ns, "second\n\nM\tsrc/lib.rs\n");
     let patch = bare_cmd(&["show", "--format=%s", "HEAD~1"]);
-    assert!(patch.contains("@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n"), "{patch}");
+    assert!(
+        patch.contains("@@ -1 +1,2 @@\n fn a() {}\n+fn b() {}\n"),
+        "{patch}"
+    );
     // Git object ids computed from pail content.
-    assert_eq!(bare_cmd(&["rev-parse", "HEAD:README.md"]).trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
+    assert_eq!(
+        bare_cmd(&["rev-parse", "HEAD:README.md"]).trim(),
+        "ce013625030ba8dba906f756967f9e9ca394464a"
+    );
     let tree = bare_cmd(&["ls-tree", "HEAD"]);
     assert_eq!(tree.lines().count(), 2, "{tree}");
-    assert!(tree.starts_with("100644 blob ce013625030ba8dba906f756967f9e9ca394464a\tREADME.md\n040000 tree "), "{tree}");
-    assert_eq!(bare_cmd(&["cat-file", "-p", "HEAD:src/util/mod.rs"]), "pub mod x;\n");
+    assert!(
+        tree.starts_with(
+            "100644 blob ce013625030ba8dba906f756967f9e9ca394464a\tREADME.md\n040000 tree "
+        ),
+        "{tree}"
+    );
+    assert_eq!(
+        bare_cmd(&["cat-file", "-p", "HEAD:src/util/mod.rs"]),
+        "pub mod x;\n"
+    );
     assert_eq!(bare_cmd(&["cat-file", "-t", "HEAD:src"]), "tree\n");
     // Filesystem-shaped listing and reads.
     assert_eq!(bare_cmd(&["ls", "HEAD:src"]), "lib.rs\nutil/\n");
@@ -324,16 +466,34 @@ fn content_cache_serves_bare_reads() {
     };
     let out = run(&["fetch", "--history"]);
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success() && s.starts_with("fetched 3 file version(s)"), "{s}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success() && s.starts_with("fetched 3 file version(s)"),
+        "{s}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // With the store's packs gone, contents still come from the cache.
     std::fs::remove_dir_all(bare.join("packs")).unwrap();
     let out = run(&["log", "-p", "--format=%s"]);
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success() && s.contains("+alpha two alpha two") && s.contains("+beta beta"), "{s}{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(String::from_utf8_lossy(&run(&["cat", "HEAD~1:a.txt"]).stdout), "alpha ".repeat(100));
+    assert!(
+        out.status.success() && s.contains("+alpha two alpha two") && s.contains("+beta beta"),
+        "{s}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run(&["cat", "HEAD~1:a.txt"]).stdout),
+        "alpha ".repeat(100)
+    );
     let out = run(&["cache", "prune", "--max-size", "0"]);
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("removed 3 file(s)"), "{}", String::from_utf8_lossy(&out.stdout));
-    assert!(!run(&["cat", "a.txt"]).status.success(), "pruned content must be refetched, and the packs are gone");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("removed 3 file(s)"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !run(&["cat", "a.txt"]).status.success(),
+        "pruned content must be refetched, and the packs are gone"
+    );
     // Direct store reads keep nothing locally.
     let out = cmd(&t, &["--store", bare_s, "fetch"]).output().unwrap();
     assert!(!out.status.success(), "fetch needs a local repository");
@@ -362,26 +522,49 @@ fn commit_graph_matches_uncached_reads() {
     let r = t.join("r.pail");
     // Through the bare repository (commit graph, caches) vs straight from the store.
     let read = |local: bool, args: &[&str]| -> String {
-        let mut full = if local { vec!["--repo", r.to_str().unwrap()] } else { vec!["--store", bare_s] };
+        let mut full = if local {
+            vec!["--repo", r.to_str().unwrap()]
+        } else {
+            vec!["--store", bare_s]
+        };
         full.extend_from_slice(args);
         let out = cmd(&t, &full).output().unwrap();
-        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    let cases: [&[&str]; 4] = [&["log"], &["log", "--oneline", "--name-status"], &["log", "-p", "-3", "HEAD~1"], &["log", "--format=%h %p %s", "--", "f1.txt"]];
+    let cases: [&[&str]; 4] = [
+        &["log"],
+        &["log", "--oneline", "--name-status"],
+        &["log", "-p", "-3", "HEAD~1"],
+        &["log", "--format=%h %p %s", "--", "f1.txt"],
+    ];
     for args in cases {
         assert_eq!(read(true, args), read(false, args), "{args:?}");
     }
-    assert!(r.join("graph/commits2.idx").exists(), "the repository's commit graph was built");
+    assert!(
+        r.join("graph/commits2.idx").exists(),
+        "the repository's commit graph was built"
+    );
     // New commits after the graph exists.
     commit(6);
     commit(7);
     for args in cases {
-        assert_eq!(read(true, args), read(false, args), "{args:?} after new commits");
+        assert_eq!(
+            read(true, args),
+            read(false, args),
+            "{args:?} after new commits"
+        );
     }
     // Abbreviated ids resolve through the graph.
     let short = read(true, &["log", "-1", "--format=%h", "HEAD~3"]);
-    assert_eq!(read(true, &["log", "-1", "--format=%s", short.trim()]), "c4\n");
+    assert_eq!(
+        read(true, &["log", "-1", "--format=%s", short.trim()]),
+        "c4\n"
+    );
 }
 
 /// Working copies attach to a repository: a bare one, or the first clone's `.pail/`.
@@ -401,11 +584,23 @@ fn worktrees_attach_to_a_repository() {
     pail(&t, &["clone", "--bare", store_s, "r.pail"]);
     let r = t.join("r.pail");
     pail(&r, &["worktree", "add", "../from-bare"]);
-    assert_eq!(std::fs::read_to_string(t.join("from-bare/a.txt")).unwrap(), "aaaa".repeat(50));
-    assert_eq!(std::fs::read_to_string(t.join("from-bare/.pail/repo")).unwrap(), r.to_str().unwrap());
-    assert!(blob_path(&r, "aaaa".repeat(50).as_bytes()).exists(), "contents live in the bare repository");
+    assert_eq!(
+        std::fs::read_to_string(t.join("from-bare/a.txt")).unwrap(),
+        "aaaa".repeat(50)
+    );
+    assert_eq!(
+        std::fs::read_to_string(t.join("from-bare/.pail/repo")).unwrap(),
+        r.to_str().unwrap()
+    );
+    assert!(
+        blob_path(&r, "aaaa".repeat(50).as_bytes()).exists(),
+        "contents live in the bare repository"
+    );
     let list = pail(&r, &["worktree", "list"]);
-    assert!(list.contains("(bare)") && list.contains("from-bare"), "{list}");
+    assert!(
+        list.contains("(bare)") && list.contains("from-bare"),
+        "{list}"
+    );
     // Commands inside the linked copy use the shared repository.
     assert!(pail(&t.join("from-bare"), &["log", "--format=%s"]).starts_with("a\n"));
 
@@ -454,9 +649,19 @@ fn stacked_commits_land_on_main() {
     commit(&a, "s3: add f2, drop y");
     let stack_ids = read(&["log", "--format=%H", "-3", "feature"]);
     let out = pail(&a, &["land", "feature", "--stack"]);
-    assert!(out.contains("landed 3 commit(s)") && out.contains("fast-forward"), "{out}");
-    assert_eq!(read(&["log", "--format=%H", "-3", "main"]), stack_ids, "the stack's own commits");
-    assert_eq!(read(&["log", "--format=%s", "main"]), "s3: add f2, drop y\ns2: extend f1\ns1: add f1\nbase\nInitial empty commit\n");
+    assert!(
+        out.contains("landed 3 commit(s)") && out.contains("fast-forward"),
+        "{out}"
+    );
+    assert_eq!(
+        read(&["log", "--format=%H", "-3", "main"]),
+        stack_ids,
+        "the stack's own commits"
+    );
+    assert_eq!(
+        read(&["log", "--format=%s", "main"]),
+        "s3: add f2, drop y\ns2: extend f1\ns1: add f1\nbase\nInitial empty commit\n"
+    );
 
     // 2. Main moves meanwhile (disjoint paths): the stack is replayed on the new head.
     pail(&a, &["switch", "main"]);
@@ -472,10 +677,24 @@ fn stacked_commits_land_on_main() {
     write(&b.join("other.txt"), "theirs\n");
     commit(&b, "main moved");
     let out = pail(&a, &["land", "feature2", "--stack"]);
-    assert!(out.contains("landed 2 commit(s)") && out.contains("replayed"), "{out}");
-    assert_eq!(read(&["log", "--format=%s", "-4", "main"]), "t2: extend g\nt1: add g\nmain moved\ns3: add f2, drop y\n");
-    assert_eq!(read(&["log", "--format=%s|%an|%ad", "-2", "main"]), before, "authors, dates and messages kept");
-    assert_eq!(read(&["log", "--format=%s", "--name-status", "-2", "main"]), diffs_before, "each commit changes what it changed");
+    assert!(
+        out.contains("landed 2 commit(s)") && out.contains("replayed"),
+        "{out}"
+    );
+    assert_eq!(
+        read(&["log", "--format=%s", "-4", "main"]),
+        "t2: extend g\nt1: add g\nmain moved\ns3: add f2, drop y\n"
+    );
+    assert_eq!(
+        read(&["log", "--format=%s|%an|%ad", "-2", "main"]),
+        before,
+        "authors, dates and messages kept"
+    );
+    assert_eq!(
+        read(&["log", "--format=%s", "--name-status", "-2", "main"]),
+        diffs_before,
+        "each commit changes what it changed"
+    );
     assert_eq!(read(&["cat", "main:g.txt"]), "g1\ng2\n");
     assert_eq!(read(&["cat", "main:other.txt"]), "theirs\n");
     // Landing again is a no-op; a commit added to the stack later lands alone, on top.
@@ -485,7 +704,10 @@ fn stacked_commits_land_on_main() {
     commit(&a, "t3: extend g again");
     let out = pail(&a, &["land", "feature2", "--stack"]);
     assert!(out.contains("landed 1 commit(s)"), "{out}");
-    assert_eq!(read(&["log", "--format=%s", "-4", "main"]), "t3: extend g again\nt2: extend g\nt1: add g\nmain moved\n");
+    assert_eq!(
+        read(&["log", "--format=%s", "-4", "main"]),
+        "t3: extend g again\nt2: extend g\nt1: add g\nmain moved\n"
+    );
     assert_eq!(read(&["cat", "main:g.txt"]), "g1\ng2\ng3\n");
 
     // 3. A stack touching a path main changed meanwhile: conflict, and main doesn't move.
@@ -502,8 +724,15 @@ fn stacked_commits_land_on_main() {
     let main_before = read(&["log", "--format=%H", "-1", "main"]);
     let err = pail_fails(&a, &["land", "feature3", "--stack"]);
     assert!(err.contains("conflict") && err.contains("x.txt"), "{err}");
-    assert_eq!(read(&["log", "--format=%H", "-1", "main"]), main_before, "nothing landed");
-    assert!(!read(&["ls", "-r", "main"]).contains("h.txt"), "not even the commits before the conflicting one");
+    assert_eq!(
+        read(&["log", "--format=%H", "-1", "main"]),
+        main_before,
+        "nothing landed"
+    );
+    assert!(
+        !read(&["ls", "-r", "main"]).contains("h.txt"),
+        "not even the commits before the conflicting one"
+    );
 }
 
 /// Git-style config: identity from config (required), local over global, and the default
@@ -514,23 +743,37 @@ fn config_identity_and_default_branch() {
     let t = std::fs::canonicalize(tmp.path()).unwrap();
     let global = t.join("global-config");
     let run = |dir: &Path, args: &[&str]| -> std::process::Output {
-        cmd(dir, args).env_remove("PAIL_AUTHOR").env("PAIL_CONFIG_GLOBAL", &global).output().unwrap()
+        cmd(dir, args)
+            .env_remove("PAIL_AUTHOR")
+            .env("PAIL_CONFIG_GLOBAL", &global)
+            .output()
+            .unwrap()
     };
     let ok = |dir: &Path, args: &[&str]| -> String {
         let o = run(dir, args);
-        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
         String::from_utf8_lossy(&o.stdout).into_owned()
     };
     let store = t.join("store");
     let s = store.to_str().unwrap();
     // No identity: refuse, as Git does.
     let o = run(&t, &["init", s]);
-    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("Please tell me who you are"));
+    assert!(
+        !o.status.success()
+            && String::from_utf8_lossy(&o.stderr).contains("Please tell me who you are")
+    );
     ok(&t, &["config", "--global", "user.name", "Ada Lovelace"]);
     ok(&t, &["config", "--global", "user.email", "ada@example.com"]);
     ok(&t, &["config", "--global", "init.defaultBranch", "trunk"]);
     assert_eq!(ok(&t, &["config", "user.name"]), "Ada Lovelace\n");
-    assert!(std::fs::read_to_string(&global).unwrap().contains("[user]"), "Git-format file");
+    assert!(
+        std::fs::read_to_string(&global).unwrap().contains("[user]"),
+        "Git-format file"
+    );
 
     // init.defaultBranch names the first branch; clone checks out the store's default.
     let out = ok(&t, &["init", s]);
@@ -541,11 +784,16 @@ fn config_identity_and_default_branch() {
     assert_eq!(ok(&w, &["branch", "--default"]), "trunk\n");
     // Local identity overrides global; commits carry it.
     ok(&w, &["config", "user.name", "Grace Hopper"]);
-    assert!(ok(&w, &["config", "--list", "--show-scope"]).contains("local\tuser.name=Grace Hopper"));
+    assert!(
+        ok(&w, &["config", "--list", "--show-scope"]).contains("local\tuser.name=Grace Hopper")
+    );
     write(&w.join("a.txt"), "a\n");
     ok(&w, &["add", "-A"]);
     ok(&w, &["commit", "-m", "a"]);
-    assert_eq!(ok(&w, &["log", "-1", "--format=%an <%ae>|%cn"]), "Grace Hopper <ada@example.com>|Grace Hopper\n");
+    assert_eq!(
+        ok(&w, &["log", "-1", "--format=%an <%ae>|%cn"]),
+        "Grace Hopper <ada@example.com>|Grace Hopper\n"
+    );
     // land defaults onto the store's default branch.
     ok(&w, &["switch", "-c", "feature"]);
     write(&w.join("b.txt"), "b\n");
@@ -561,7 +809,12 @@ fn config_identity_and_default_branch() {
     ok(&w, &["config", "log.date", "short"]);
     let d = ok(&w, &["log", "-1", "--format=%ad"]);
     assert!(d.trim().len() == 10 && d.contains('-'), "{d}");
-    assert!(ok(&w, &["log", "-1", "--format=%ad", "--date=unix"]).trim().parse::<u64>().is_ok());
+    assert!(
+        ok(&w, &["log", "-1", "--format=%ad", "--date=unix"])
+            .trim()
+            .parse::<u64>()
+            .is_ok()
+    );
     assert!(ok(&w, &["config", "--unset", "log.date"]).is_empty());
     assert!(!run(&w, &["config", "log.date"]).status.success());
 }
@@ -584,7 +837,9 @@ fn inspect_serves_the_object_graph() {
     pail(&w, &["commit", "-m", "files"]);
     let port = 20000 + (std::process::id() % 20000) as u16;
     let addr = format!("127.0.0.1:{port}");
-    let mut child = cmd(&w, &["inspect", "--no-open", "--addr", &addr]).spawn().unwrap();
+    let mut child = cmd(&w, &["inspect", "--no-open", "--addr", &addr])
+        .spawn()
+        .unwrap();
     let get = |path: &str| -> serde_json::Value {
         for _ in 0..100 {
             if let Ok(mut c) = std::net::TcpStream::connect(&addr) {
@@ -605,17 +860,41 @@ fn inspect_serves_the_object_graph() {
     assert_eq!(c["changes"].as_array().unwrap().len(), 2);
     let f = get("/api/file?path=src/lib.rs");
     assert_eq!(f["entry"]["loc"]["type"], "pack");
-    assert_eq!(f["spine"].as_array().unwrap().last().unwrap()["level"], 0, "the descent ends at a leaf page");
+    assert_eq!(
+        f["spine"].as_array().unwrap().last().unwrap()["level"],
+        0,
+        "the descent ends at a leaf page"
+    );
     assert!(f["preview"].as_str().unwrap().starts_with("fn a()"));
     let pack = f["entry"]["loc"]["pack"].as_str().unwrap();
     let p = get(&format!("/api/pack/{pack}"));
-    assert!(p["blobs"].as_array().unwrap().iter().any(|b| b["paths"][0] == "src/lib.rs"));
+    assert!(
+        p["blobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["paths"][0] == "src/lib.rs")
+    );
     assert_eq!(get("/api/file?path=tiny")["entry"]["loc"]["type"], "inline");
     // Logical → physical: the pages and packs behind a folder.
     let cover = get("/api/cover?path=src");
     assert_eq!(cover["files"], 1);
-    assert!(cover["storage"].as_array().unwrap().iter().any(|s| s["kind"] == "pack"));
-    assert_eq!(cover["pages"].as_array().unwrap().iter().filter(|p| p["level"] == 0).count(), 1);
+    assert!(
+        cover["storage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["kind"] == "pack")
+    );
+    assert_eq!(
+        cover["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["level"] == 0)
+            .count(),
+        1
+    );
     let page = get(&format!("/api/page/{}", c["root"].as_str().unwrap()));
     assert!(page["entries"].is_array() || page["children"].is_array());
     child.kill().unwrap();
@@ -646,20 +925,50 @@ fn hooks_follow_the_commit_and_publish_flow() {
     let hooks = a.join(".pailhooks");
     let l = log.display();
     // A formatter: upper-cases staged files and restages them, refuses `bad.txt`.
-    hook(&hooks, "pre-commit", &format!(r#"
+    hook(
+        &hooks,
+        "pre-commit",
+        &format!(
+            r#"
 echo "pre-commit $PAIL_HOOK $PAIL_HOOK_BRANCH dir=${{PAIL_DIR:-unset}} cwd=$(pwd)" >> {l}
 while IFS= read -r -d '' f; do
   [[ "$f" == bad.txt ]] && {{ echo "bad.txt is not allowed" >&2; exit 1; }}
   tr a-z A-Z < "$f" > "$f.tmp" && mv "$f.tmp" "$f"
   pail add "$f"
-done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
-    hook(&hooks, "commit-msg", &format!("echo commit-msg >> {l}\nprintf '\\nHook-Checked: yes\\n' >> \"$1\""));
-    hook(&hooks, "pre-publish", &format!(r#"read -r branch old new; echo "pre-publish $1 $2 $branch $old $new" >> {l}
-[[ "${{BLOCK_PUBLISH:-0}}" != 1 ]]"#));
+done < <(pail diff --staged --name-only -z --diff-filter=AM)"#
+        ),
+    );
+    hook(
+        &hooks,
+        "commit-msg",
+        &format!("echo commit-msg >> {l}\nprintf '\\nHook-Checked: yes\\n' >> \"$1\""),
+    );
+    hook(
+        &hooks,
+        "pre-publish",
+        &format!(
+            r#"read -r branch old new; echo "pre-publish $1 $2 $branch $old $new" >> {l}
+[[ "${{BLOCK_PUBLISH:-0}}" != 1 ]]"#
+        ),
+    );
     hook(&hooks, "post-commit", &format!("echo post-commit >> {l}"));
-    hook(&hooks, "post-checkout", &format!("echo \"post-checkout $1 $2 $3 orig=$(pail rev-parse ORIG_HEAD 2>/dev/null || echo none)\" >> {l}"));
-    hook(&hooks, "post-sync", &format!("echo \"post-sync $1 $2\" >> {l}"));
-    hook(&hooks, "post-rewrite", &format!("echo \"post-rewrite $1 $(cat | tr '\\n' ';')\" >> {l}"));
+    hook(
+        &hooks,
+        "post-checkout",
+        &format!(
+            "echo \"post-checkout $1 $2 $3 orig=$(pail rev-parse ORIG_HEAD 2>/dev/null || echo none)\" >> {l}"
+        ),
+    );
+    hook(
+        &hooks,
+        "post-sync",
+        &format!("echo \"post-sync $1 $2\" >> {l}"),
+    );
+    hook(
+        &hooks,
+        "post-rewrite",
+        &format!("echo \"post-rewrite $1 $(cat | tr '\\n' ';')\" >> {l}"),
+    );
     hook(&hooks, "_helper", "exit 1"); // not a hook name: never run
     pail(&a, &["config", "core.hooksPath", ".pailhooks"]);
     // Checked in, like firstlanding's .githooks.
@@ -673,21 +982,51 @@ done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
     //    exact commit that is then published.
     write(&a.join("src/a.txt"), "hello");
     pail(&a, &["add", "src"]);
-    let out = cmd(&a, &["commit", "-m", "add a"]).env("PAIL_TRACE_HOOKS", &trace).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cmd(&a, &["commit", "-m", "add a"])
+        .env("PAIL_TRACE_HOOKS", &trace)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(pail(&a, &["cat", "src/a.txt"]), "HELLO");
-    assert_eq!(std::fs::read_to_string(a.join("src/a.txt")).unwrap(), "HELLO");
+    assert_eq!(
+        std::fs::read_to_string(a.join("src/a.txt")).unwrap(),
+        "HELLO"
+    );
     assert!(pail(&a, &["status"]).contains("nothing to commit"));
     let msg = pail(&a, &["log", "-1", "--format=%B"]);
     assert!(msg.contains("add a\n\nHook-Checked: yes"), "{msg}");
     let head = pail(&a, &["rev-parse", "HEAD"]).trim().to_string();
     let h = read_log();
-    assert!(h.contains(&format!("pre-commit pre-commit main dir=unset cwd={}", a.display())), "{h}");
-    assert!(h.contains(&format!("pre-publish main commit main {} {head}", "0".repeat(64))) || h.contains(&format!("{head}\n")), "{h}");
+    assert!(
+        h.contains(&format!(
+            "pre-commit pre-commit main dir=unset cwd={}",
+            a.display()
+        )),
+        "{h}"
+    );
+    assert!(
+        h.contains(&format!(
+            "pre-publish main commit main {} {head}",
+            "0".repeat(64)
+        )) || h.contains(&format!("{head}\n")),
+        "{h}"
+    );
     let order: Vec<&str> = h.lines().map(|l| l.split(' ').next().unwrap()).collect();
-    assert_eq!(order, ["pre-commit", "commit-msg", "pre-publish", "post-commit"], "{h}");
+    assert_eq!(
+        order,
+        ["pre-commit", "commit-msg", "pre-publish", "post-commit"],
+        "{h}"
+    );
     let tr = std::fs::read_to_string(&trace).unwrap();
-    assert!(tr.lines().any(|l| l.contains(r#""hook":"pre-commit""#) && l.contains(r#""exit":0"#)), "{tr}");
+    assert!(
+        tr.lines()
+            .any(|l| l.contains(r#""hook":"pre-commit""#) && l.contains(r#""exit":0"#)),
+        "{tr}"
+    );
 
     // 2. A refusing pre-commit: exit code 3, nothing published, the stage kept.
     write(&a.join("bad.txt"), "x");
@@ -705,15 +1044,30 @@ done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
     write(&a.join("src/b.txt"), "b");
     pail(&a, &["add", "src/b.txt"]);
     clear_log();
-    let out = cmd(&a, &["commit", "-m", "b"]).env("BLOCK_PUBLISH", "1").output().unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cmd(&a, &["commit", "-m", "b"])
+        .env("BLOCK_PUBLISH", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(pail(&a, &["rev-parse", "main"]).trim(), head);
     assert!(!read_log().contains("post-commit"));
 
     // 4. --no-verify skips pre-commit, commit-msg and pre-publish (post-commit still runs).
     clear_log();
-    let out = cmd(&a, &["commit", "-n", "-m", "b unchecked"]).env("BLOCK_PUBLISH", "1").output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cmd(&a, &["commit", "-n", "-m", "b unchecked"])
+        .env("BLOCK_PUBLISH", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // Formatted and restaged by the pre-commit of the refused attempt above.
     assert_eq!(pail(&a, &["cat", "src/b.txt"]), "B");
     assert_eq!(read_log(), "post-commit\n");
@@ -727,7 +1081,10 @@ done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
     let feature = pail(&a, &["rev-parse", "HEAD"]).trim().to_string();
     clear_log();
     pail(&a, &["switch", "main"]);
-    assert_eq!(read_log(), format!("post-checkout {feature} {head2} 1 orig={feature}\n"));
+    assert_eq!(
+        read_log(),
+        format!("post-checkout {feature} {head2} 1 orig={feature}\n")
+    );
 
     // 6. Another writer moves main: bob's commit is replayed (post-rewrite replay), and
     //    alice's sync reports post-sync with the old and new base.
@@ -746,7 +1103,12 @@ done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
     // The commit is built on bob's head before it is checked, so pre-publish saw exactly
     // what was published and nothing was rewritten (a race after the check is covered in
     // tests/repo.rs).
-    assert!(h.contains(&format!("pre-publish main commit main {bob_head} {published}")), "{h}");
+    assert!(
+        h.contains(&format!(
+            "pre-publish main commit main {bob_head} {published}"
+        )),
+        "{h}"
+    );
     assert!(!h.contains("post-rewrite"), "{h}");
     assert_eq!(pail(&a, &["rev-parse", "ORIG_HEAD"]).trim(), head2);
     write(&b.join("other2.txt"), "o2");
@@ -761,7 +1123,10 @@ done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
     clear_log();
     pail(&a, &["land", "feature", "--stack", "--onto", "main"]);
     let h = read_log();
-    assert!(h.contains(&format!("pre-publish main land main {tip} ")), "{h}");
+    assert!(
+        h.contains(&format!("pre-publish main land main {tip} ")),
+        "{h}"
+    );
     assert!(h.contains(&format!("post-rewrite land {feature} ")), "{h}");
     // A squash land is guarded the same way.
     pail(&a, &["switch", "-c", "squash"]);
@@ -769,8 +1134,16 @@ done < <(pail diff --staged --name-only -z --diff-filter=AM)"#));
     pail(&a, &["add", "src/s.txt"]);
     pail(&a, &["commit", "-n", "-m", "s"]);
     let main_tip = pail(&a, &["rev-parse", "main"]).trim().to_string();
-    let out = cmd(&a, &["land", "squash", "--onto", "main"]).env("BLOCK_PUBLISH", "1").output().unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cmd(&a, &["land", "squash", "--onto", "main"])
+        .env("BLOCK_PUBLISH", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(pail(&a, &["rev-parse", "main"]).trim(), main_tip);
     pail(&a, &["land", "squash", "--onto", "main", "--no-verify"]);
     pail(&a, &["switch", "main"]);
@@ -794,17 +1167,26 @@ fn help_skill_completion_and_exit_codes() {
     pail(&a, &["branch", "feature-x"]);
 
     let top = pail(&t, &["--help"]);
-    assert!(top.contains("Branches and landing") && top.contains("Exit codes:"), "{top}");
+    assert!(
+        top.contains("Branches and landing") && top.contains("Exit codes:"),
+        "{top}"
+    );
     assert_eq!(pail(&t, &[]), top, "bare `pail` prints the help");
     let land = pail(&t, &["land", "--help"]);
-    assert!(land.contains("Examples:") && land.contains("pail land feature --stack"), "{land}");
+    assert!(
+        land.contains("Examples:") && land.contains("pail land feature --stack"),
+        "{land}"
+    );
     assert!(pail(&t, &["help", "worktree", "add"]).contains("Usage: pail worktree add"));
     assert!(pail(&a, &["log", "--help"]).contains("Usage: pail log"));
     let bare_group = cmd(&t, &["worktree"]).output().unwrap();
     assert!(String::from_utf8_lossy(&bare_group.stderr).contains("Commands:"));
 
     let skill = pail(&t, &["--skill"]);
-    assert!(skill.starts_with("---\nname: pail\ndescription: "), "{skill}");
+    assert!(
+        skill.starts_with("---\nname: pail\ndescription: "),
+        "{skill}"
+    );
     assert!(skill.contains("Commit = publish"));
 
     for sh in ["bash", "zsh", "fish", "elvish", "powershell"] {
@@ -818,8 +1200,16 @@ fn help_skill_completion_and_exit_codes() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "feature-x");
-    let out = cmd(&a, &["--", "pail", "config", "core.ho"]).env("COMPLETE", "bash").env("_CLAP_COMPLETE_INDEX", "2").env("_CLAP_IFS", "\n").output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "core.hooksPath");
+    let out = cmd(&a, &["--", "pail", "config", "core.ho"])
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("_CLAP_IFS", "\n")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "core.hooksPath"
+    );
 
     // Exit code 4: another writer changed the same path since our base.
     pail(&t, &["clone", &store, "b"]);
@@ -851,23 +1241,47 @@ impl Drop for Child {
 fn proxy_store_with_a_credential_helper() {
     let tmp = tempfile::tempdir().unwrap();
     let t = std::fs::canonicalize(tmp.path()).unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let auth = t.join("auth.sh");
-    write(&auth, "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN:$PAIL_AUTH_REPO:$PAIL_AUTH_OP\" in\n  tok-alice:team/app:*) echo alice;;\n  tok-bob:team/app:read) echo bob;;\n  tok-bob:*) exit 3;;\n  *) exit 1;;\nesac\n");
+    write(
+        &auth,
+        "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN:$PAIL_AUTH_REPO:$PAIL_AUTH_OP\" in\n  tok-alice:team/app:*) echo alice;;\n  tok-bob:team/app:read) echo bob;;\n  tok-bob:*) exit 3;;\n  *) exit 1;;\nesac\n",
+    );
     let calls = t.join("helper-calls");
     // The company's provider, shipped as an extension: `describe`, and `get` answering with
     // the token the user holds (TOK stands in for their login).
     let helper = t.join("pail-credential-acme");
-    write(&helper, &format!("#!/bin/sh\n[ \"$1\" = describe ] && {{ echo acme sso; exit 0; }}\nread req\necho \"$req\" >> {}\necho \"{{\\\"token\\\":\\\"$TOK\\\",\\\"expires_at\\\":4102444800}}\"\n", calls.display()));
+    write(
+        &helper,
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = describe ] && {{ echo acme sso; exit 0; }}\nread req\necho \"$req\" >> {}\necho \"{{\\\"token\\\":\\\"$TOK\\\",\\\"expires_at\\\":4102444800}}\"\n",
+            calls.display()
+        ),
+    );
     for f in [&auth, &helper] {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let _server = Child(
-        cmd(&t, &["serve", "--store", &format!("file://{}", t.join("bucket").display()), "--addr", &format!("127.0.0.1:{port}"), "--auth-command", &auth.to_string_lossy()])
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
+        cmd(
+            &t,
+            &[
+                "serve",
+                "--store",
+                &format!("file://{}", t.join("bucket").display()),
+                "--addr",
+                &format!("127.0.0.1:{port}"),
+                "--auth-command",
+                &auth.to_string_lossy(),
+            ],
+        )
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap(),
     );
     let base = format!("http://127.0.0.1:{port}");
     for _ in 0..100 {
@@ -880,7 +1294,9 @@ fn proxy_store_with_a_credential_helper() {
     let ext = t.join("extensions");
     let as_user = |dir: &Path, token: &str, args: &[&str]| {
         let mut c = cmd(dir, args);
-        c.env("TOK", token).env("XDG_CACHE_HOME", t.join(format!("cache-{token}"))).env("PAIL_EXTENSIONS_DIR", &ext);
+        c.env("TOK", token)
+            .env("XDG_CACHE_HOME", t.join(format!("cache-{token}")))
+            .env("PAIL_EXTENSIONS_DIR", &ext);
         c.output().unwrap()
     };
     let ok = |o: std::process::Output| {
@@ -889,17 +1305,35 @@ fn proxy_store_with_a_credential_helper() {
     };
 
     // Install the provider and point the proxy's URL at it.
-    let out = ok(as_user(&t, "tok-alice", &["auth", "install", &helper.to_string_lossy()]));
-    assert!(out.contains("installed acme") && out.contains("acme sso"), "{out}");
+    let out = ok(as_user(
+        &t,
+        "tok-alice",
+        &["auth", "install", &helper.to_string_lossy()],
+    ));
+    assert!(
+        out.contains("installed acme") && out.contains("acme sso"),
+        "{out}"
+    );
     assert!(ok(as_user(&t, "tok-alice", &["auth", "list"])).contains("acme             acme sso"));
-    ok(as_user(&t, "tok-alice", &["auth", "use", "acme", "--for", &base, "--global"]));
+    ok(as_user(
+        &t,
+        "tok-alice",
+        &["auth", "use", "acme", "--for", &base, "--global"],
+    ));
     ok(as_user(&t, "tok-alice", &["init", &store]));
     ok(as_user(&t, "tok-alice", &["clone", &store, "a"]));
     let a = t.join("a");
     write(&a.join("src/lib.rs"), "fn main() {}");
     ok(as_user(&a, "tok-alice", &["add", "-A"]));
-    ok(as_user(&a, "tok-alice", &["commit", "-m", "through the proxy"]));
-    assert!(t.join("bucket/team/app/refs/main").is_file(), "objects land in the backing store");
+    ok(as_user(
+        &a,
+        "tok-alice",
+        &["commit", "-m", "through the proxy"],
+    ));
+    assert!(
+        t.join("bucket/team/app/refs/main").is_file(),
+        "objects land in the backing store"
+    );
     let status = ok(as_user(&a, "tok-alice", &["auth", "status"]));
     assert!(status.contains("access    ok"), "{status}");
 
@@ -911,27 +1345,52 @@ fn proxy_store_with_a_credential_helper() {
     ok(as_user(&b, "tok-bob", &["add", "-A"]));
     let out = as_user(&b, "tok-bob", &["commit", "-m", "nope"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("403"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("403"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Unknown token: nothing.
     let out = as_user(&t, "tok-eve", &["clone", &store, "e"]);
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("401"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("401"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The helper got the pail-credential/1 request, and its answer was reused from the cache.
     let reqs = std::fs::read_to_string(&calls).unwrap();
-    assert!(reqs.contains(r#""protocol":"pail-credential/1""#) && reqs.contains(&store), "{reqs}");
+    assert!(
+        reqs.contains(r#""protocol":"pail-credential/1""#) && reqs.contains(&store),
+        "{reqs}"
+    );
     let alice_calls = reqs.lines().count();
     ok(as_user(&a, "tok-alice", &["log", "-1"]));
-    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), alice_calls, "cached");
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap().lines().count(),
+        alice_calls,
+        "cached"
+    );
     assert!(ok(as_user(&a, "tok-alice", &["auth", "logout"])).contains("forgot"));
 
     // A provider whose cached token the store stops accepting (it claimed a far expiry):
     // the 401 drops the cache, the provider is asked again, and the command succeeds.
     let calls = t.join("rot-calls");
     let rot = t.join("pail-credential-rot");
-    write(&rot, &format!("#!/bin/sh\ncat >/dev/null\necho x >> {c}\nif [ $(wc -l < {c}) -eq 1 ]; then T=tok-stale; else T=tok-alice; fi\necho \"{{\\\"token\\\":\\\"$T\\\",\\\"expires_at\\\":4102444800}}\"\n", c = calls.display()));
-    ok(as_user(&t, "tok-alice", &["auth", "install", &rot.to_string_lossy()]));
+    write(
+        &rot,
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\necho x >> {c}\nif [ $(wc -l < {c}) -eq 1 ]; then T=tok-stale; else T=tok-alice; fi\necho \"{{\\\"token\\\":\\\"$T\\\",\\\"expires_at\\\":4102444800}}\"\n",
+            c = calls.display()
+        ),
+    );
+    ok(as_user(
+        &t,
+        "tok-alice",
+        &["auth", "install", &rot.to_string_lossy()],
+    ));
     let out = cmd(&a, &["sync"])
         .env("PAIL_EXTENSIONS_DIR", &ext)
         .env("PAIL_CREDENTIAL_PROVIDER", "rot")
@@ -939,7 +1398,11 @@ fn proxy_store_with_a_credential_helper() {
         .output()
         .unwrap();
     assert!(ok(out).contains("main @"));
-    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2, "asked once more after the 401");
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap().lines().count(),
+        2,
+        "asked once more after the 401"
+    );
 }
 
 /// Concurrent writers through the CLI, each in its own working copy, committing in a loop on
@@ -976,11 +1439,18 @@ fn concurrent_cli_writers_lose_nothing() {
     for w in 0..writers {
         for i in 0..per {
             let want = format!("w{w} c{i}");
-            assert_eq!(subjects.iter().filter(|s| **s == want).count(), 1, "{want} must be on main exactly once");
+            assert_eq!(
+                subjects.iter().filter(|s| **s == want).count(),
+                1,
+                "{want} must be on main exactly once"
+            );
         }
     }
     let files = pail(&t.join("check"), &["ls", "-r"]);
-    assert_eq!(files.lines().filter(|l| l.contains("/f")).count(), writers * per);
+    assert_eq!(
+        files.lines().filter(|l| l.contains("/f")).count(),
+        writers * per
+    );
 }
 
 /// `pail put` commits to a branch without a working copy (creating it), `--if-absent` claims
@@ -991,26 +1461,99 @@ fn put_and_events() {
     let t = std::fs::canonicalize(tmp.path()).unwrap();
     let store = format!("file://{}", t.join("bucket").display());
     pail(&t, &["init", &store]);
-    let mut events = cmd(&t, &["--store", &store, "events", "--interval-ms", "100", "--branch", "_*"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut events = cmd(
+        &t,
+        &[
+            "--store",
+            &store,
+            "events",
+            "--interval-ms",
+            "100",
+            "--branch",
+            "_*",
+        ],
+    )
+    .stdout(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(400));
     write(&t.join("rec.json"), "{\"id\":1}");
     let src = format!("prs/1.json={}", t.join("rec.json").display());
-    pail(&t, &["--store", &store, "put", "_meta", "-m", "open", "--file", &src, "--if-absent"]);
-    let again = cmd(&t, &["--store", &store, "put", "_meta", "-m", "again", "--file", &src, "--if-absent"]).output().unwrap();
+    pail(
+        &t,
+        &[
+            "--store",
+            &store,
+            "put",
+            "_meta",
+            "-m",
+            "open",
+            "--file",
+            &src,
+            "--if-absent",
+        ],
+    );
+    let again = cmd(
+        &t,
+        &[
+            "--store",
+            &store,
+            "put",
+            "_meta",
+            "-m",
+            "again",
+            "--file",
+            &src,
+            "--if-absent",
+        ],
+    )
+    .output()
+    .unwrap();
     assert_eq!(again.status.code(), Some(4));
-    assert_eq!(pail(&t, &["--store", &store, "cat", "_meta:prs/1.json"]), "{\"id\":1}");
-    pail(&t, &["--store", &store, "put", "_meta", "-m", "close", "--delete", "prs/1.json"]);
+    assert_eq!(
+        pail(&t, &["--store", &store, "cat", "_meta:prs/1.json"]),
+        "{\"id\":1}"
+    );
+    pail(
+        &t,
+        &[
+            "--store",
+            &store,
+            "put",
+            "_meta",
+            "-m",
+            "close",
+            "--delete",
+            "prs/1.json",
+        ],
+    );
     // main changes too, but only _* branches were asked for.
-    pail(&t, &["--store", &store, "put", "main", "-m", "x", "--file", &format!("x.txt={}", t.join("rec.json").display())]);
+    pail(
+        &t,
+        &[
+            "--store",
+            &store,
+            "put",
+            "main",
+            "-m",
+            "x",
+            "--file",
+            &format!("x.txt={}", t.join("rec.json").display()),
+        ],
+    );
     std::thread::sleep(std::time::Duration::from_millis(600));
     events.kill().unwrap();
     let out = String::from_utf8(events.wait_with_output().unwrap().stdout).unwrap();
-    let lines: Vec<serde_json::Value> = out.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert!(!lines.is_empty() && lines.iter().all(|e| e["branch"] == "_meta"), "{out}");
-    let commits: std::collections::BTreeSet<String> = lines.iter().map(|e| e["commit"].to_string()).collect();
+    let lines: Vec<serde_json::Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        !lines.is_empty() && lines.iter().all(|e| e["branch"] == "_meta"),
+        "{out}"
+    );
+    let commits: std::collections::BTreeSet<String> =
+        lines.iter().map(|e| e["commit"].to_string()).collect();
     assert_eq!(commits.len(), lines.len(), "no duplicate events: {out}");
 }
 
@@ -1037,12 +1580,22 @@ fn pr_and_ci_extensions() {
             .env("PAIL_CONFIG_GLOBAL", global_config())
             .output()
             .unwrap();
-        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
     };
     pail(&t, &["init", &store]);
     pail(&t, &["clone", &store, "w"]);
     let w = t.join("w");
-    write(&w.join("pail.ci.json"), r#"{"checks":{"test":"grep -q hello hello.txt"},"required":["test"]}"#);
+    write(
+        &w.join("pail.ci.json"),
+        r#"{"checks":{"test":"grep -q hello hello.txt"},"required":["test"]}"#,
+    );
     pail(&w, &["add", "-A"]);
     pail(&w, &["commit", "-m", "ci config"]);
     let mut ci = Command::new(ext.join("pail-ci"))
@@ -1059,7 +1612,12 @@ fn pr_and_ci_extensions() {
     write(&w.join("hello.txt"), "hello");
     pail(&w, &["add", "-A"]);
     pail(&w, &["commit", "-m", "say hello"]);
-    let (ok, out) = run(&w, "pail-pr", &["open", "pr/hello", "--title", "Say hello"], "Alice <a@x>");
+    let (ok, out) = run(
+        &w,
+        "pail-pr",
+        &["open", "pr/hello", "--title", "Say hello"],
+        "Alice <a@x>",
+    );
     assert!(ok, "{out}");
     // CI records the check from the ref event.
     let mut status = String::new();
@@ -1071,16 +1629,27 @@ fn pr_and_ci_extensions() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     let _ = ci.kill();
-    assert!(status.contains("test") && status.contains("success"), "{status}");
+    assert!(
+        status.contains("test") && status.contains("success"),
+        "{status}"
+    );
     // No approval yet: refused. Self-approval does not count.
     run(&w, "pail-pr", &["review", "1", "--approve"], "Alice <a@x>");
     let (ok, out) = run(&w, "pail-pr", &["merge", "1"], "Alice <a@x>");
     assert!(!ok && out.contains("0 of 1 approvals"), "{out}");
-    let (ok, out) = run(&w, "pail-pr", &["review", "1", "--approve", "-m", "lgtm"], "Bob <b@x>");
+    let (ok, out) = run(
+        &w,
+        "pail-pr",
+        &["review", "1", "--approve", "-m", "lgtm"],
+        "Bob <b@x>",
+    );
     assert!(ok, "{out}");
     let (ok, out) = run(&w, "pail-pr", &["merge", "1"], "Alice <a@x>");
     assert!(ok, "{out}");
-    assert_eq!(pail(&t, &["--store", &store, "cat", "main:hello.txt"]), "hello");
+    assert_eq!(
+        pail(&t, &["--store", &store, "cat", "main:hello.txt"]),
+        "hello"
+    );
     let (_, show) = run(&w, "pail-pr", &["show", "1"], "Alice <a@x>");
     assert!(show.contains("[merged]") && show.contains("Bob"), "{show}");
 }
@@ -1091,7 +1660,11 @@ fn pr_and_ci_extensions() {
 fn proxy_enforces_branch_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let t = std::fs::canonicalize(tmp.path()).unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let bucket = format!("file://{}", t.join("bucket").display());
     // Seed the repository and its policy directly in the bucket (as its owner would).
     let direct = format!("{bucket}/app");
@@ -1100,22 +1673,62 @@ fn proxy_enforces_branch_policy() {
         &t.join("policy.json"),
         r#"{"version":1,"admins":["role:admin"],"branches":{"main":{"writers":["lander"],"approvals":1,"required_checks":["test"]},"_policy":{"writers":["role:admin"]},"*":{"writers":["*"]}}}"#,
     );
-    pail(&t, &["--store", &direct, "policy", "set", &t.join("policy.json").to_string_lossy()]);
-    let check = cmd(&t, &["--store", &direct, "policy", "check", "--as", "user:alice", "write", "main"]).output().unwrap();
+    pail(
+        &t,
+        &[
+            "--store",
+            &direct,
+            "policy",
+            "set",
+            &t.join("policy.json").to_string_lossy(),
+        ],
+    );
+    let check = cmd(
+        &t,
+        &[
+            "--store",
+            &direct,
+            "policy",
+            "check",
+            "--as",
+            "user:alice",
+            "write",
+            "main",
+        ],
+    )
+    .output()
+    .unwrap();
     assert_eq!(check.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&check.stdout).contains("main is protected"));
     let req = pail(&t, &["--store", &direct, "policy", "requirements", "main"]);
-    assert!(req.contains("\"approvals\": 1") && req.contains("\"test\""), "{req}");
+    assert!(
+        req.contains("\"approvals\": 1") && req.contains("\"test\""),
+        "{req}"
+    );
     // Tokens name callers: tok-alice is alice; tok-lander is the lander.
     let auth = t.join("auth.sh");
-    write(&auth, "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN\" in\n  tok-alice) echo user:alice; echo group:eng;;\n  tok-lander) echo lander;;\n  *) exit 1;;\nesac\n");
+    write(
+        &auth,
+        "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN\" in\n  tok-alice) echo user:alice; echo group:eng;;\n  tok-lander) echo lander;;\n  *) exit 1;;\nesac\n",
+    );
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o755)).unwrap();
     let _server = Child(
-        cmd(&t, &["serve", "--store", &bucket, "--addr", &format!("127.0.0.1:{port}"), "--auth-command", &auth.to_string_lossy()])
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
+        cmd(
+            &t,
+            &[
+                "serve",
+                "--store",
+                &bucket,
+                "--addr",
+                &format!("127.0.0.1:{port}"),
+                "--auth-command",
+                &auth.to_string_lossy(),
+            ],
+        )
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap(),
     );
     for _ in 0..100 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -1125,7 +1738,11 @@ fn proxy_enforces_branch_policy() {
     }
     let store = format!("http://127.0.0.1:{port}/app");
     let as_who = |dir: &Path, token: &str, args: &[&str]| {
-        cmd(dir, args).env("PAIL_CREDENTIAL_HELPER", format!("echo {token} #")).env("XDG_CACHE_HOME", t.join(format!("cache-{token}"))).output().unwrap()
+        cmd(dir, args)
+            .env("PAIL_CREDENTIAL_HELPER", format!("echo {token} #"))
+            .env("XDG_CACHE_HOME", t.join(format!("cache-{token}")))
+            .output()
+            .unwrap()
     };
     let ok = |o: std::process::Output| {
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
@@ -1137,14 +1754,31 @@ fn proxy_enforces_branch_policy() {
     let denied = as_who(&a, "tok-alice", &["commit", "-m", "to main"]);
     assert!(!denied.status.success());
     let err = String::from_utf8_lossy(&denied.stderr);
-    assert!(err.contains("permission denied") && err.contains("protected"), "{err}");
+    assert!(
+        err.contains("permission denied") && err.contains("protected"),
+        "{err}"
+    );
     // Moving the change to a PR branch keeps it (the branch is at the same commit).
     ok(as_who(&a, "tok-alice", &["switch", "-c", "pr/x"]));
     ok(as_who(&a, "tok-alice", &["commit", "-m", "on a pr branch"]));
     // Alice cannot rewrite the policy; the lander can land.
     let open = t.join("open.json");
     write(&open, r#"{"version":1,"branches":{"*":{"writers":["*"]}}}"#);
-    assert!(!as_who(&t, "tok-alice", &["--store", &store, "policy", "set", &open.to_string_lossy()]).status.success());
-    ok(as_who(&t, "tok-lander", &["--store", &store, "land", "pr/x", "--stack", "--onto", "main"]));
+    assert!(
+        !as_who(
+            &t,
+            "tok-alice",
+            &["--store", &store, "policy", "set", &open.to_string_lossy()]
+        )
+        .status
+        .success()
+    );
+    ok(as_who(
+        &t,
+        "tok-lander",
+        &[
+            "--store", &store, "land", "pr/x", "--stack", "--onto", "main",
+        ],
+    ));
     assert_eq!(pail(&t, &["--store", &direct, "cat", "main:x.txt"]), "x");
 }

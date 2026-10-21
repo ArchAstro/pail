@@ -50,7 +50,11 @@ pub async fn cat_file(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Result
     }
     let (mode, name) = match args {
         [m, n] => (m.as_str(), n.as_str()),
-        _ => return Err(fatal("usage: pail cat-file (-t | -s | -e | -p | <type>) <object>")),
+        _ => {
+            return Err(fatal(
+                "usage: pail cat-file (-t | -s | -e | -p | <type>) <object>",
+            ));
+        }
     };
     if mode == "-e" {
         return match objs.resolve(name).await {
@@ -65,13 +69,22 @@ pub async fn cat_file(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Result
         "-p" => match &o {
             Object::Tree { commit, path } => {
                 for it in objs.tree_items(*commit, path, false).await? {
-                    writeln!(out, "{} {} {}\t{}", display_mode(it.mode), it.kind, it.oid, quote_path(&it.name))?;
+                    writeln!(
+                        out,
+                        "{} {} {}\t{}",
+                        display_mode(it.mode),
+                        it.kind,
+                        it.oid,
+                        quote_path(&it.name)
+                    )?;
                 }
             }
             _ => out.write_all(&objs.contents(&o).await?)?,
         },
         t if t == o.kind() => out.write_all(&objs.contents(&o).await?)?,
-        t if ["blob", "tree", "commit"].contains(&t) => return Err(fatal(format!("git cat-file {name}: bad file"))),
+        t if ["blob", "tree", "commit"].contains(&t) => {
+            return Err(fatal(format!("git cat-file {name}: bad file")));
+        }
         _ => return Err(fatal(format!("invalid object type \"{mode}\""))),
     }
     Ok(())
@@ -80,7 +93,15 @@ pub async fn cat_file(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Result
 /// `git ls-tree [-d] [-r] [-t] [-l] [-z] [--name-only] [--object-only] [--abbrev[=n]]
 /// <tree-ish> [<path>...]`, with Git's pathspec walk (show_recursive).
 pub async fn ls_tree(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Result<()> {
-    let (mut recursive, mut trees_only, mut show_trees, mut long, mut z, mut name_only, mut object_only) = (false, false, false, false, false, false, false);
+    let (
+        mut recursive,
+        mut trees_only,
+        mut show_trees,
+        mut long,
+        mut z,
+        mut name_only,
+        mut object_only,
+    ) = (false, false, false, false, false, false, false);
     let mut abbrev: Option<usize> = None;
     let mut rest = vec![];
     for a in args {
@@ -95,14 +116,23 @@ pub async fn ls_tree(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Result<
             "--full-name" | "--full-tree" => {}
             "--abbrev" => abbrev = Some(7),
             _ if a.starts_with("--abbrev=") => abbrev = a[9..].parse().ok(),
-            _ if a.starts_with('-') && a.len() > 1 => return Err(fatal(format!("unknown option `{}'", a.trim_start_matches('-')))),
+            _ if a.starts_with('-') && a.len() > 1 => {
+                return Err(fatal(format!(
+                    "unknown option `{}'",
+                    a.trim_start_matches('-')
+                )));
+            }
             _ => rest.push(a.clone()),
         }
     }
     if trees_only && recursive {
         show_trees = true;
     }
-    let Some((treeish, paths)) = rest.split_first() else { return Err(fatal("usage: pail ls-tree [<options>] <tree-ish> [<path>...]")) };
+    let Some((treeish, paths)) = rest.split_first() else {
+        return Err(fatal(
+            "usage: pail ls-tree [<options>] <tree-ish> [<path>...]",
+        ));
+    };
     let objs = GitObjects::new(ctx);
     let (commit, base) = match objs.resolve(treeish).await {
         Ok(Object::Commit { hash, .. }) => (hash, String::new()),
@@ -111,22 +141,45 @@ pub async fn ls_tree(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Result<
     };
     // Everything under the tree, then Git's traversal over it.
     let all = objs.tree_items(commit, &base, true).await?;
-    let rel = |p: &str| if base.is_empty() { p.to_string() } else { p[base.len() + 1..].to_string() };
+    let rel = |p: &str| {
+        if base.is_empty() {
+            p.to_string()
+        } else {
+            p[base.len() + 1..].to_string()
+        }
+    };
     let mut children: BTreeMap<String, Vec<TreeItem>> = BTreeMap::new();
     for it in all {
         let r = rel(&it.path);
-        let parent = r.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
-        children.entry(parent).or_default().push(TreeItem { path: r, ..it });
+        let parent = r
+            .rsplit_once('/')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_default();
+        children
+            .entry(parent)
+            .or_default()
+            .push(TreeItem { path: r, ..it });
     }
-    let specs: Vec<String> = paths.iter().map(|p| p.trim_start_matches("./").to_string()).collect();
+    let specs: Vec<String> = paths
+        .iter()
+        .map(|p| p.trim_start_matches("./").to_string())
+        .collect();
     let interesting = |path: &str, is_tree: bool| -> bool {
         specs.is_empty()
             || specs.iter().any(|s| {
                 let s = s.trim_end_matches('/');
-                s.is_empty() || path == s || path.starts_with(&format!("{s}/")) || (is_tree && s.starts_with(&format!("{path}/")))
+                s.is_empty()
+                    || path == s
+                    || path.starts_with(&format!("{s}/"))
+                    || (is_tree && s.starts_with(&format!("{path}/")))
             })
     };
-    let show_recursive = |path: &str| -> bool { recursive || specs.iter().any(|s| s.len() > path.len() && s.starts_with(&format!("{path}/"))) };
+    let show_recursive = |path: &str| -> bool {
+        recursive
+            || specs
+                .iter()
+                .any(|s| s.len() > path.len() && s.starts_with(&format!("{path}/")))
+    };
     let term = if z { '\0' } else { '\n' };
     let name = |p: &str| if z { p.to_string() } else { quote_path(p) };
     let oid = |o: &str| match abbrev {
@@ -174,9 +227,23 @@ pub async fn ls_tree(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Result<
             write!(out, "{}{term}", name(&it.path))?;
         } else if long {
             let size = it.size.map(|s| s.to_string()).unwrap_or_else(|| "-".into());
-            write!(out, "{} {} {} {size:>7}\t{}{term}", display_mode(it.mode), it.kind, oid(&it.oid), name(&it.path))?;
+            write!(
+                out,
+                "{} {} {} {size:>7}\t{}{term}",
+                display_mode(it.mode),
+                it.kind,
+                oid(&it.oid),
+                name(&it.path)
+            )?;
         } else {
-            write!(out, "{} {} {}\t{}{term}", display_mode(it.mode), it.kind, oid(&it.oid), name(&it.path))?;
+            write!(
+                out,
+                "{} {} {}\t{}{term}",
+                display_mode(it.mode),
+                it.kind,
+                oid(&it.oid),
+                name(&it.path)
+            )?;
         }
     }
     Ok(())
@@ -189,7 +256,9 @@ pub async fn rev_parse(ctx: &Ctx, args: &[String], out: &mut dyn Write) -> Resul
     let mut short: Option<usize> = None;
     let mut abbrev_ref = false;
     // --short and --verify want exactly one revision.
-    let verify = args.iter().any(|a| a == "--verify" || a.starts_with("--short"));
+    let verify = args
+        .iter()
+        .any(|a| a == "--verify" || a.starts_with("--short"));
     // Ids are printed once every name resolved.
     let mut lines: Vec<u8> = vec![];
     if verify && args.iter().filter(|a| !a.starts_with('-')).count() != 1 {
@@ -251,7 +320,11 @@ pub async fn show(ctx: &Ctx, args: &[String], out: &mut dyn Write, tty: bool) ->
     if !o.diff.any_output() && !o.diff.no_patch {
         o.diff.patch = true;
     }
-    let names = if o.revs.is_empty() { vec!["HEAD".to_string()] } else { std::mem::take(&mut o.revs) };
+    let names = if o.revs.is_empty() {
+        vec!["HEAD".to_string()]
+    } else {
+        std::mem::take(&mut o.revs)
+    };
     let objs = GitObjects::new(ctx);
     let spec = Pathspec::new(&o.paths)?;
     let mut printer = Printer::new(ctx, &o, tty, true).await?;
@@ -259,7 +332,10 @@ pub async fn show(ctx: &Ctx, args: &[String], out: &mut dyn Write, tty: bool) ->
         match resolve(&objs, name).await? {
             Object::Commit { hash, commit } => {
                 // Merges show Git's combined diff, which pail's first-parent history lacks.
-                let merge = commit.meta.get("git.parents").is_some_and(|p| p.split_whitespace().count() > 1);
+                let merge = commit
+                    .meta
+                    .get("git.parents")
+                    .is_some_and(|p| p.split_whitespace().count() > 1);
                 let all = match ctx.repo.commit_obj(&hash).await?.change_list() {
                     Some(cs) => cs,
                     None => {
@@ -271,8 +347,21 @@ pub async fn show(ctx: &Ctx, args: &[String], out: &mut dyn Write, tty: bool) ->
                 if !spec.is_empty() && !all.iter().any(|c| spec.matches(&c.path)) {
                     continue;
                 }
-                let changes = if merge { Some(vec![]) } else { Some(all.into_iter().filter(|c| spec.matches(&c.path)).collect()) };
-                printer.show(&Shown { hash, commit, changes }, out).await?;
+                let changes = if merge {
+                    Some(vec![])
+                } else {
+                    Some(all.into_iter().filter(|c| spec.matches(&c.path)).collect())
+                };
+                printer
+                    .show(
+                        &Shown {
+                            hash,
+                            commit,
+                            changes,
+                        },
+                        out,
+                    )
+                    .await?;
             }
             Object::Tree { commit, path } => {
                 if printer.shown_one {
@@ -280,7 +369,12 @@ pub async fn show(ctx: &Ctx, args: &[String], out: &mut dyn Write, tty: bool) ->
                 }
                 writeln!(out, "tree {name}\n")?;
                 for it in objs.tree_items(commit, &path, false).await? {
-                    writeln!(out, "{}{}", it.name, if it.kind == "tree" { "/" } else { "" })?;
+                    writeln!(
+                        out,
+                        "{}{}",
+                        it.name,
+                        if it.kind == "tree" { "/" } else { "" }
+                    )?;
                 }
                 printer.shown_one = true;
             }

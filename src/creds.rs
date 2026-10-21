@@ -52,16 +52,28 @@ const BARE_TOKEN_SECS: u64 = 45 * 60;
 
 /// Extensions that ship with pail and `pail auth install <name>` writes out.
 pub const BUNDLED: &[(&str, &str)] = &[
-    ("archdev", include_str!("../extensions/pail-credential-archdev")),
-    ("gcloud", include_str!("../extensions/pail-credential-gcloud")),
-    ("gcs-downscoped", include_str!("../extensions/pail-credential-gcs-downscoped")),
+    (
+        "archdev",
+        include_str!("../extensions/pail-credential-archdev"),
+    ),
+    (
+        "gcloud",
+        include_str!("../extensions/pail-credential-gcloud"),
+    ),
+    (
+        "gcs-downscoped",
+        include_str!("../extensions/pail-credential-gcs-downscoped"),
+    ),
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Provider {
     Ambient,
     /// An installed extension.
-    Extension { name: String, exe: PathBuf },
+    Extension {
+        name: String,
+        exe: PathBuf,
+    },
     /// A command from `credential.helper`, run as `sh -c '<cmd> get'`.
     Command(String),
 }
@@ -102,19 +114,30 @@ fn executable(p: &Path) -> bool {
 /// The executable for provider `name`.
 pub fn find_extension(name: &str) -> Option<PathBuf> {
     let file = format!("{PREFIX}{name}");
-    let path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
-    extensions_dir().into_iter().chain(path).map(|d| d.join(&file)).find(|p| executable(p))
+    let path = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    extensions_dir()
+        .into_iter()
+        .chain(path)
+        .map(|d| d.join(&file))
+        .find(|p| executable(p))
 }
 
 /// Every installed provider: (name, executable), extensions dir first, then $PATH.
 pub fn installed() -> Vec<(String, PathBuf)> {
     let mut out: Vec<(String, PathBuf)> = vec![];
-    let path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
+    let path = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
     for dir in extensions_dir().into_iter().chain(path) {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let f = e.file_name().to_string_lossy().to_string();
             if let Some(name) = f.strip_prefix(PREFIX) {
-                if !name.contains('.') && executable(&e.path()) && !out.iter().any(|(n, _)| n == name) {
+                if !name.contains('.')
+                    && executable(&e.path())
+                    && !out.iter().any(|(n, _)| n == name)
+                {
                     out.push((name.to_string(), e.path()));
                 }
             }
@@ -131,46 +154,84 @@ fn by_name(name: &str, source: &str) -> Result<Provider> {
     let exe = find_extension(name).with_context(|| {
         format!("credential provider `{name}` ({source}) is not installed: no {PREFIX}{name} (try `pail auth install {name}`)")
     })?;
-    Ok(Provider::Extension { name: name.to_string(), exe })
+    Ok(Provider::Extension {
+        name: name.to_string(),
+        exe,
+    })
 }
 
 pub fn choose(store: &str, cfg: &Config) -> Result<Choice> {
     for var in ["PAIL_CREDENTIAL_PROVIDER", "PAIL_CREDENTIAL_HELPER"] {
         if let Ok(v) = std::env::var(var) {
             if !v.trim().is_empty() {
-                let provider = if var == "PAIL_CREDENTIAL_HELPER" { Provider::Command(v) } else { by_name(v.trim(), var)? };
-                return Ok(Choice { provider, source: var.into() });
+                let provider = if var == "PAIL_CREDENTIAL_HELPER" {
+                    Provider::Command(v)
+                } else {
+                    by_name(v.trim(), var)?
+                };
+                return Ok(Choice {
+                    provider,
+                    source: var.into(),
+                });
             }
         }
     }
     // Most specific `credential.<url>` section whose URL prefixes the store, then `credential`.
     let mut best: Option<(usize, String)> = None;
     for (_, key, _) in cfg.list() {
-        let Some(rest) = key.strip_prefix("credential.") else { continue };
-        let Some((url, _)) = rest.rsplit_once('.') else { continue };
+        let Some(rest) = key.strip_prefix("credential.") else {
+            continue;
+        };
+        let Some((url, _)) = rest.rsplit_once('.') else {
+            continue;
+        };
         let u = url.trim_end_matches('/');
         let prefixes = store == u || store.starts_with(&format!("{u}/"));
         if prefixes && best.as_ref().is_none_or(|(n, _)| u.len() > *n) {
             best = Some((u.len(), url.to_string()));
         }
     }
-    let sections: Vec<String> = best.map(|(_, u)| format!("credential.{u}.")).into_iter().chain(["credential.".to_string()]).collect();
+    let sections: Vec<String> = best
+        .map(|(_, u)| format!("credential.{u}."))
+        .into_iter()
+        .chain(["credential.".to_string()])
+        .collect();
     for sec in sections {
         let source = sec.trim_end_matches('.').to_string();
         if let Some(name) = cfg.get(&format!("{sec}provider")).filter(|n| !n.is_empty()) {
-            return Ok(Choice { provider: by_name(&name, &format!("{source}.provider"))?, source });
+            return Ok(Choice {
+                provider: by_name(&name, &format!("{source}.provider"))?,
+                source,
+            });
         }
         if let Some(cmd) = cfg.get(&format!("{sec}helper")).filter(|c| !c.is_empty()) {
-            return Ok(Choice { provider: Provider::Command(cmd), source });
+            return Ok(Choice {
+                provider: Provider::Command(cmd),
+                source,
+            });
         }
     }
-    Ok(Choice { provider: Provider::Ambient, source: "default".into() })
+    Ok(Choice {
+        provider: Provider::Ambient,
+        source: "default".into(),
+    })
 }
 
 /// What a provider says about itself (`describe`), if anything.
 pub fn description(exe: &Path) -> Option<String> {
-    let out = Command::new(exe).arg("describe").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").to_string())
+    let out = Command::new(exe)
+        .arg("describe")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -199,7 +260,10 @@ impl Credential {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Runs a provider and caches what it returns, in memory and on disk.
@@ -213,8 +277,13 @@ pub struct Source {
 impl Source {
     /// None for the ambient provider: the cloud SDK finds its own credentials.
     pub fn new(provider: &Provider, store: &str) -> Option<Arc<Source>> {
-        (*provider != Provider::Ambient)
-            .then(|| Arc::new(Source { provider: provider.clone(), store: store.to_string(), mem: Mutex::new(None) }))
+        (*provider != Provider::Ambient).then(|| {
+            Arc::new(Source {
+                provider: provider.clone(),
+                store: store.to_string(),
+                mem: Mutex::new(None),
+            })
+        })
     }
 
     fn cache_path(&self) -> Option<PathBuf> {
@@ -235,7 +304,11 @@ impl Source {
         if let Some(c) = self.mem.lock().unwrap().clone().filter(Credential::fresh) {
             return Ok(c);
         }
-        if let Some(c) = self.cache_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Credential>(&b).ok()) {
+        if let Some(c) = self
+            .cache_path()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|b| serde_json::from_slice::<Credential>(&b).ok())
+        {
             if c.fresh() {
                 *self.mem.lock().unwrap() = Some(c.clone());
                 return Ok(c);
@@ -272,10 +345,18 @@ impl Source {
             .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("running credential provider {what}"))?;
-        let _ = child.stdin.take().expect("piped").write_all(format!("{req}\n").as_bytes());
+        let _ = child
+            .stdin
+            .take()
+            .expect("piped")
+            .write_all(format!("{req}\n").as_bytes());
         let out = child.wait_with_output()?;
         if !out.status.success() {
-            bail!("credential provider {what} failed ({}) for {}", out.status, self.store);
+            bail!(
+                "credential provider {what} failed ({}) for {}",
+                out.status,
+                self.store
+            );
         }
         parse(&out.stdout).with_context(|| format!("credential provider {what} for {}", self.store))
     }
@@ -295,7 +376,11 @@ pub fn parse(out: &[u8]) -> Result<Credential> {
     if text.is_empty() || text.contains(char::is_whitespace) {
         bail!("expected a JSON credential or a bare token");
     }
-    Ok(Credential { token: Some(text.to_string()), aws: None, expires_at: now() + BARE_TOKEN_SECS })
+    Ok(Credential {
+        token: Some(text.to_string()),
+        aws: None,
+        expires_at: now() + BARE_TOKEN_SECS,
+    })
 }
 
 pub fn cache_dir() -> Option<PathBuf> {
@@ -319,9 +404,17 @@ pub fn clear_cache() -> Result<usize> {
 fn write_private(p: &Path, data: &[u8]) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let dir = p.parent().unwrap();
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
     let tmp = p.with_extension(format!("tmp{}", std::process::id()));
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
     f.write_all(data)?;
     std::fs::rename(tmp, p)?;
     Ok(())
@@ -338,7 +431,10 @@ async fn fetch(src: &Arc<Source>) -> object_store::Result<Credential> {
 }
 
 fn generic(msg: String) -> object_store::Error {
-    object_store::Error::Generic { store: "pail credential", source: msg.into() }
+    object_store::Error::Generic {
+        store: "pail credential",
+        source: msg.into(),
+    }
 }
 
 #[derive(Debug)]
@@ -349,7 +445,9 @@ impl object_store::CredentialProvider for GcsProvider {
     type Credential = object_store::gcp::GcpCredential;
     async fn get_credential(&self) -> object_store::Result<Arc<Self::Credential>> {
         let c = fetch(&self.0).await?;
-        let bearer = c.token.ok_or_else(|| generic("the credential has no token for GCS".into()))?;
+        let bearer = c
+            .token
+            .ok_or_else(|| generic("the credential has no token for GCS".into()))?;
         Ok(Arc::new(object_store::gcp::GcpCredential { bearer }))
     }
 }
@@ -362,7 +460,9 @@ impl object_store::CredentialProvider for AwsProvider {
     type Credential = object_store::aws::AwsCredential;
     async fn get_credential(&self) -> object_store::Result<Arc<Self::Credential>> {
         let c = fetch(&self.0).await?;
-        let k = c.aws.ok_or_else(|| generic("the credential has no aws keys for S3".into()))?;
+        let k = c
+            .aws
+            .ok_or_else(|| generic("the credential has no aws keys for S3".into()))?;
         Ok(Arc::new(object_store::aws::AwsCredential {
             key_id: k.access_key_id,
             secret_key: k.secret_access_key,
@@ -377,7 +477,10 @@ pub struct BearerProvider(pub Arc<Source>);
 
 impl BearerProvider {
     pub async fn token(&self) -> object_store::Result<String> {
-        fetch(&self.0).await?.token.ok_or_else(|| generic("the credential has no token".into()))
+        fetch(&self.0)
+            .await?
+            .token
+            .ok_or_else(|| generic("the credential has no token".into()))
     }
 }
 
@@ -402,7 +505,9 @@ mod tests {
         }
         // SAFETY: tests in this module run with this variable set the same way.
         unsafe { std::env::set_var("PAIL_EXTENSIONS_DIR", ext.path()) };
-        let c = cfg("[credential]\n\tprovider = corp\n[credential \"gs://acme\"]\n\tprovider = acme\n[credential \"gs://acme/secret\"]\n\tprovider = ambient\n[credential \"https://vcs.acme.dev\"]\n\thelper = sso token\n");
+        let c = cfg(
+            "[credential]\n\tprovider = corp\n[credential \"gs://acme\"]\n\tprovider = acme\n[credential \"gs://acme/secret\"]\n\tprovider = ambient\n[credential \"https://vcs.acme.dev\"]\n\thelper = sso token\n",
+        );
         let p = |u: &str| match choose(u, &c).unwrap().provider {
             Provider::Extension { name, .. } => name,
             Provider::Ambient => "ambient".into(),
@@ -410,10 +515,19 @@ mod tests {
         };
         assert_eq!(p("gs://acme/app"), "acme");
         assert_eq!(p("gs://acme/secret/x"), "ambient");
-        assert_eq!(p("gs://acme-other/app"), "corp", "a prefix of the name is not a prefix of the path");
+        assert_eq!(
+            p("gs://acme-other/app"),
+            "corp",
+            "a prefix of the name is not a prefix of the path"
+        );
         assert_eq!(p("https://vcs.acme.dev/app"), "cmd:sso token");
-        assert_eq!(choose("s3://x/y", &cfg("")).unwrap().provider, Provider::Ambient);
-        let missing = choose("gs://x/y", &cfg("[credential]\n\tprovider = nope\n")).unwrap_err().to_string();
+        assert_eq!(
+            choose("s3://x/y", &cfg("")).unwrap().provider,
+            Provider::Ambient
+        );
+        let missing = choose("gs://x/y", &cfg("[credential]\n\tprovider = nope\n"))
+            .unwrap_err()
+            .to_string();
         assert!(missing.contains("pail auth install nope"), "{missing}");
     }
 
@@ -421,7 +535,8 @@ mod tests {
     fn helpers_answer_json_or_a_bare_token() {
         let c = parse(br#"{"token":"t","expires_at":5}"#).unwrap();
         assert_eq!((c.token.as_deref(), c.expires_at), (Some("t"), 5));
-        let c = parse(br#"{"aws":{"access_key_id":"k","secret_access_key":"s"},"expires_at":9}"#).unwrap();
+        let c = parse(br#"{"aws":{"access_key_id":"k","secret_access_key":"s"},"expires_at":9}"#)
+            .unwrap();
         assert_eq!(c.aws.unwrap().access_key_id, "k");
         let c = parse(b"ya29.abc\n").unwrap();
         assert_eq!(c.token.as_deref(), Some("ya29.abc"));

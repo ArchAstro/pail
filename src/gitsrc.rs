@@ -80,25 +80,54 @@ impl Git {
             .context("starting git cat-file")?;
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::with_capacity(1 << 20, child.stdout.take().unwrap());
-        Ok(Git { dir: dir.to_path_buf(), cat: Mutex::new(CatFile { _child: child, stdin, stdout }) })
+        Ok(Git {
+            dir: dir.to_path_buf(),
+            cat: Mutex::new(CatFile {
+                _child: child,
+                stdin,
+                stdout,
+            }),
+        })
     }
 
     pub fn run(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let out = Command::new("git").arg("-C").arg(&self.dir).args(args).output()?;
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(args)
+            .output()?;
         if !out.status.success() {
-            bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(out.stdout)
     }
 
     pub fn rev_parse(&self, rev: &str) -> Result<String> {
-        Ok(String::from_utf8(self.run(&["rev-parse", "--verify", &format!("{rev}^{{commit}}")])?)?.trim().to_string())
+        Ok(String::from_utf8(self.run(&[
+            "rev-parse",
+            "--verify",
+            &format!("{rev}^{{commit}}"),
+        ])?)?
+        .trim()
+        .to_string())
     }
 
     /// First-parent commits after `from` up to and including `to`, oldest first.
     pub fn first_parent_range(&self, from: &str, to: &str) -> Result<Vec<String>> {
-        let out = self.run(&["rev-list", "--first-parent", "--reverse", &format!("{from}..{to}")])?;
-        Ok(String::from_utf8(out)?.lines().map(str::to_string).collect())
+        let out = self.run(&[
+            "rev-list",
+            "--first-parent",
+            "--reverse",
+            &format!("{from}..{to}"),
+        ])?;
+        Ok(String::from_utf8(out)?
+            .lines()
+            .map(str::to_string)
+            .collect())
     }
 
     /// Read an object's raw bytes.
@@ -124,23 +153,39 @@ impl Git {
         out.split(|&b| b == 0)
             .filter(|s| !s.is_empty())
             .map(|rec| {
-                let tab = rec.iter().position(|&b| b == b'\t').context("bad ls-tree record")?;
+                let tab = rec
+                    .iter()
+                    .position(|&b| b == b'\t')
+                    .context("bad ls-tree record")?;
                 let meta = std::str::from_utf8(&rec[..tab])?;
                 let path = String::from_utf8(rec[tab + 1..].to_vec()).context("non-UTF-8 path")?;
                 let f: Vec<&str> = meta.split(' ').collect();
-                Ok(TreeItem { mode: f[0].to_string(), oid: f[2].to_string(), path })
+                Ok(TreeItem {
+                    mode: f[0].to_string(),
+                    oid: f[2].to_string(),
+                    path,
+                })
             })
             .collect()
     }
 
     /// Path-level changes between two commits (no rename detection).
     pub fn diff_tree(&self, parent: &str, commit: &str) -> Result<Vec<DiffItem>> {
-        let out = self.run(&["diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", parent, commit])?;
+        let out = self.run(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--no-commit-id",
+            parent,
+            commit,
+        ])?;
         let mut fields = out.split(|&b| b == 0).filter(|s| !s.is_empty());
         let mut items = vec![];
         while let Some(meta) = fields.next() {
             let meta = std::str::from_utf8(meta)?;
-            let path = String::from_utf8(fields.next().context("diff-tree: missing path")?.to_vec())?;
+            let path =
+                String::from_utf8(fields.next().context("diff-tree: missing path")?.to_vec())?;
             let f: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
             let status = f[4];
             items.push(DiffItem {
@@ -168,7 +213,10 @@ fn split_ident(v: &str) -> Result<(String, String)> {
 }
 
 pub fn parse_commit(raw: &[u8]) -> Result<RawCommit> {
-    let split = raw.windows(2).position(|w| w == b"\n\n").context("commit without message separator")?;
+    let split = raw
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .context("commit without message separator")?;
     let header = &raw[..split + 1];
     let message = raw[split + 2..].to_vec();
     let mut tree = None;
@@ -243,14 +291,24 @@ pub fn tree_id(files: &[(String, Kind, String)]) -> Result<String> {
         let name = parts.pop().unwrap().to_string();
         let mut dir = &mut root;
         for p in parts {
-            let n = dir.entry(p.to_string()).or_insert_with(|| Node::Dir(BTreeMap::new()));
+            let n = dir
+                .entry(p.to_string())
+                .or_insert_with(|| Node::Dir(BTreeMap::new()));
             dir = match n {
                 Node::Dir(d) => d,
                 Node::Blob { .. } => bail!("{path}: a file is also used as a directory"),
             };
         }
-        let raw: [u8; 20] = hex::decode(oid)?.try_into().map_err(|_| anyhow::anyhow!("bad oid {oid}"))?;
-        dir.insert(name, Node::Blob { mode: mode_for_kind(*kind), oid: raw });
+        let raw: [u8; 20] = hex::decode(oid)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("bad oid {oid}"))?;
+        dir.insert(
+            name,
+            Node::Blob {
+                mode: mode_for_kind(*kind),
+                oid: raw,
+            },
+        );
     }
     fn write(dir: &BTreeMap<String, Node>) -> [u8; 20] {
         // Git sorts tree entries as if directory names ended with '/'.
@@ -283,8 +341,14 @@ mod tests {
 
     #[test]
     fn known_ids() {
-        assert_eq!(object_id("blob", b""), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
-        assert_eq!(tree_id(&[]).unwrap(), "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+        assert_eq!(
+            object_id("blob", b""),
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+        );
+        assert_eq!(
+            tree_id(&[]).unwrap(),
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        );
     }
 
     #[test]

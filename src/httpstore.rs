@@ -24,11 +24,14 @@ use chrono::{DateTime, TimeZone, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
-    ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result,
+    CopyOptions, GetOptions, GetRange, GetResult, GetResultPayload, ListResult, MultipartUpload,
+    ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    Result,
 };
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_MATCH, IF_NONE_MATCH, LAST_MODIFIED, RANGE};
+use reqwest::header::{
+    CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_MATCH, IF_NONE_MATCH, LAST_MODIFIED, RANGE,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::creds::BearerProvider;
@@ -61,13 +64,22 @@ impl fmt::Display for HttpStore {
 }
 
 fn generic(msg: impl Into<String>) -> object_store::Error {
-    object_store::Error::Generic { store: STORE, source: msg.into().into() }
+    object_store::Error::Generic {
+        store: STORE,
+        source: msg.into().into(),
+    }
 }
 
 impl HttpStore {
     pub fn new(base: &str, auth: Option<Arc<BearerProvider>>) -> Result<HttpStore> {
-        let client = reqwest::Client::builder().build().map_err(|e| generic(e.to_string()))?;
-        Ok(HttpStore { base: base.trim_end_matches('/').to_string(), client, auth })
+        let client = reqwest::Client::builder()
+            .build()
+            .map_err(|e| generic(e.to_string()))?;
+        Ok(HttpStore {
+            base: base.trim_end_matches('/').to_string(),
+            client,
+            auth,
+        })
     }
 
     fn url(&self, location: &Path) -> String {
@@ -80,13 +92,17 @@ impl HttpStore {
             Some(a) => req.bearer_auth(a.token().await?),
             None => req,
         };
-        let resp = req.send().await.map_err(|e| generic(format!("{path}: {e}")))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| generic(format!("{path}: {e}")))?;
         let status = resp.status();
         if status.is_success() {
             return Ok(resp);
         }
         let body = resp.text().await.unwrap_or_default();
-        let source: Box<dyn std::error::Error + Send + Sync> = format!("{status}: {}", body.trim()).into();
+        let source: Box<dyn std::error::Error + Send + Sync> =
+            format!("{status}: {}", body.trim()).into();
         let path = path.to_string();
         Err(match status {
             StatusCode::NOT_FOUND => object_store::Error::NotFound { path, source },
@@ -95,7 +111,10 @@ impl HttpStore {
             StatusCode::NOT_MODIFIED => object_store::Error::NotModified { path, source },
             StatusCode::UNAUTHORIZED => object_store::Error::Unauthenticated { path, source },
             StatusCode::FORBIDDEN => object_store::Error::PermissionDenied { path, source },
-            _ => object_store::Error::Generic { store: STORE, source },
+            _ => object_store::Error::Generic {
+                store: STORE,
+                source,
+            },
         })
     }
 }
@@ -113,14 +132,26 @@ fn modified(r: &reqwest::Response) -> DateTime<Utc> {
 
 #[async_trait]
 impl ObjectStore for HttpStore {
-    async fn put_opts(&self, location: &Path, payload: PutPayload, opts: PutOptions) -> Result<PutResult> {
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> Result<PutResult> {
         let body: Bytes = payload.into();
-        let mut req = self.client.put(self.url(location)).header(CONTENT_LENGTH, body.len()).body(body);
+        let mut req = self
+            .client
+            .put(self.url(location))
+            .header(CONTENT_LENGTH, body.len())
+            .body(body);
         let create = matches!(opts.mode, PutMode::Create);
         req = match opts.mode {
             PutMode::Overwrite => req,
             PutMode::Create => req.header(IF_NONE_MATCH, "*"),
-            PutMode::Update(v) => req.header(IF_MATCH, v.e_tag.ok_or_else(|| generic("update without a version"))?),
+            PutMode::Update(v) => req.header(
+                IF_MATCH,
+                v.e_tag.ok_or_else(|| generic("update without a version"))?,
+            ),
         };
         let resp = match self.send(req, location.as_ref()).await {
             // A failed create means the object is there.
@@ -129,21 +160,38 @@ impl ObjectStore for HttpStore {
             }
             r => r?,
         };
-        Ok(PutResult { e_tag: header(&resp, ETAG).map(str::to_string), version: None, extensions: Default::default() })
+        Ok(PutResult {
+            e_tag: header(&resp, ETAG).map(str::to_string),
+            version: None,
+            extensions: Default::default(),
+        })
     }
 
-    async fn put_multipart_opts(&self, _: &Path, _: PutMultipartOptions) -> Result<Box<dyn MultipartUpload>> {
-        Err(object_store::Error::NotImplemented { operation: "multipart upload".into(), implementer: STORE.into() })
+    async fn put_multipart_opts(
+        &self,
+        _: &Path,
+        _: PutMultipartOptions,
+    ) -> Result<Box<dyn MultipartUpload>> {
+        Err(object_store::Error::NotImplemented {
+            operation: "multipart upload".into(),
+            implementer: STORE.into(),
+        })
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
         let url = self.url(location);
-        let mut req = if options.head { self.client.head(&url) } else { self.client.get(&url) };
+        let mut req = if options.head {
+            self.client.head(&url)
+        } else {
+            self.client.get(&url)
+        };
         if let Some(r) = &options.range {
             req = req.header(
                 RANGE,
                 match r {
-                    GetRange::Bounded(r) => format!("bytes={}-{}", r.start, r.end.saturating_sub(1)),
+                    GetRange::Bounded(r) => {
+                        format!("bytes={}-{}", r.start, r.end.saturating_sub(1))
+                    }
                     GetRange::Offset(o) => format!("bytes={o}-"),
                     GetRange::Suffix(n) => format!("bytes=-{n}"),
                 },
@@ -153,17 +201,30 @@ impl ObjectStore for HttpStore {
         let e_tag = header(&resp, ETAG).map(str::to_string);
         let last_modified = modified(&resp);
         // HEAD answers carry the size in X-Pail-Size (their Content-Length is the empty body's).
-        let len: u64 = header(&resp, reqwest::header::HeaderName::from_static("x-pail-size"))
-            .or_else(|| header(&resp, CONTENT_LENGTH))
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let len: u64 = header(
+            &resp,
+            reqwest::header::HeaderName::from_static("x-pail-size"),
+        )
+        .or_else(|| header(&resp, CONTENT_LENGTH))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
         // "bytes a-b/total" for a range answer.
         let (range, size) = match header(&resp, CONTENT_RANGE).and_then(parse_content_range) {
             Some((r, total)) => (r, total),
             None => (0..len, len),
         };
-        let meta = ObjectMeta { location: location.clone(), last_modified, size, e_tag, version: None };
-        let body = if options.head { Bytes::new() } else { resp.bytes().await.map_err(|e| generic(e.to_string()))? };
+        let meta = ObjectMeta {
+            location: location.clone(),
+            last_modified,
+            size,
+            e_tag,
+            version: None,
+        };
+        let body = if options.head {
+            Bytes::new()
+        } else {
+            resp.bytes().await.map_err(|e| generic(e.to_string()))?
+        };
         Ok(GetResult {
             payload: GetResultPayload::Stream(stream::once(async move { Ok(body) }).boxed()),
             meta,
@@ -173,8 +234,15 @@ impl ObjectStore for HttpStore {
         })
     }
 
-    fn delete_stream(&self, locations: BoxStream<'static, Result<Path>>) -> BoxStream<'static, Result<Path>> {
-        let me = HttpStore { base: self.base.clone(), client: self.client.clone(), auth: self.auth.clone() };
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, Result<Path>>,
+    ) -> BoxStream<'static, Result<Path>> {
+        let me = HttpStore {
+            base: self.base.clone(),
+            client: self.client.clone(),
+            auth: self.auth.clone(),
+        };
         let me = Arc::new(me);
         locations
             .then(move |p| {
@@ -193,16 +261,28 @@ impl ObjectStore for HttpStore {
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
         let url = format!("{}/_ls", self.base);
         let prefix = prefix.map(|p| p.as_ref().to_string()).unwrap_or_default();
-        let me = HttpStore { base: self.base.clone(), client: self.client.clone(), auth: self.auth.clone() };
+        let me = HttpStore {
+            base: self.base.clone(),
+            client: self.client.clone(),
+            auth: self.auth.clone(),
+        };
         stream::once(async move {
-            let q: String = url::form_urlencoded::Serializer::new(String::new()).append_pair("prefix", &prefix).finish();
-            let resp = me.send(me.client.get(format!("{url}?{q}")), &prefix).await?;
+            let q: String = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("prefix", &prefix)
+                .finish();
+            let resp = me
+                .send(me.client.get(format!("{url}?{q}")), &prefix)
+                .await?;
             let body = resp.bytes().await.map_err(|e| generic(e.to_string()))?;
-            let items: Vec<ListEntry> = serde_json::from_slice(&body).map_err(|e| generic(e.to_string()))?;
+            let items: Vec<ListEntry> =
+                serde_json::from_slice(&body).map_err(|e| generic(e.to_string()))?;
             Ok::<_, object_store::Error>(stream::iter(items.into_iter().map(|e| {
                 Ok(ObjectMeta {
                     location: Path::from(e.key),
-                    last_modified: Utc.timestamp_opt(e.modified, 0).single().unwrap_or_default(),
+                    last_modified: Utc
+                        .timestamp_opt(e.modified, 0)
+                        .single()
+                        .unwrap_or_default(),
                     size: e.size,
                     e_tag: None,
                     version: None,
@@ -218,11 +298,17 @@ impl ObjectStore for HttpStore {
     }
 
     async fn list_with_delimiter(&self, _: Option<&Path>) -> Result<ListResult> {
-        Err(object_store::Error::NotImplemented { operation: "list_with_delimiter".into(), implementer: STORE.into() })
+        Err(object_store::Error::NotImplemented {
+            operation: "list_with_delimiter".into(),
+            implementer: STORE.into(),
+        })
     }
 
     async fn copy_opts(&self, _: &Path, _: &Path, _: CopyOptions) -> Result<()> {
-        Err(object_store::Error::NotImplemented { operation: "copy".into(), implementer: STORE.into() })
+        Err(object_store::Error::NotImplemented {
+            operation: "copy".into(),
+            implementer: STORE.into(),
+        })
     }
 }
 

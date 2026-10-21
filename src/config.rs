@@ -39,12 +39,17 @@ enum Line {
 
 /// `section.sub.name` → (section lowercased, sub, name lowercased).
 fn split_key(key: &str) -> Result<(String, Option<String>, String)> {
-    let (first, rest) = key.split_once('.').with_context(|| format!("key does not contain a section: {key}"))?;
+    let (first, rest) = key
+        .split_once('.')
+        .with_context(|| format!("key does not contain a section: {key}"))?;
     let (sub, name) = match rest.rsplit_once('.') {
         Some((sub, name)) => (Some(sub.to_string()), name),
         None => (None, rest),
     };
-    if first.is_empty() || name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if first.is_empty()
+        || name.is_empty()
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         bail!("invalid key: {key}");
     }
     Ok((first.to_ascii_lowercase(), sub, name.to_ascii_lowercase()))
@@ -67,15 +72,26 @@ fn unquote(raw: &str) -> String {
             _ => out.push(c),
         }
     }
-    if quoted { out } else { out.trim_end().to_string() }
+    if quoted {
+        out
+    } else {
+        out.trim_end().to_string()
+    }
 }
 
 fn quote(v: &str) -> String {
-    let needs = v.is_empty() || v.starts_with(' ') || v.ends_with(' ') || v.contains(['#', ';', '"', '\\', '\n', '\t']);
+    let needs = v.is_empty()
+        || v.starts_with(' ')
+        || v.ends_with(' ')
+        || v.contains(['#', ';', '"', '\\', '\n', '\t']);
     if !needs {
         return v.to_string();
     }
-    let esc = v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t");
+    let esc = v
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t");
     format!("\"{esc}\"")
 }
 
@@ -87,7 +103,10 @@ impl File {
             if t.starts_with('[') && t.contains(']') {
                 let inner = &t[1..t.find(']').unwrap()];
                 let (name, sub) = match inner.split_once(char::is_whitespace) {
-                    Some((n, s)) => (n.to_ascii_lowercase(), Some(s.trim().trim_matches('"').to_string())),
+                    Some((n, s)) => (
+                        n.to_ascii_lowercase(),
+                        Some(s.trim().trim_matches('"').to_string()),
+                    ),
                     None => match inner.split_once('.') {
                         // Legacy [section.sub] form.
                         Some((n, s)) => (n.to_ascii_lowercase(), Some(s.to_string())),
@@ -102,7 +121,10 @@ impl File {
                     Some((k, v)) => (k.trim(), unquote(v)),
                     None => (t, "true".to_string()),
                 };
-                lines.push(Line::Entry { key: k.to_ascii_lowercase(), value: v });
+                lines.push(Line::Entry {
+                    key: k.to_ascii_lowercase(),
+                    value: v,
+                });
             }
         }
         File { path: None, lines }
@@ -118,9 +140,13 @@ impl File {
         let mut out = String::new();
         for l in &self.lines {
             match l {
-                Line::Section { name, sub: Some(s) } => out.push_str(&format!("[{name} \"{s}\"]\n")),
+                Line::Section { name, sub: Some(s) } => {
+                    out.push_str(&format!("[{name} \"{s}\"]\n"))
+                }
                 Line::Section { name, sub: None } => out.push_str(&format!("[{name}]\n")),
-                Line::Entry { key, value } => out.push_str(&format!("\t{key} = {}\n", quote(value))),
+                Line::Entry { key, value } => {
+                    out.push_str(&format!("\t{key} = {}\n", quote(value)))
+                }
                 Line::Other(s) => {
                     out.push_str(s);
                     out.push('\n');
@@ -164,8 +190,14 @@ impl File {
     }
 
     fn section_range(&self, name: &str, sub: &Option<String>) -> Option<(usize, usize)> {
-        let start = self.lines.iter().position(|l| matches!(l, Line::Section { name: n, sub: s } if n == name && s == sub))?;
-        let end = self.lines[start + 1..].iter().position(|l| matches!(l, Line::Section { .. })).map(|i| start + 1 + i).unwrap_or(self.lines.len());
+        let start = self.lines.iter().position(
+            |l| matches!(l, Line::Section { name: n, sub: s } if n == name && s == sub),
+        )?;
+        let end = self.lines[start + 1..]
+            .iter()
+            .position(|l| matches!(l, Line::Section { .. }))
+            .map(|i| start + 1 + i)
+            .unwrap_or(self.lines.len());
         Some((start, end))
     }
 
@@ -174,15 +206,31 @@ impl File {
         let (name, sub, k) = split_key(key)?;
         match self.section_range(&name, &sub) {
             Some((start, end)) => {
-                let existing = (start + 1..end).rev().find(|&i| matches!(&self.lines[i], Line::Entry { key, .. } if *key == k));
+                let existing = (start + 1..end)
+                    .rev()
+                    .find(|&i| matches!(&self.lines[i], Line::Entry { key, .. } if *key == k));
                 match existing {
-                    Some(i) => self.lines[i] = Line::Entry { key: k, value: value.to_string() },
-                    None => self.lines.insert(end, Line::Entry { key: k, value: value.to_string() }),
+                    Some(i) => {
+                        self.lines[i] = Line::Entry {
+                            key: k,
+                            value: value.to_string(),
+                        }
+                    }
+                    None => self.lines.insert(
+                        end,
+                        Line::Entry {
+                            key: k,
+                            value: value.to_string(),
+                        },
+                    ),
                 }
             }
             None => {
                 self.lines.push(Line::Section { name, sub });
-                self.lines.push(Line::Entry { key: k, value: value.to_string() });
+                self.lines.push(Line::Entry {
+                    key: k,
+                    value: value.to_string(),
+                });
             }
         }
         Ok(())
@@ -191,7 +239,9 @@ impl File {
     /// Remove every value of a key; false if there was none.
     pub fn unset(&mut self, key: &str) -> Result<bool> {
         let (name, sub, k) = split_key(key)?;
-        let Some((start, end)) = self.section_range(&name, &sub) else { return Ok(false) };
+        let Some((start, end)) = self.section_range(&name, &sub) else {
+            return Ok(false);
+        };
         let before = self.lines.len();
         let mut i = start + 1;
         let mut end = end;
@@ -251,12 +301,22 @@ impl Config {
     }
 
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.get(key).map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "on" | "1" | ""))
+        self.get(key).map(|v| {
+            matches!(
+                v.to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1" | ""
+            )
+        })
     }
 
     /// Every effective entry, with its scope, in order (as `git config --list --show-scope`).
     pub fn list(&self) -> Vec<(Scope, String, String)> {
-        let mut out: Vec<(Scope, String, String)> = self.global.entries().into_iter().map(|(k, v)| (Scope::Global, k, v)).collect();
+        let mut out: Vec<(Scope, String, String)> = self
+            .global
+            .entries()
+            .into_iter()
+            .map(|(k, v)| (Scope::Global, k, v))
+            .collect();
         if let Some(l) = &self.local {
             out.extend(l.entries().into_iter().map(|(k, v)| (Scope::Local, k, v)));
         }
@@ -271,13 +331,18 @@ impl Config {
                 }
                 Ok(&mut self.global)
             }
-            Scope::Local => self.local.as_mut().context("not in a pail repository (use --global)"),
+            Scope::Local => self
+                .local
+                .as_mut()
+                .context("not in a pail repository (use --global)"),
         }
     }
 
     /// The default branch for new repositories.
     pub fn default_branch(&self) -> String {
-        self.get("init.defaultBranch").filter(|b| !b.is_empty()).unwrap_or_else(|| "main".to_string())
+        self.get("init.defaultBranch")
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| "main".to_string())
     }
 
     /// `Name <email>` for a role (`author`/`committer`): `PAIL_<ROLE>_NAME`/`_EMAIL`, then
@@ -287,10 +352,16 @@ impl Config {
             return Ok(a);
         }
         let up = role.to_ascii_uppercase();
-        let name = std::env::var(format!("PAIL_{up}_NAME")).ok().or_else(|| self.get("user.name"));
-        let email = std::env::var(format!("PAIL_{up}_EMAIL")).ok().or_else(|| self.get("user.email"));
+        let name = std::env::var(format!("PAIL_{up}_NAME"))
+            .ok()
+            .or_else(|| self.get("user.name"));
+        let email = std::env::var(format!("PAIL_{up}_EMAIL"))
+            .ok()
+            .or_else(|| self.get("user.email"));
         match (name, email) {
-            (Some(n), Some(e)) if !n.trim().is_empty() => Ok(format!("{} <{}>", n.trim(), e.trim())),
+            (Some(n), Some(e)) if !n.trim().is_empty() => {
+                Ok(format!("{} <{}>", n.trim(), e.trim()))
+            }
             _ => bail!(
                 "Author identity unknown\n\n*** Please tell me who you are.\n\nRun\n\n  pail config --global user.email \"you@example.com\"\n  pail config --global user.name \"Your Name\"\n\nto set your account's default identity.\nOmit --global to set the identity only in this repository."
             ),
@@ -304,19 +375,36 @@ mod tests {
 
     #[test]
     fn parse_set_unset_roundtrip() {
-        let mut f = File::parse("# mine\n[user]\n\tname = Ada \"The\" Lovelace\n\temail = ada@x ; work\n[branch \"Feature\"]\n\tremote = origin\n");
-        assert_eq!(f.entries(), vec![
-            ("user.name".into(), "Ada The Lovelace".into()),
-            ("user.email".into(), "ada@x".into()),
-            ("branch.Feature.remote".into(), "origin".into()),
-        ]);
+        let mut f = File::parse(
+            "# mine\n[user]\n\tname = Ada \"The\" Lovelace\n\temail = ada@x ; work\n[branch \"Feature\"]\n\tremote = origin\n",
+        );
+        assert_eq!(
+            f.entries(),
+            vec![
+                ("user.name".into(), "Ada The Lovelace".into()),
+                ("user.email".into(), "ada@x".into()),
+                ("branch.Feature.remote".into(), "origin".into()),
+            ]
+        );
         f.set("user.NAME", "Grace # Hopper").unwrap();
         f.set("init.defaultBranch", "trunk").unwrap();
         let again = File::parse(&f.render());
-        assert_eq!(again.entries()[0], ("user.name".into(), "Grace # Hopper".into()));
-        assert!(again.entries().contains(&("init.defaultbranch".into(), "trunk".into())));
+        assert_eq!(
+            again.entries()[0],
+            ("user.name".into(), "Grace # Hopper".into())
+        );
+        assert!(
+            again
+                .entries()
+                .contains(&("init.defaultbranch".into(), "trunk".into()))
+        );
         assert!(f.render().starts_with("# mine\n"));
         assert!(f.unset("user.email").unwrap());
-        assert!(!File::parse(&f.render()).entries().iter().any(|(k, _)| k == "user.email"));
+        assert!(
+            !File::parse(&f.render())
+                .entries()
+                .iter()
+                .any(|(k, _)| k == "user.email")
+        );
     }
 }

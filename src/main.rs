@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCandidates;
+use pail::config::{Config, Scope};
 use pail::hash::Hash;
+use pail::local::LocalRepo;
 use pail::objects::now_date;
 use pail::repo::{CommitRequest, Delta, Repo};
 use pail::rev::{Ctx, Ids};
-use pail::local::LocalRepo;
-use pail::config::{Config, Scope};
 use pail::worktree::{Checkout, Worktree, seed_ignored};
 
 mod cli_help;
@@ -463,9 +463,7 @@ enum AuthCmd {
     },
     /// Show the provider for a store (default: this repository's), fetch a credential and
     /// check that it can read the store.
-    Status {
-        store: Option<String>,
-    },
+    Status { store: Option<String> },
     /// Forget cached credentials.
     Logout,
 }
@@ -490,13 +488,21 @@ fn parse_size(s: &str) -> Result<u64> {
         Some('T') => (&s[..s.len() - 1], 1 << 40),
         _ => (s, 1),
     };
-    Ok((num.trim().parse::<f64>().with_context(|| format!("bad size {s}"))? * mult as f64) as u64)
+    Ok((num
+        .trim()
+        .parse::<f64>()
+        .with_context(|| format!("bad size {s}"))?
+        * mult as f64) as u64)
 }
 
 fn dir_size(p: &std::path::Path) -> (u64, u64) {
     let mut files = 0;
     let mut bytes = 0;
-    for e in ignore::WalkBuilder::new(p).standard_filters(false).build().flatten() {
+    for e in ignore::WalkBuilder::new(p)
+        .standard_filters(false)
+        .build()
+        .flatten()
+    {
         if let Ok(md) = e.metadata() {
             if md.is_file() {
                 files += 1;
@@ -554,7 +560,13 @@ fn checkout_summary(co: &Checkout) -> String {
 
 fn fmt_bytes(n: u64) -> String {
     let n = n as f64;
-    if n >= 1e9 { format!("{:.2} GB", n / 1e9) } else if n >= 1e6 { format!("{:.1} MB", n / 1e6) } else { format!("{:.0} KB", n / 1e3) }
+    if n >= 1e9 {
+        format!("{:.2} GB", n / 1e9)
+    } else if n >= 1e6 {
+        format!("{:.1} MB", n / 1e6)
+    } else {
+        format!("{:.0} KB", n / 1e3)
+    }
 }
 
 fn main() {
@@ -570,7 +582,10 @@ fn main() {
         return;
     };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let cli = Cli { cmd: Some(cmd), ..cli };
+    let cli = Cli {
+        cmd: Some(cmd),
+        ..cli
+    };
     if let Err(e) = rt.block_on(run(cli)) {
         if let Some(io) = e.downcast_ref::<std::io::Error>() {
             if io.kind() == std::io::ErrorKind::BrokenPipe {
@@ -586,11 +601,15 @@ fn main() {
             std::process::exit(pail::hooks::REFUSED_EXIT);
         }
         let text = format!("{e:#}");
-        if text.contains("refs/") && (text.contains("403") || text.contains("lacked the necessary privileges")) {
+        if text.contains("refs/")
+            && (text.contains("403") || text.contains("lacked the necessary privileges"))
+        {
             // The store's answer repeats itself several times; the first clause names what failed.
             let what = text.split(": ").next().unwrap_or(&text);
             eprintln!("error: {what}: permission denied (403)");
-            eprintln!("hint: the branch is protected by the repository's policy (`pail policy requirements <branch>`); push to a branch you may write, such as pr/*, and land it through the lander");
+            eprintln!(
+                "hint: the branch is protected by the repository's policy (`pail policy requirements <branch>`); push to a branch you may write, such as pr/*, and land it through the lander"
+            );
             std::process::exit(1);
         }
         if let Some(c) = e.downcast_ref::<pail::repo::ConflictError>() {
@@ -635,10 +654,18 @@ impl Output {
             }
             if let Ok(mut child) = cmd.spawn() {
                 let stdin = child.stdin.take().unwrap();
-                return Output { w: Box::new(std::io::BufWriter::new(stdin)), pager: Some(child), tty };
+                return Output {
+                    w: Box::new(std::io::BufWriter::new(stdin)),
+                    pager: Some(child),
+                    tty,
+                };
             }
         }
-        Output { w: Box::new(std::io::BufWriter::new(std::io::stdout())), pager: None, tty }
+        Output {
+            w: Box::new(std::io::BufWriter::new(std::io::stdout())),
+            pager: None,
+            tty,
+        }
     }
 
     fn finish(mut self) -> Result<()> {
@@ -647,7 +674,13 @@ impl Output {
         if let Some(mut p) = self.pager.take() {
             let _ = p.wait();
         }
-        flushed.or_else(|e| if e.kind() == std::io::ErrorKind::BrokenPipe { Ok(()) } else { Err(e) })?;
+        flushed.or_else(|e| {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
         Ok(())
     }
 }
@@ -678,13 +711,19 @@ async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
             paths.push(w);
             continue;
         }
-        let is_rev = w.contains("..") || w.starts_with('^') || ctx.try_resolve(&w).await.unwrap_or(None).is_some();
+        let is_rev = w.contains("..")
+            || w.starts_with('^')
+            || ctx.try_resolve(&w).await.unwrap_or(None).is_some();
         if is_rev {
             o.revs.push(w);
             continue;
         }
         let exists = match ctx.head().await? {
-            Some(h) => pail::snapshot::Snapshot::open(&ctx.repo, h).await?.stat(&w).await?.is_some(),
+            Some(h) => pail::snapshot::Snapshot::open(&ctx.repo, h)
+                .await?
+                .stat(&w)
+                .await?
+                .is_some(),
             None => false,
         };
         if !exists {
@@ -698,7 +737,10 @@ async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
     paths.append(&mut o.paths);
     // Pathspecs are relative to the current directory inside a working copy.
     if let Some(root) = &ctx.worktree {
-        let rel = cwd()?.strip_prefix(root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let rel = cwd()?
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if !rel.is_empty() {
             paths = paths.into_iter().map(|p| format!("{rel}/{p}")).collect();
         }
@@ -706,7 +748,12 @@ async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
     o.paths = paths;
     let spec = Pathspec::new(&o.paths)?;
     let commits = walk(ctx, &o, &spec, o.diff.any_output()).await?;
-    let any_merge = commits.iter().any(|c| c.commit.meta.get("git.parents").is_some_and(|p| p.contains(' ')));
+    let any_merge = commits.iter().any(|c| {
+        c.commit
+            .meta
+            .get("git.parents")
+            .is_some_and(|p| p.contains(' '))
+    });
     let mut printer = Printer::new(ctx, &o, out.tty, any_merge).await?;
     // Contents for diffs are fetched 64 commits at a time in one batched read.
     for chunk in commits.chunks(64) {
@@ -742,13 +789,21 @@ async fn run(cli: Cli) -> Result<()> {
     match cmd {
         Cmd::Completion { shell } => complete::registration(&shell)?,
         Cmd::Policy(cmd) => policy_cmd(cmd, cli.store, cli.repo, ids).await?,
-        Cmd::Put { branch, message, files, deletes, if_absent } => {
+        Cmd::Put {
+            branch,
+            message,
+            files,
+            deletes,
+            if_absent,
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let repo = &ctx.repo;
             let base = repo.read_ref(&branch).await?.map(|(h, _)| h);
             let mut inputs = vec![];
             for f in &files {
-                let (path, src) = f.split_once('=').with_context(|| format!("--file wants PATH=SRC, got {f}"))?;
+                let (path, src) = f
+                    .split_once('=')
+                    .with_context(|| format!("--file wants PATH=SRC, got {f}"))?;
                 let data = if src == "-" {
                     use std::io::Read;
                     let mut b = vec![];
@@ -757,7 +812,11 @@ async fn run(cli: Cli) -> Result<()> {
                 } else {
                     std::fs::read(src).with_context(|| format!("reading {src}"))?
                 };
-                inputs.push(pail::repo::FileInput { path: path.trim_matches('/').to_string(), kind: pail::manifest::Kind::File, data: data.into() });
+                inputs.push(pail::repo::FileInput {
+                    path: path.trim_matches('/').to_string(),
+                    kind: pail::manifest::Kind::File,
+                    data: data.into(),
+                });
             }
             if inputs.is_empty() && deletes.is_empty() {
                 bail!("nothing to put: pass --file PATH=SRC or --delete PATH");
@@ -774,11 +833,18 @@ async fn run(cli: Cli) -> Result<()> {
                     v
                 };
                 if !present.is_empty() {
-                    return Err(pail::repo::ConflictError { branch: branch.clone(), paths: present }.into());
+                    return Err(pail::repo::ConflictError {
+                        branch: branch.clone(),
+                        paths: present,
+                    }
+                    .into());
                 }
             }
             let mut delta: Delta = BTreeMap::new();
-            for e in repo.write_files(&inputs, &std::collections::HashMap::new()).await? {
+            for e in repo
+                .write_files(&inputs, &std::collections::HashMap::new())
+                .await?
+            {
                 delta.insert(e.path.clone(), Some(e));
             }
             for d in deletes {
@@ -799,9 +865,18 @@ async fn run(cli: Cli) -> Result<()> {
                     meta: BTreeMap::new(),
                 })
                 .await?;
-            println!("[{branch} {}] {}", out.commit.short(), message.lines().next().unwrap_or(""));
+            println!(
+                "[{branch} {}] {}",
+                out.commit.short(),
+                message.lines().next().unwrap_or("")
+            );
         }
-        Cmd::Events { branches, gcs_subscription, interval_ms, initial } => {
+        Cmd::Events {
+            branches,
+            gcs_subscription,
+            interval_ms,
+            initial,
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let source = match gcs_subscription {
                 Some(sub) => {
@@ -809,9 +884,14 @@ async fn run(cli: Cli) -> Result<()> {
                     let token = pail::creds::Source::new(&provider, &ctx.repo.store.url).context(
                         "GCS events need a credential provider for the store (e.g. `pail auth use gcloud --for <store>`)",
                     )?;
-                    pail::events::Source::GcsPubSub { subscription: sub, token }
+                    pail::events::Source::GcsPubSub {
+                        subscription: sub,
+                        token,
+                    }
                 }
-                None => pail::events::Source::Poll { interval: std::time::Duration::from_millis(interval_ms) },
+                None => pail::events::Source::Poll {
+                    interval: std::time::Duration::from_millis(interval_ms),
+                },
             };
             use std::io::Write as _;
             pail::events::watch(&ctx.repo, source, &branches, initial, |e| {
@@ -822,7 +902,10 @@ async fn run(cli: Cli) -> Result<()> {
             })
             .await?;
         }
-        Cmd::Auth(AuthCmd::Logout) => println!("forgot {} cached credential(s)", pail::creds::clear_cache()?),
+        Cmd::Auth(AuthCmd::Logout) => println!(
+            "forgot {} cached credential(s)",
+            pail::creds::clear_cache()?
+        ),
         Cmd::Auth(AuthCmd::List) => {
             let installed = pail::creds::installed();
             for (name, exe) in &installed {
@@ -832,22 +915,50 @@ async fn run(cli: Cli) -> Result<()> {
             if installed.is_empty() {
                 println!("no credential providers installed (the ambient cloud SDK chain is used)");
             }
-            let bundled: Vec<&str> = pail::creds::BUNDLED.iter().map(|(n, _)| *n).filter(|n| !installed.iter().any(|(i, _)| i == n)).collect();
+            let bundled: Vec<&str> = pail::creds::BUNDLED
+                .iter()
+                .map(|(n, _)| *n)
+                .filter(|n| !installed.iter().any(|(i, _)| i == n))
+                .collect();
             if !bundled.is_empty() {
-                println!("\nbundled, not installed: {}   (pail auth install <name>)", bundled.join(", "));
+                println!(
+                    "\nbundled, not installed: {}   (pail auth install <name>)",
+                    bundled.join(", ")
+                );
             }
         }
-        Cmd::Auth(AuthCmd::Install { source, name, force }) => auth_install(&source, name, force)?,
+        Cmd::Auth(AuthCmd::Install {
+            source,
+            name,
+            force,
+        }) => auth_install(&source, name, force)?,
         Cmd::Auth(AuthCmd::Remove { name }) => {
-            let dir = pail::creds::extensions_dir().context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
+            let dir = pail::creds::extensions_dir()
+                .context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
             let p = dir.join(format!("{}{name}", pail::creds::PREFIX));
-            std::fs::remove_file(&p).with_context(|| format!("{} is not installed in {}", name, dir.display()))?;
+            std::fs::remove_file(&p)
+                .with_context(|| format!("{} is not installed in {}", name, dir.display()))?;
             println!("removed {}", p.display());
         }
-        Cmd::Auth(AuthCmd::Use { provider, url, global }) => auth_use(&provider, url, global)?,
+        Cmd::Auth(AuthCmd::Use {
+            provider,
+            url,
+            global,
+        }) => auth_use(&provider, url, global)?,
         Cmd::Auth(AuthCmd::Status { store }) => auth_status(store).await?,
-        Cmd::Serve { store, addr, auth_command, allow_anonymous } => {
-            pail::serve::serve(&pail::rev::store_url(&store)?, &addr, auth_command, allow_anonymous).await?
+        Cmd::Serve {
+            store,
+            addr,
+            auth_command,
+            allow_anonymous,
+        } => {
+            pail::serve::serve(
+                &pail::rev::store_url(&store)?,
+                &addr,
+                auth_command,
+                allow_anonymous,
+            )
+            .await?
         }
         Cmd::Help { command } => print_help(&command)?,
         Cmd::Log { args } => {
@@ -894,8 +1005,12 @@ async fn run(cli: Cli) -> Result<()> {
                 bail!("{store} already has branch {branch}");
             }
             // The default branch a bare read (`--store`) starts from.
-            let head = serde_json::to_vec(&pail::rev::StoreHead { branch: branch.clone() })?;
-            repo.store.put(pail::rev::STORE_HEAD_KEY, head.into()).await?;
+            let head = serde_json::to_vec(&pail::rev::StoreHead {
+                branch: branch.clone(),
+            })?;
+            repo.store
+                .put(pail::rev::STORE_HEAD_KEY, head.into())
+                .await?;
             let who = cfg.identity("author")?;
             let committer = cfg.identity("committer")?;
             let date = now_date();
@@ -914,15 +1029,30 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             println!("initialized {store} ({branch} @ {})", out.commit.short());
         }
-        Cmd::Clone { store, dir, branch, at, bare } => {
+        Cmd::Clone {
+            store,
+            dir,
+            branch,
+            at,
+            bare,
+        } => {
             let store = pail::rev::store_url(&store)?;
             // The store's default branch unless one is named.
-            let default = match Repo::remote(&store)?.store.get_opt(pail::rev::STORE_HEAD_KEY).await? {
+            let default = match Repo::remote(&store)?
+                .store
+                .get_opt(pail::rev::STORE_HEAD_KEY)
+                .await?
+            {
                 Some((d, _)) => serde_json::from_slice::<pail::rev::StoreHead>(&d)?.branch,
                 None => Config::load(None).default_branch(),
             };
             let branch = branch.unwrap_or_else(|| default.clone());
-            let name = store.trim_end_matches('/').rsplit('/').next().unwrap_or("repo").to_string();
+            let name = store
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("repo")
+                .to_string();
             if bare {
                 let dir = dir.unwrap_or_else(|| PathBuf::from(format!("{name}.pail")));
                 if dir.exists() && std::fs::read_dir(&dir)?.next().is_some() {
@@ -935,7 +1065,8 @@ async fn run(cli: Cli) -> Result<()> {
                 println!(
                     "bare repository {} for {store}{}",
                     local.dir.display(),
-                    tip.map(|(h, _)| format!(" ({branch} @ {})", h.short())).unwrap_or_default()
+                    tip.map(|(h, _)| format!(" ({branch} @ {})", h.short()))
+                        .unwrap_or_default()
                 );
                 return Ok(());
             }
@@ -943,7 +1074,12 @@ async fn run(cli: Cli) -> Result<()> {
             let t = std::time::Instant::now();
             let mut co = Checkout::default();
             let at = match at {
-                Some(rev) => Some(Ctx::open(Some(store.clone()), None, ids).await?.resolve(&rev).await?),
+                Some(rev) => Some(
+                    Ctx::open(Some(store.clone()), None, ids)
+                        .await?
+                        .resolve(&rev)
+                        .await?,
+                ),
                 None => None,
             };
             let wt = Worktree::clone(&store, None, &dir, &branch, at, &mut co).await?;
@@ -960,7 +1096,11 @@ async fn run(cli: Cli) -> Result<()> {
                 fmt_bytes(down),
                 checkout_summary(&co)
             );
-            wt.hooks().notify("post-checkout", &[&pail::hooks::id(None), &wt.head.base.unwrap().hex(), "1"], None);
+            wt.hooks().notify(
+                "post-checkout",
+                &[&pail::hooks::id(None), &wt.head.base.unwrap().hex(), "1"],
+                None,
+            );
         }
         Cmd::Status => {
             let wt = Worktree::open(&cwd()?)?;
@@ -968,7 +1108,10 @@ async fn run(cli: Cli) -> Result<()> {
             println!(
                 "on {} @ {}",
                 wt.head.branch,
-                wt.head.base.map(|h| h.short()).unwrap_or_else(|| "(empty)".into())
+                wt.head
+                    .base
+                    .map(|h| h.short())
+                    .unwrap_or_else(|| "(empty)".into())
             );
             if st.is_clean() && st.untracked.is_empty() {
                 println!("nothing to commit, working copy clean");
@@ -988,7 +1131,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Add { paths, all } => {
             let mut wt = Worktree::open(&cwd()?)?;
-            let spec = if all || paths.is_empty() { vec![String::new()] } else { wt.resolve(&cwd()?, &paths)? };
+            let spec = if all || paths.is_empty() {
+                vec![String::new()]
+            } else {
+                wt.resolve(&cwd()?, &paths)?
+            };
             if !all && paths.is_empty() {
                 bail!("nothing specified (use `pail add <path>` or `pail add -A`)");
             }
@@ -997,7 +1144,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Unstage { paths } => {
             let mut wt = Worktree::open(&cwd()?)?;
-            let spec = if paths.is_empty() { vec![String::new()] } else { wt.resolve(&cwd()?, &paths)? };
+            let spec = if paths.is_empty() {
+                vec![String::new()]
+            } else {
+                wt.resolve(&cwd()?, &paths)?
+            };
             println!("unstaged {} path(s)", wt.unstage(&spec)?);
         }
         Cmd::Restore { paths } => {
@@ -1008,21 +1159,42 @@ async fn run(cli: Cli) -> Result<()> {
             let spec = wt.resolve(&cwd()?, &paths)?;
             println!("restored {} path(s)", wt.restore(&spec).await?);
         }
-        Cmd::Commit { message, all, no_verify } => {
+        Cmd::Commit {
+            message,
+            all,
+            no_verify,
+        } => {
             let mut wt = Worktree::open(&cwd()?)?;
             if all {
                 wt.add(&[String::new()], true).await?;
             }
             let (out, message) = wt.commit(&message, no_verify).await?;
-            let retried = if out.attempts > 1 { format!(", landed after {} attempts", out.attempts) } else { String::new() };
-            println!("[{} {}] {}{retried}", wt.head.branch, out.commit.short(), message.lines().next().unwrap_or(""));
+            let retried = if out.attempts > 1 {
+                format!(", landed after {} attempts", out.attempts)
+            } else {
+                String::new()
+            };
+            println!(
+                "[{} {}] {}{retried}",
+                wt.head.branch,
+                out.commit.short(),
+                message.lines().next().unwrap_or("")
+            );
         }
         Cmd::Sync => {
             let mut wt = Worktree::open(&cwd()?)?;
             let n = wt.sync().await?;
-            println!("{} @ {} ({n} path(s) updated)", wt.head.branch, wt.head.base.unwrap().short());
+            println!(
+                "{} @ {} ({n} path(s) updated)",
+                wt.head.branch,
+                wt.head.base.unwrap().short()
+            );
         }
-        Cmd::Branch { name, delete: _, default: true } => {
+        Cmd::Branch {
+            name,
+            delete: _,
+            default: true,
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             match name {
                 Some(n) => {
@@ -1032,7 +1204,11 @@ async fn run(cli: Cli) -> Result<()> {
                 None => println!("{}", ctx.default_branch().await?),
             }
         }
-        Cmd::Branch { name, delete, default: false } => {
+        Cmd::Branch {
+            name,
+            delete,
+            default: false,
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             match name {
                 Some(n) if delete => {
@@ -1056,8 +1232,21 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Config { global, local, list, get, unset, show_scope, key, value } => {
-            let start = match cli.repo.clone().or_else(|| std::env::var_os("PAIL_DIR").map(PathBuf::from)) {
+        Cmd::Config {
+            global,
+            local,
+            list,
+            get,
+            unset,
+            show_scope,
+            key,
+            value,
+        } => {
+            let start = match cli
+                .repo
+                .clone()
+                .or_else(|| std::env::var_os("PAIL_DIR").map(PathBuf::from))
+            {
                 Some(d) => std::fs::canonicalize(d)?,
                 None => cwd()?,
             };
@@ -1065,7 +1254,13 @@ async fn run(cli: Cli) -> Result<()> {
                 pail::local::Found::Worktree(_, r) | pail::local::Found::Bare(r) => r.dir,
             });
             let mut cfg = Config::load(repo_dir.as_deref());
-            let scope_name = |s: Scope| if s == Scope::Global { "global" } else { "local" };
+            let scope_name = |s: Scope| {
+                if s == Scope::Global {
+                    "global"
+                } else {
+                    "local"
+                }
+            };
             if list {
                 for (sc, k, v) in cfg.list() {
                     if (global && sc != Scope::Global) || (local && sc != Scope::Local) {
@@ -1097,9 +1292,17 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 _ => {
                     let v = if global {
-                        Config { global: cfg.global.clone(), local: None }.get(&key)
+                        Config {
+                            global: cfg.global.clone(),
+                            local: None,
+                        }
+                        .get(&key)
                     } else if local {
-                        Config { global: Default::default(), local: cfg.local.clone() }.get(&key)
+                        Config {
+                            global: Default::default(),
+                            local: cfg.local.clone(),
+                        }
+                        .get(&key)
                     } else {
                         cfg.get(&key)
                     };
@@ -1117,9 +1320,18 @@ async fn run(cli: Cli) -> Result<()> {
                 wt.repo.create_branch(&branch, base).await?;
             }
             let n = wt.switch(&branch).await?;
-            println!("switched to {branch} @ {} ({n} path(s) changed)", wt.head.base.unwrap().short());
+            println!(
+                "switched to {branch} @ {} ({n} path(s) changed)",
+                wt.head.base.unwrap().short()
+            );
         }
-        Cmd::Land { branch, onto, stack: true, no_verify, .. } => {
+        Cmd::Land {
+            branch,
+            onto,
+            stack: true,
+            no_verify,
+            ..
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let onto = match onto {
                 Some(o) => o,
@@ -1128,8 +1340,21 @@ async fn run(cli: Cli) -> Result<()> {
             let hooks = ctx_hooks(&ctx).with_env("BRANCH", onto.clone());
             let pre_publish = publish_hook(&hooks, "land");
             let check: Option<pail::repo::PublishCheck> =
-                if !no_verify && hooks.find("pre-publish").is_some() { Some(&pre_publish) } else { None };
-            let out = ctx.repo.land_stack_with(&branch, &onto, &ctx.config.identity("committer")?, &now_date(), check).await?;
+                if !no_verify && hooks.find("pre-publish").is_some() {
+                    Some(&pre_publish)
+                } else {
+                    None
+                };
+            let out = ctx
+                .repo
+                .land_stack_with(
+                    &branch,
+                    &onto,
+                    &ctx.config.identity("committer")?,
+                    &now_date(),
+                    check,
+                )
+                .await?;
             if out.landed.is_empty() {
                 println!("{branch} has nothing to land");
                 return Ok(());
@@ -1148,25 +1373,53 @@ async fn run(cli: Cli) -> Result<()> {
                 "landed {} commit(s) from {branch} onto {onto} @ {} ({})",
                 out.landed.len(),
                 out.tip.short(),
-                if out.fast_forward { "fast-forward" } else { "replayed on the new head" }
+                if out.fast_forward {
+                    "fast-forward"
+                } else {
+                    "replayed on the new head"
+                }
             );
             for h in &out.landed {
-                println!("  {} {}", h.short(), ctx.repo.commit_meta(h).await?.subject());
+                println!(
+                    "  {} {}",
+                    h.short(),
+                    ctx.repo.commit_meta(h).await?.subject()
+                );
             }
         }
-        Cmd::Land { branch, onto, message, stack: false, no_verify } => {
+        Cmd::Land {
+            branch,
+            onto,
+            message,
+            stack: false,
+            no_verify,
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let onto = match onto {
                 Some(o) => o,
                 None => ctx.default_branch().await?.to_string(),
             };
             let repo = &ctx.repo;
-            let (src, _) = repo.read_ref(&branch).await?.with_context(|| format!("no branch {branch}"))?;
-            let (dst, _) = repo.read_ref(&onto).await?.with_context(|| format!("no branch {onto}"))?;
-            let anc = repo.merge_base(src, dst).await?.context("branches share no history")?;
+            let (src, _) = repo
+                .read_ref(&branch)
+                .await?
+                .with_context(|| format!("no branch {branch}"))?;
+            let (dst, _) = repo
+                .read_ref(&onto)
+                .await?
+                .with_context(|| format!("no branch {onto}"))?;
+            let anc = repo
+                .merge_base(src, dst)
+                .await?
+                .context("branches share no history")?;
             let from = repo.root_of(Some(anc)).await?;
             let to = repo.root_of(Some(src)).await?;
-            let delta: Delta = repo.diff(from, to).await?.into_iter().map(|c| (c.path, c.new)).collect();
+            let delta: Delta = repo
+                .diff(from, to)
+                .await?
+                .into_iter()
+                .map(|c| (c.path, c.new))
+                .collect();
             if delta.is_empty() {
                 println!("{branch} has nothing to land");
                 return Ok(());
@@ -1181,30 +1434,45 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 v
             };
-            let msg = message.unwrap_or_else(|| format!("Land {branch}\n\n{}", subjects.join("\n")));
+            let msg =
+                message.unwrap_or_else(|| format!("Land {branch}\n\n{}", subjects.join("\n")));
             let who = ctx.config.identity("author")?;
             let committer = ctx.config.identity("committer")?;
             let date = now_date();
             let hooks = ctx_hooks(&ctx).with_env("BRANCH", onto.clone());
             let pre_publish = publish_hook(&hooks, "land");
             let check: Option<pail::repo::PublishCheck> =
-                if !no_verify && hooks.find("pre-publish").is_some() { Some(&pre_publish) } else { None };
+                if !no_verify && hooks.find("pre-publish").is_some() {
+                    Some(&pre_publish)
+                } else {
+                    None
+                };
             let out = repo
-                .commit_with(CommitRequest {
-                    branch: onto.clone(),
-                    base: Some(anc),
-                    delta,
-                    author: who.clone(),
-                    author_date: date.clone(),
-                    committer,
-                    committer_date: date,
-                    message: msg,
-                    meta: BTreeMap::from([("landed.from".into(), branch.clone())]),
-                }, check)
+                .commit_with(
+                    CommitRequest {
+                        branch: onto.clone(),
+                        base: Some(anc),
+                        delta,
+                        author: who.clone(),
+                        author_date: date.clone(),
+                        committer,
+                        committer_date: date,
+                        message: msg,
+                        meta: BTreeMap::from([("landed.from".into(), branch.clone())]),
+                    },
+                    check,
+                )
                 .await?;
             println!("landed {branch} onto {onto} @ {}", out.commit.short());
         }
-        Cmd::Diff { from, to, staged, name_only, nul, diff_filter } => {
+        Cmd::Diff {
+            from,
+            to,
+            staged,
+            name_only,
+            nul,
+            diff_filter,
+        } => {
             let wt = Worktree::open(&cwd()?)?;
             // Git's rules: upper-case letters select, lower-case letters exclude.
             let keep = |c: char| match &diff_filter {
@@ -1247,7 +1515,10 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let changes = match b {
                 Some(b) => {
-                    let (ra, rb) = (wt.repo.root_of(Some(a)).await?, wt.repo.root_of(Some(b)).await?);
+                    let (ra, rb) = (
+                        wt.repo.root_of(Some(a)).await?,
+                        wt.repo.root_of(Some(b)).await?,
+                    );
                     wt.repo.diff(ra, rb).await?
                 }
                 None => {
@@ -1265,15 +1536,28 @@ async fn run(cli: Cli) -> Result<()> {
                 emit(code, &c.path)?;
             }
         }
-        Cmd::Ls { target, recursive, long } => {
+        Cmd::Ls {
+            target,
+            recursive,
+            long,
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let (rev, dir) = match target.as_deref() {
-                Some(t) if t.contains(':') => t.split_once(':').map(|(r, d)| (r.to_string(), d.to_string())).unwrap(),
-                Some(t) if ctx.try_resolve(t).await.unwrap_or(None).is_some() => (t.to_string(), String::new()),
+                Some(t) if t.contains(':') => t
+                    .split_once(':')
+                    .map(|(r, d)| (r.to_string(), d.to_string()))
+                    .unwrap(),
+                Some(t) if ctx.try_resolve(t).await.unwrap_or(None).is_some() => {
+                    (t.to_string(), String::new())
+                }
                 Some(t) => ("HEAD".into(), t.to_string()),
                 None => ("HEAD".into(), String::new()),
             };
-            let h = if rev.is_empty() { ctx.head_commit().await? } else { ctx.resolve(&rev).await? };
+            let h = if rev.is_empty() {
+                ctx.head_commit().await?
+            } else {
+                ctx.resolve(&rev).await?
+            };
             let snap = pail::snapshot::Snapshot::open(&ctx.repo, h).await?;
             let dir = dir.trim_matches('/');
             let mut out = Output::open(cli.no_pager);
@@ -1288,16 +1572,32 @@ async fn run(cli: Cli) -> Result<()> {
                 if recursive {
                     for e in snap.walk(dir).await? {
                         if long {
-                            writeln!(out.w, "{:4} {:>12}  {}", kind(&e.kind.into()), e.size, e.path)?;
+                            writeln!(
+                                out.w,
+                                "{:4} {:>12}  {}",
+                                kind(&e.kind.into()),
+                                e.size,
+                                e.path
+                            )?;
                         } else {
                             writeln!(out.w, "{}", e.path)?;
                         }
                     }
                 } else {
                     for n in snap.list_dir(dir).await? {
-                        let slash = if n.kind == pail::snapshot::NodeKind::Dir { "/" } else { "" };
+                        let slash = if n.kind == pail::snapshot::NodeKind::Dir {
+                            "/"
+                        } else {
+                            ""
+                        };
                         if long {
-                            writeln!(out.w, "{:4} {:>12}  {}{slash}", kind(&n.kind), n.size, n.name())?;
+                            writeln!(
+                                out.w,
+                                "{:4} {:>12}  {}{slash}",
+                                kind(&n.kind),
+                                n.size,
+                                n.name()
+                            )?;
                         } else {
                             writeln!(out.w, "{}{slash}", n.name())?;
                         }
@@ -1310,7 +1610,11 @@ async fn run(cli: Cli) -> Result<()> {
             r?;
             f?;
         }
-        Cmd::Gc { store, grace_hours, dry_run } => {
+        Cmd::Gc {
+            store,
+            grace_hours,
+            dry_run,
+        } => {
             let repo = match store {
                 Some(s) => Repo::remote(&pail::rev::store_url(&s)?)?,
                 None => Ctx::open(None, cli.repo, ids).await?.repo,
@@ -1328,9 +1632,16 @@ async fn run(cli: Cli) -> Result<()> {
                 r.kept_young
             );
         }
-        Cmd::Fetch { revs, history, max_count, all } => {
+        Cmd::Fetch {
+            revs,
+            history,
+            max_count,
+            all,
+        } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
-            let blobs = ctx.repo.blobs.as_ref().context("fetch fills a local repository; make one with `pail clone --bare <store>`")?;
+            let blobs = ctx.repo.blobs.as_ref().context(
+                "fetch fills a local repository; make one with `pail clone --bare <store>`",
+            )?;
             let t = std::time::Instant::now();
             let mut tips = vec![];
             for r in &revs {
@@ -1343,7 +1654,8 @@ async fn run(cli: Cli) -> Result<()> {
                 tips.push(ctx.head_commit().await?);
             }
             // Snapshots of the tips, plus every version introduced along their history.
-            let mut want: std::collections::HashMap<Hash, pail::manifest::Entry> = Default::default();
+            let mut want: std::collections::HashMap<Hash, pail::manifest::Entry> =
+                Default::default();
             let mut commits = 0;
             let mut seen = std::collections::HashSet::new();
             for tip in &tips {
@@ -1398,22 +1710,43 @@ async fn run(cli: Cli) -> Result<()> {
                 fmt_bytes(total),
                 fmt_bytes(down),
                 t.elapsed().as_secs_f64(),
-                if history { format!(" across {commits} commit(s)") } else { String::new() }
+                if history {
+                    format!(" across {commits} commit(s)")
+                } else {
+                    String::new()
+                }
             );
         }
         Cmd::Cache(CacheCmd::Stats) => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let local = ctx.local.as_ref().context("not in a local repository")?;
-            println!("repository {} ({})", local.dir.display(), local.config.store);
-            for (name, what) in [("blobs", "file contents"), ("objects", "commits, pages"), ("graph", "commit graph"), ("index", "Git ids")] {
+            println!(
+                "repository {} ({})",
+                local.dir.display(),
+                local.config.store
+            );
+            for (name, what) in [
+                ("blobs", "file contents"),
+                ("objects", "commits, pages"),
+                ("graph", "commit graph"),
+                ("index", "Git ids"),
+            ] {
                 let (n, bytes) = dir_size(&local.dir.join(name));
-                println!("  {name:8} {:>9} files  {:>10}  {what}", n, fmt_bytes(bytes));
+                println!(
+                    "  {name:8} {:>9} files  {:>10}  {what}",
+                    n,
+                    fmt_bytes(bytes)
+                );
             }
         }
         Cmd::Cache(CacheCmd::Prune { max_size }) => {
             let max = parse_size(&max_size)?;
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
-            let b = ctx.repo.blobs.as_ref().context("not in a local repository")?;
+            let b = ctx
+                .repo
+                .blobs
+                .as_ref()
+                .context("not in a local repository")?;
             let all = b.list();
             let mut total: u64 = all.iter().map(|x| x.1).sum();
             let before = total;
@@ -1428,9 +1761,19 @@ async fn run(cli: Cli) -> Result<()> {
                     removed += 1;
                 }
             }
-            println!("removed {removed} file(s), {} → {}", fmt_bytes(before), fmt_bytes(total));
+            println!(
+                "removed {removed} file(s), {} → {}",
+                fmt_bytes(before),
+                fmt_bytes(total)
+            );
         }
-        Cmd::Worktree(WtCmd::Add { path, create, branch, seed_from, no_seed }) => {
+        Cmd::Worktree(WtCmd::Add {
+            path,
+            create,
+            branch,
+            seed_from,
+            no_seed,
+        }) => {
             // From a working copy or a bare repository: the new one links to the same repository.
             let ctx = Ctx::open(None, cli.repo, ids).await?;
             let local = ctx.local.clone().context("not in a local repository")?;
@@ -1451,8 +1794,12 @@ async fn run(cli: Cli) -> Result<()> {
                 (false, None, here) => here.clone(),
             };
             let t = std::time::Instant::now();
-            let mut co = Checkout { donor: donor.clone(), ..Default::default() };
-            let wt = Worktree::clone(&local.config.store, Some(&local), &path, &br, at, &mut co).await?;
+            let mut co = Checkout {
+                donor: donor.clone(),
+                ..Default::default()
+            };
+            let wt =
+                Worktree::clone(&local.config.store, Some(&local), &path, &br, at, &mut co).await?;
             let files_s = t.elapsed().as_secs_f64();
             println!(
                 "added {} on {br} @ {}: files in {files_s:.1}s ({})",
@@ -1478,7 +1825,11 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("  … and {} more", s.paths.len() - 12);
                 }
             }
-            wt.hooks().notify("post-checkout", &[&pail::hooks::id(None), &wt.head.base.unwrap().hex(), "1"], None);
+            wt.hooks().notify(
+                "post-checkout",
+                &[&pail::hooks::id(None), &wt.head.base.unwrap().hex(), "1"],
+                None,
+            );
         }
         Cmd::Worktree(WtCmd::List) => {
             let ctx = Ctx::open(None, cli.repo, ids).await?;
@@ -1487,7 +1838,11 @@ async fn run(cli: Cli) -> Result<()> {
                 println!("  {:50} (bare)", local.dir.display());
             }
             for p in local.worktrees().into_keys() {
-                let mark = if ctx.worktree.as_ref() == Some(&p) { "*" } else { " " };
+                let mark = if ctx.worktree.as_ref() == Some(&p) {
+                    "*"
+                } else {
+                    " "
+                };
                 match Worktree::open(&p) {
                     Ok(w) if w.root == p => println!(
                         "{mark} {:50} {} @ {}",
@@ -1506,7 +1861,10 @@ async fn run(cli: Cli) -> Result<()> {
                 bail!("{} is not the root of a working copy", path.display());
             }
             if !force && !wt.status().await?.is_clean() {
-                bail!("{} has uncommitted changes (use --force to delete anyway)", root.display());
+                bail!(
+                    "{} has uncommitted changes (use --force to delete anyway)",
+                    root.display()
+                );
             }
             if cwd()?.starts_with(&root) {
                 bail!("can't remove the working copy you are in");
@@ -1514,7 +1872,10 @@ async fn run(cli: Cli) -> Result<()> {
             // The first working copy's .pail/ is the repository others link to.
             let holds_repo = wt.local.dir == root.join(".pail");
             if holds_repo && wt.local.worktrees().keys().any(|p| *p != root) {
-                bail!("{} holds the repository other working copies use; remove those first", root.display());
+                bail!(
+                    "{} holds the repository other working copies use; remove those first",
+                    root.display()
+                );
             }
             std::fs::remove_dir_all(&root)?;
             if !holds_repo {
@@ -1529,8 +1890,15 @@ async fn run(cli: Cli) -> Result<()> {
                 (None, Some((r, p))) => (r.to_string(), p.to_string()),
                 (None, None) => ("HEAD".into(), path),
             };
-            let h = if rev.is_empty() { ctx.head_commit().await? } else { ctx.resolve(&rev).await? };
-            let data = pail::snapshot::Snapshot::open(&ctx.repo, h).await?.read(&path).await?;
+            let h = if rev.is_empty() {
+                ctx.head_commit().await?
+            } else {
+                ctx.resolve(&rev).await?
+            };
+            let data = pail::snapshot::Snapshot::open(&ctx.repo, h)
+                .await?
+                .read(&path)
+                .await?;
             use std::io::Write;
             std::io::stdout().write_all(&data)?;
         }
@@ -1549,10 +1917,15 @@ fn ctx_hooks(ctx: &Ctx) -> pail::hooks::Hooks {
 }
 
 /// The pre-publish hook as a publish check: `<branch> <mode>`, stdin `<branch> <old> <new>`.
-fn publish_hook<'a>(hooks: &'a pail::hooks::Hooks, mode: &'a str) -> impl Fn(&pail::repo::Publish) -> Result<()> + Sync + 'a {
+fn publish_hook<'a>(
+    hooks: &'a pail::hooks::Hooks,
+    mode: &'a str,
+) -> impl Fn(&pail::repo::Publish) -> Result<()> + Sync + 'a {
     move |p| {
         let line = format!("{} {} {}\n", p.branch, pail::hooks::id(p.old), p.new.hex());
-        hooks.run("pre-publish", &[&p.branch, mode], Some(line.as_bytes())).map(|_| ())
+        hooks
+            .run("pre-publish", &[&p.branch, mode], Some(line.as_bytes()))
+            .map(|_| ())
     }
 }
 
@@ -1562,38 +1935,57 @@ fn print_help(command: &[String]) -> Result<()> {
     c.build(); // full names in usage lines ("pail worktree add")
     let mut cur = &mut c;
     for name in command {
-        cur = cur.find_subcommand_mut(name).with_context(|| format!("no command `{}`", command.join(" ")))?;
+        cur = cur
+            .find_subcommand_mut(name)
+            .with_context(|| format!("no command `{}`", command.join(" ")))?;
     }
     cur.print_long_help()?;
     Ok(())
 }
 
-
 async fn auth_status(store: Option<String>) -> Result<()> {
     let (url, dir) = match store {
         Some(s) => (pail::rev::store_url(&s)?, None),
         None => match pail::local::discover(&cwd()?)? {
-            pail::local::Found::Worktree(_, l) | pail::local::Found::Bare(l) => (l.config.store.clone(), Some(l.dir)),
+            pail::local::Found::Worktree(_, l) | pail::local::Found::Bare(l) => {
+                (l.config.store.clone(), Some(l.dir))
+            }
         },
     };
     let cfg = Config::load(dir.as_deref());
     let choice = pail::creds::choose(&url, &cfg)?;
     println!("store     {url}");
     match &choice.provider {
-        pail::creds::Provider::Ambient => println!("provider  {}   [{}]", choice.provider.describe(), choice.source),
+        pail::creds::Provider::Ambient => println!(
+            "provider  {}   [{}]",
+            choice.provider.describe(),
+            choice.source
+        ),
         p => {
             println!("provider  {}   [{}]", p.describe(), choice.source);
             let src = pail::creds::Source::new(p, &url).expect("not ambient");
             let c = tokio::task::spawn_blocking(move || src.get()).await??;
-            let kind = if c.aws.is_some() { "aws keys" } else { "bearer token" };
-            let left = c.expires_at.saturating_sub(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs());
+            let kind = if c.aws.is_some() {
+                "aws keys"
+            } else {
+                "bearer token"
+            };
+            let left = c.expires_at.saturating_sub(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            );
             println!("credential {kind}, expires in {}m", left / 60);
         }
     }
     let s = pail::store::Store::open_in(&url, dir.as_deref())?;
     let t = std::time::Instant::now();
     match s.list("refs/").await {
-        Ok(refs) => println!("access    ok: read {} branch(es) in {} ms", refs.len(), t.elapsed().as_millis()),
+        Ok(refs) => println!(
+            "access    ok: read {} branch(es) in {} ms",
+            refs.len(),
+            t.elapsed().as_millis()
+        ),
         Err(e) => {
             println!("access    failed: {e:#}");
             std::process::exit(1);
@@ -1602,30 +1994,50 @@ async fn auth_status(store: Option<String>) -> Result<()> {
     Ok(())
 }
 
-
 fn auth_install(source: &str, name: Option<String>, force: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let dir = pail::creds::extensions_dir().context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
+    let dir = pail::creds::extensions_dir()
+        .context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
     let (name, body) = match pail::creds::BUNDLED.iter().find(|(n, _)| *n == source) {
-        Some((n, body)) => (name.unwrap_or_else(|| n.to_string()), body.as_bytes().to_vec()),
+        Some((n, body)) => (
+            name.unwrap_or_else(|| n.to_string()),
+            body.as_bytes().to_vec(),
+        ),
         None => {
             let p = std::path::Path::new(source);
             let body = std::fs::read(p).with_context(|| {
                 let bundled: Vec<&str> = pail::creds::BUNDLED.iter().map(|(n, _)| *n).collect();
-                format!("`{source}` is neither a file nor a bundled provider ({})", bundled.join(", "))
+                format!(
+                    "`{source}` is neither a file nor a bundled provider ({})",
+                    bundled.join(", ")
+                )
             })?;
-            let file = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            let n = name.unwrap_or_else(|| file.strip_prefix(pail::creds::PREFIX).unwrap_or(&file).to_string());
+            let file = p
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let n = name.unwrap_or_else(|| {
+                file.strip_prefix(pail::creds::PREFIX)
+                    .unwrap_or(&file)
+                    .to_string()
+            });
             (n, body)
         }
     };
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         bail!("provider names are letters, digits, - and _ (got {name:?}); pass --name");
     }
     std::fs::create_dir_all(&dir)?;
     let dest = dir.join(format!("{}{name}", pail::creds::PREFIX));
     if dest.exists() && !force {
-        bail!("{name} is already installed at {} (--force replaces it)", dest.display());
+        bail!(
+            "{name} is already installed at {} (--force replaces it)",
+            dest.display()
+        );
     }
     std::fs::write(&dest, body)?;
     std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
@@ -1639,7 +2051,9 @@ fn auth_install(source: &str, name: Option<String>, force: bool) -> Result<()> {
 
 fn auth_use(provider: &str, url: Option<String>, global: bool) -> Result<()> {
     if provider != "ambient" && pail::creds::find_extension(provider).is_none() {
-        bail!("credential provider `{provider}` is not installed (pail auth list; pail auth install {provider})");
+        bail!(
+            "credential provider `{provider}` is not installed (pail auth list; pail auth install {provider})"
+        );
     }
     let local = pail::local::discover(&cwd()?).ok().map(|f| match f {
         pail::local::Found::Worktree(_, l) | pail::local::Found::Bare(l) => l,
@@ -1656,27 +2070,61 @@ fn auth_use(provider: &str, url: Option<String>, global: bool) -> Result<()> {
         None => "credential.provider".to_string(),
     };
     let mut cfg = Config::load(local.as_ref().map(|l| l.dir.as_path()));
-    let scope = if global || local.is_none() { Scope::Global } else { Scope::Local };
+    let scope = if global || local.is_none() {
+        Scope::Global
+    } else {
+        Scope::Local
+    };
     let f = cfg.file_mut(scope)?;
     f.set(&key, provider)?;
     f.save()?;
-    println!("{key} = {provider}   ({})", if matches!(scope, Scope::Global) { "user config" } else { "repository config" });
+    println!(
+        "{key} = {provider}   ({})",
+        if matches!(scope, Scope::Global) {
+            "user config"
+        } else {
+            "repository config"
+        }
+    );
     Ok(())
 }
 
-
-async fn policy_cmd(cmd: PolicyCmd, store: Option<String>, repo: Option<PathBuf>, ids: Ids) -> Result<()> {
+async fn policy_cmd(
+    cmd: PolicyCmd,
+    store: Option<String>,
+    repo: Option<PathBuf>,
+    ids: Ids,
+) -> Result<()> {
     use pail::policy::{Identity, Op, Policy};
     let ctx = Ctx::open(store, repo, ids).await?;
-    let load = || async { Policy::load(&ctx.repo).await?.context("this repository has no policy (`pail policy set <file>`)") };
+    let load = || async {
+        Policy::load(&ctx.repo)
+            .await?
+            .context("this repository has no policy (`pail policy set <file>`)")
+    };
     let id = |w: &AsIdentity| Identity::new(&w.principal, &w.groups);
     match cmd {
         PolicyCmd::Show => println!("{}", serde_json::to_string_pretty(&load().await?)?),
         PolicyCmd::Set { file, message } => {
-            let data = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let data =
+                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
             Policy::parse(&data)?;
-            let es = ctx.repo.write_files(&[pail::repo::FileInput { path: pail::policy::FILE.into(), kind: pail::manifest::Kind::File, data: data.into() }], &Default::default()).await?;
-            let base = ctx.repo.read_ref(pail::policy::BRANCH).await?.map(|(h, _)| h);
+            let es = ctx
+                .repo
+                .write_files(
+                    &[pail::repo::FileInput {
+                        path: pail::policy::FILE.into(),
+                        kind: pail::manifest::Kind::File,
+                        data: data.into(),
+                    }],
+                    &Default::default(),
+                )
+                .await?;
+            let base = ctx
+                .repo
+                .read_ref(pail::policy::BRANCH)
+                .await?
+                .map(|(h, _)| h);
             let date = now_date();
             let out = ctx
                 .repo
@@ -1692,7 +2140,11 @@ async fn policy_cmd(cmd: PolicyCmd, store: Option<String>, repo: Option<PathBuf>
                     meta: BTreeMap::new(),
                 })
                 .await?;
-            println!("[{} {}] policy updated", pail::policy::BRANCH, out.commit.short());
+            println!(
+                "[{} {}] policy updated",
+                pail::policy::BRANCH,
+                out.commit.short()
+            );
         }
         PolicyCmd::Check { who, op, key } => {
             let p = load().await?;
@@ -1701,9 +2153,25 @@ async fn policy_cmd(cmd: PolicyCmd, store: Option<String>, repo: Option<PathBuf>
                 "write" => Op::Write,
                 _ => Op::Delete,
             };
-            let key = if key.contains('/') && ["refs/", "intents/", "reflog/", "commits/", "pages/", "packs/", "chunks/"].iter().any(|p| key.starts_with(p)) || key == "HEAD" { key } else { format!("refs/{key}") };
+            let key = if key.contains('/')
+                && [
+                    "refs/", "intents/", "reflog/", "commits/", "pages/", "packs/", "chunks/",
+                ]
+                .iter()
+                .any(|p| key.starts_with(p))
+                || key == "HEAD"
+            {
+                key
+            } else {
+                format!("refs/{key}")
+            };
             let d = p.decide(&id(&who), op, &key);
-            println!("{} {} {key}: {}", if d.allow { "allow" } else { "deny" }, who.principal, d.reason);
+            println!(
+                "{} {} {key}: {}",
+                if d.allow { "allow" } else { "deny" },
+                who.principal,
+                d.reason
+            );
             if !d.allow {
                 std::process::exit(1);
             }
@@ -1711,28 +2179,46 @@ async fn policy_cmd(cmd: PolicyCmd, store: Option<String>, repo: Option<PathBuf>
         PolicyCmd::Requirements { branch } => {
             let p = load().await?;
             let out = match p.rule_for(&branch) {
-                Some((glob, r)) => serde_json::json!({"branch": branch, "rule": glob, "protected": p.is_protected(&branch),
-                    "writers": r.writers, "approvals": r.approvals.unwrap_or(0), "required_checks": r.required_checks}),
-                None => serde_json::json!({"branch": branch, "rule": null, "protected": true, "writers": [], "approvals": 0, "required_checks": []}),
+                Some((glob, r)) => {
+                    serde_json::json!({"branch": branch, "rule": glob, "protected": p.is_protected(&branch),
+                    "writers": r.writers, "approvals": r.approvals.unwrap_or(0), "required_checks": r.required_checks})
+                }
+                None => {
+                    serde_json::json!({"branch": branch, "rule": null, "protected": true, "writers": [], "approvals": 0, "required_checks": []})
+                }
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
         PolicyCmd::Boundary { who } => {
             let p = load().await?;
             let (bucket, prefix) = gcs_location(&ctx.repo.store.url)?;
-            println!("{}", serde_json::to_string_pretty(&p.gcs_boundary(&id(&who), &bucket, &prefix)?)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&p.gcs_boundary(&id(&who), &bucket, &prefix)?)?
+            );
         }
-        PolicyCmd::Token { who, source_token_cmd } => {
+        PolicyCmd::Token {
+            who,
+            source_token_cmd,
+        } => {
             let p = load().await?;
             let (bucket, prefix) = gcs_location(&ctx.repo.store.url)?;
             let boundary = p.gcs_boundary(&id(&who), &bucket, &prefix)?;
-            let source = std::process::Command::new("sh").args(["-c", &source_token_cmd]).output()?;
+            let source = std::process::Command::new("sh")
+                .args(["-c", &source_token_cmd])
+                .output()?;
             if !source.status.success() {
-                bail!("source token command failed: {}", String::from_utf8_lossy(&source.stderr).trim());
+                bail!(
+                    "source token command failed: {}",
+                    String::from_utf8_lossy(&source.stderr).trim()
+                );
             }
             let source = String::from_utf8(source.stdout)?.trim().to_string();
             let (token, expires_at) = pail::policy::gcs_downscope(&source, &boundary).await?;
-            println!("{}", serde_json::json!({"token": token, "expires_at": expires_at}));
+            println!(
+                "{}",
+                serde_json::json!({"token": token, "expires_at": expires_at})
+            );
         }
     }
     Ok(())
@@ -1740,7 +2226,9 @@ async fn policy_cmd(cmd: PolicyCmd, store: Option<String>, repo: Option<PathBuf>
 
 /// (bucket, prefix) of a gs:// store.
 fn gcs_location(url: &str) -> Result<(String, String)> {
-    let rest = url.strip_prefix("gs://").context("token boundaries are for gs:// stores")?;
+    let rest = url
+        .strip_prefix("gs://")
+        .context("token boundaries are for gs:// stores")?;
     let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
     Ok((bucket.to_string(), prefix.trim_matches('/').to_string()))
 }
@@ -1760,8 +2248,12 @@ mod tests {
         for sub in Cli::command().get_subcommands() {
             let name = sub.get_name();
             let listed = cli_help::TOP.lines().any(|l| {
-                l.starts_with("  ") && l.split_whitespace().next().is_some_and(|w| w.trim_end_matches(',') == name)
-                    || l.trim_start().starts_with(&format!("{name},")) || l.contains(&format!(", {name} "))
+                l.starts_with("  ")
+                    && l.split_whitespace()
+                        .next()
+                        .is_some_and(|w| w.trim_end_matches(',') == name)
+                    || l.trim_start().starts_with(&format!("{name},"))
+                    || l.contains(&format!(", {name} "))
             });
             assert!(listed, "`{name}` is missing from the top-level help");
         }

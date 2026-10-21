@@ -29,7 +29,10 @@ pub enum Format {
     Reference,
     Raw,
     /// `format:` (separator semantics) or `tformat:` (terminator semantics).
-    User { fmt: String, terminator: bool },
+    User {
+        fmt: String,
+        terminator: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -138,11 +141,20 @@ fn parse_format(s: &str) -> Result<Format> {
         "raw" => Format::Raw,
         _ => {
             if let Some(f) = s.strip_prefix("format:") {
-                Format::User { fmt: f.to_string(), terminator: false }
+                Format::User {
+                    fmt: f.to_string(),
+                    terminator: false,
+                }
             } else if let Some(f) = s.strip_prefix("tformat:") {
-                Format::User { fmt: f.to_string(), terminator: true }
+                Format::User {
+                    fmt: f.to_string(),
+                    terminator: true,
+                }
             } else if s.contains('%') {
-                Format::User { fmt: s.to_string(), terminator: true }
+                Format::User {
+                    fmt: s.to_string(),
+                    terminator: true,
+                }
             } else {
                 return Err(fatal(format!("invalid --pretty format: {s}")));
             }
@@ -183,7 +195,11 @@ impl LogOpts {
             o.abbrev = match a.as_str() {
                 "auto" => None,
                 "no" => Some(40),
-                n => Some(n.parse::<usize>().map_err(|_| fatal(format!("bad core.abbrev {n}")))?.clamp(4, 64)),
+                n => Some(
+                    n.parse::<usize>()
+                        .map_err(|_| fatal(format!("bad core.abbrev {n}")))?
+                        .clamp(4, 64),
+                ),
             };
         }
         if let Some(r) = cfg.get_bool("diff.renames") {
@@ -197,11 +213,18 @@ impl LogOpts {
             }
             if a == name {
                 *i += 1;
-                return args.get(*i).cloned().map(Some).ok_or_else(|| fatal(format!("{name} requires a value")));
+                return args
+                    .get(*i)
+                    .cloned()
+                    .map(Some)
+                    .ok_or_else(|| fatal(format!("{name} requires a value")));
             }
             Ok(None)
         };
-        let num = |v: &str| -> Result<usize> { v.parse().map_err(|_| fatal(format!("'{v}': not an integer"))) };
+        let num = |v: &str| -> Result<usize> {
+            v.parse()
+                .map_err(|_| fatal(format!("'{v}': not an integer")))
+        };
         while i < args.len() {
             let a = args[i].as_str();
             if a == "--" {
@@ -213,7 +236,10 @@ impl LogOpts {
                 i += 1;
                 continue;
             }
-            if let Some(n) = a.strip_prefix('-').filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) {
+            if let Some(n) = a
+                .strip_prefix('-')
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            {
                 o.max_count = Some(num(n)?);
             } else if let Some(n) = a.strip_prefix("-n").filter(|n| !n.is_empty()) {
                 o.max_count = Some(num(n)?);
@@ -265,7 +291,9 @@ impl LogOpts {
                     "--all-match" => o.all_match = true,
                     "--invert-grep" => o.invert_grep = true,
                     "-i" | "--regexp-ignore-case" => o.ignore_case = true,
-                    "-E" | "--extended-regexp" | "-P" | "--perl-regexp" => o.pattern = Pattern::Extended,
+                    "-E" | "--extended-regexp" | "-P" | "--perl-regexp" => {
+                        o.pattern = Pattern::Extended
+                    }
                     "-F" | "--fixed-strings" => o.pattern = Pattern::Fixed,
                     "-G" | "--basic-regexp" => o.pattern = Pattern::Basic,
                     "--merges" => o.min_parents = 2,
@@ -356,7 +384,8 @@ impl Matchers {
         if !self.authors.is_empty() && !self.authors.iter().any(|r| r.is_match(&c.author)) {
             return false;
         }
-        if !self.committers.is_empty() && !self.committers.iter().any(|r| r.is_match(&c.committer)) {
+        if !self.committers.is_empty() && !self.committers.iter().any(|r| r.is_match(&c.committer))
+        {
             return false;
         }
         if self.greps.is_empty() {
@@ -383,7 +412,12 @@ impl Pathspec {
         for p in paths {
             let p = p.trim_start_matches("./").trim_end_matches('/').to_string();
             let glob = if p.contains(['*', '?', '[']) {
-                Some(globset::GlobBuilder::new(&p).literal_separator(false).build()?.compile_matcher())
+                Some(
+                    globset::GlobBuilder::new(&p)
+                        .literal_separator(false)
+                        .build()?
+                        .compile_matcher(),
+                )
             } else {
                 None
             };
@@ -418,15 +452,31 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
     let mut negatives = vec![];
     for r in &o.revs {
         if let Some((a, b)) = r.split_once("...") {
-            let a = if a.is_empty() { ctx.head_commit().await? } else { ctx.resolve(a).await? };
-            let b = if b.is_empty() { ctx.head_commit().await? } else { ctx.resolve(b).await? };
+            let a = if a.is_empty() {
+                ctx.head_commit().await?
+            } else {
+                ctx.resolve(a).await?
+            };
+            let b = if b.is_empty() {
+                ctx.head_commit().await?
+            } else {
+                ctx.resolve(b).await?
+            };
             positives.extend([a, b]);
             if let Some(m) = ctx.repo.merge_base(a, b).await? {
                 negatives.push(m);
             }
         } else if let Some((a, b)) = r.split_once("..") {
-            let a = if a.is_empty() { ctx.head_commit().await? } else { ctx.resolve(a).await? };
-            let b = if b.is_empty() { ctx.head_commit().await? } else { ctx.resolve(b).await? };
+            let a = if a.is_empty() {
+                ctx.head_commit().await?
+            } else {
+                ctx.resolve(a).await?
+            };
+            let b = if b.is_empty() {
+                ctx.head_commit().await?
+            } else {
+                ctx.resolve(b).await?
+            };
             negatives.push(a);
             positives.push(b);
         } else if let Some(n) = r.strip_prefix('^') {
@@ -441,7 +491,12 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
     if positives.is_empty() && o.revs.is_empty() && !o.all {
         match ctx.head().await? {
             Some(h) => positives.push(h),
-            None => return Err(fatal(format!("your current branch '{}' does not have any commits yet", ctx.branch().await?))),
+            None => {
+                return Err(fatal(format!(
+                    "your current branch '{}' does not have any commits yet",
+                    ctx.branch().await?
+                )));
+            }
         }
     }
     // Walks read commit metadata from the local commit graph; bring these tips into it.
@@ -470,7 +525,12 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
     for p in &positives {
         let c = ctx.commit(p).await?;
         if seen.insert(*p) {
-            heap.push((GitDate::parse(&c.committer_date)?.secs, std::cmp::Reverse(ctr), *p, stop.get(p).copied()));
+            heap.push((
+                GitDate::parse(&c.committer_date)?.secs,
+                std::cmp::Reverse(ctr),
+                *p,
+                stop.get(p).copied(),
+            ));
             ctr += 1;
         }
     }
@@ -499,14 +559,23 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
             if let Some(p) = c.parent {
                 if seen.insert(p) {
                     let pc = ctx.commit(&p).await?;
-                    heap.push((GitDate::parse(&pc.committer_date)?.secs, std::cmp::Reverse(ctr), p, floor));
+                    heap.push((
+                        GitDate::parse(&pc.committer_date)?.secs,
+                        std::cmp::Reverse(ctr),
+                        p,
+                        floor,
+                    ));
                     ctr += 1;
                 }
             }
             if o.until.is_some_and(|u| date > u) || o.since_filter.is_some_and(|s| date < s) {
                 continue;
             }
-            let nparents = c.meta.get("git.parents").map(|p| p.split_whitespace().count()).unwrap_or(c.parent.is_some() as usize);
+            let nparents = c
+                .meta
+                .get("git.parents")
+                .map(|p| p.split_whitespace().count())
+                .unwrap_or(c.parent.is_some() as usize);
             if nparents < o.min_parents || o.max_parents.is_some_and(|m| nparents > m) {
                 continue;
             }
@@ -518,7 +587,11 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
         // A path filter alone reads changed paths from the commit graph; commits that don't
         // touch the paths never load their change lists.
         if !need_diff && !spec.is_empty() {
-            batch.retain(|(h, _)| ctx.repo.changed_paths(h).is_none_or(|ps| ps.iter().any(|p| spec.matches(p))));
+            batch.retain(|(h, _)| {
+                ctx.repo
+                    .changed_paths(h)
+                    .is_none_or(|ps| ps.iter().any(|p| spec.matches(p)))
+            });
         }
         let diffs: Vec<Option<Vec<Change>>> = if wants_diff {
             use futures::StreamExt;
@@ -552,7 +625,13 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
                         // Fetched only to filter by path: nothing prints it.
                         None
                     } else {
-                        Some(if o.full_diff { all } else { all.into_iter().filter(|ch| spec.matches(&ch.path)).collect() })
+                        Some(if o.full_diff {
+                            all
+                        } else {
+                            all.into_iter()
+                                .filter(|ch| spec.matches(&ch.path))
+                                .collect()
+                        })
                     }
                 }
                 None => None,
@@ -561,7 +640,11 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
                 skipped += 1;
                 continue;
             }
-            out.push(Shown { hash: h, commit: c, changes });
+            out.push(Shown {
+                hash: h,
+                commit: c,
+                changes,
+            });
             if o.max_count.is_some_and(|m| out.len() >= m) {
                 break 'outer;
             }
@@ -689,23 +772,43 @@ pub struct Printer<'a> {
 
 impl<'a> Printer<'a> {
     /// `any_merge`: whether a commit to be shown is a merge (its `Merge:` line abbreviates).
-    pub async fn new(ctx: &'a Ctx, o: &'a LogOpts, tty: bool, any_merge: bool) -> Result<Printer<'a>> {
+    pub async fn new(
+        ctx: &'a Ctx,
+        o: &'a LogOpts,
+        tty: bool,
+        any_merge: bool,
+    ) -> Result<Printer<'a>> {
         let color = o.color.unwrap_or(tty);
-        let decorate = o.decorate.unwrap_or(if tty { Decorate::Short } else { Decorate::No });
-        let needs_decor = decorate != Decorate::No || matches!(&o.format, Format::User { fmt, .. } if fmt.contains("%d") || fmt.contains("%D"));
+        let decorate = o
+            .decorate
+            .unwrap_or(if tty { Decorate::Short } else { Decorate::No });
+        let needs_decor = decorate != Decorate::No
+            || matches!(&o.format, Format::User { fmt, .. } if fmt.contains("%d") || fmt.contains("%D"));
         let mut decorations: HashMap<Hash, Vec<(String, bool)>> = HashMap::new();
         if needs_decor {
             let full = decorate == Decorate::Full;
-            let name = |b: &str| if full { format!("refs/heads/{b}") } else { b.to_string() };
+            let name = |b: &str| {
+                if full {
+                    format!("refs/heads/{b}")
+                } else {
+                    b.to_string()
+                }
+            };
             let refs = ctx.refs().await?;
             let branch = ctx.branch().await?.to_string();
             let head = ctx.head().await?;
             let head_branch_tip = refs.iter().find(|(b, _)| *b == branch).map(|(_, h)| *h);
             if let Some(h) = head {
                 if head_branch_tip == Some(h) {
-                    decorations.entry(h).or_default().push((format!("HEAD -> {}", name(&branch)), true));
+                    decorations
+                        .entry(h)
+                        .or_default()
+                        .push((format!("HEAD -> {}", name(&branch)), true));
                 } else {
-                    decorations.entry(h).or_default().push(("HEAD".into(), true));
+                    decorations
+                        .entry(h)
+                        .or_default()
+                        .push(("HEAD".into(), true));
                 }
             }
             for (b, h) in refs {
@@ -715,10 +818,16 @@ impl<'a> Printer<'a> {
                 decorations.entry(h).or_default().push((name(&b), false));
             }
         }
-        let abbrev_commit = o.abbrev_commit.unwrap_or(matches!(o.format, Format::Oneline | Format::Reference));
+        let abbrev_commit = o
+            .abbrev_commit
+            .unwrap_or(matches!(o.format, Format::Oneline | Format::Reference));
         // The default length needs every commit id; only compute it if something abbreviates.
         let uses_short = abbrev_commit
-            || (any_merge && !matches!(o.format, Format::Oneline | Format::Raw | Format::User { .. }))
+            || (any_merge
+                && !matches!(
+                    o.format,
+                    Format::Oneline | Format::Raw | Format::User { .. }
+                ))
             || matches!(&o.format, Format::User { fmt, .. } if fmt.contains("%h") || fmt.contains("%p") || fmt.contains("%t"))
             || (o.diff.any_output() && (o.diff.patch || o.diff.raw));
         let abbrev = match o.abbrev {
@@ -745,7 +854,9 @@ impl<'a> Printer<'a> {
 
     /// ` (HEAD -> main, feature)` with Git's colors.
     fn decoration(&self, h: &Hash, color: bool) -> String {
-        let Some(ds) = self.decorations.get(h) else { return String::new() };
+        let Some(ds) = self.decorations.get(h) else {
+            return String::new();
+        };
         let (cc, cr) = if color { (C_COMMIT, C_RESET) } else { ("", "") };
         let mut s = String::new();
         let mut prefix = " (";
@@ -755,7 +866,9 @@ impl<'a> Printer<'a> {
             s.push_str(cr);
             if let Some(b) = name.strip_prefix("HEAD -> ") {
                 if color {
-                    s.push_str(&format!("{C_HEAD}HEAD{C_RESET}{C_COMMIT} -> {C_RESET}{C_BRANCH}{b}"));
+                    s.push_str(&format!(
+                        "{C_HEAD}HEAD{C_RESET}{C_COMMIT} -> {C_RESET}{C_BRANCH}{b}"
+                    ));
                 } else {
                     s.push_str(name);
                 }
@@ -775,7 +888,15 @@ impl<'a> Printer<'a> {
     }
 
     fn decoration_list(&self, h: &Hash) -> String {
-        self.decorations.get(h).map(|ds| ds.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
+        self.decorations
+            .get(h)
+            .map(|ds| {
+                ds.iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
     }
 
     fn date(&self, raw: &str) -> String {
@@ -786,7 +907,9 @@ impl<'a> Printer<'a> {
     }
 
     fn date_as(&self, raw: &str, mode: DateMode) -> String {
-        GitDate::parse(raw).map(|d| format_date(d, &mode, false)).unwrap_or_default()
+        GitDate::parse(raw)
+            .map(|d| format_date(d, &mode, false))
+            .unwrap_or_default()
     }
 
     /// The header and message, as `pretty_print_commit` builds them.
@@ -806,8 +929,14 @@ impl<'a> Printer<'a> {
         match self.o.format {
             Format::Oneline => return subject(&c.message),
             Format::Short => sb.push_str(&format!("Author: {}\n", c.author)),
-            Format::Medium => sb.push_str(&format!("Author: {}\nDate:   {}\n", c.author, date(&c.author_date))),
-            Format::Full => sb.push_str(&format!("Author: {}\nCommit: {}\n", c.author, c.committer)),
+            Format::Medium => sb.push_str(&format!(
+                "Author: {}\nDate:   {}\n",
+                c.author,
+                date(&c.author_date)
+            )),
+            Format::Full => {
+                sb.push_str(&format!("Author: {}\nCommit: {}\n", c.author, c.committer))
+            }
             Format::Fuller => sb.push_str(&format!(
                 "Author:     {}\nAuthorDate: {}\nCommit:     {}\nCommitDate: {}\n",
                 c.author,
@@ -820,7 +949,10 @@ impl<'a> Printer<'a> {
                 for p in &parents {
                     sb.push_str(&format!("parent {p}\n"));
                 }
-                sb.push_str(&format!("author {} {}\ncommitter {} {}\n", c.author, c.author_date, c.committer, c.committer_date));
+                sb.push_str(&format!(
+                    "author {} {}\ncommitter {} {}\n",
+                    c.author, c.author_date, c.committer, c.committer_date
+                ));
                 if let Some(x) = c.meta.get("git.extra_headers") {
                     sb.push_str(x);
                 }
@@ -829,7 +961,10 @@ impl<'a> Printer<'a> {
         }
         sb.push('\n');
         let msg = skip_blank_lines(&c.message);
-        let tab = matches!(self.o.format, Format::Medium | Format::Full | Format::Fuller);
+        let tab = matches!(
+            self.o.format,
+            Format::Medium | Format::Full | Format::Fuller
+        );
         let mut first = true;
         for line in msg.split_inclusive('\n') {
             let l = line.strip_suffix('\n').unwrap_or(line);
@@ -844,7 +979,11 @@ impl<'a> Printer<'a> {
             first = false;
             let l = if l.trim().is_empty() { "" } else { l };
             sb.push_str("    ");
-            if tab { sb.push_str(&expand_tabs(l, 8)) } else { sb.push_str(l) }
+            if tab {
+                sb.push_str(&expand_tabs(l, 8))
+            } else {
+                sb.push_str(l)
+            }
             sb.push('\n');
         }
         let trimmed = sb.trim_end().len();
@@ -887,7 +1026,8 @@ impl<'a> Printer<'a> {
                 _ => None,
             };
             let rest = &fmt[i..];
-            let (val, used): (Option<String>, usize) = self.placeholder(rest, s, &id, &parents, (an, ae), (cn, ce));
+            let (val, used): (Option<String>, usize) =
+                self.placeholder(rest, s, &id, &parents, (an, ae), (cn, ce));
             match val {
                 Some(v) => {
                     match magic {
@@ -927,7 +1067,13 @@ impl<'a> Printer<'a> {
         let c = &s.commit;
         let one = |v: String| (Some(v), 1);
         let two = |v: String| (Some(v), 2);
-        let color = |code: &str| if self.color { code.to_string() } else { String::new() };
+        let color = |code: &str| {
+            if self.color {
+                code.to_string()
+            } else {
+                String::new()
+            }
+        };
         let date_ph = |raw: &str, ch: u8| -> Option<String> {
             Some(match ch {
                 b'd' => self.date(raw),
@@ -956,7 +1102,11 @@ impl<'a> Printer<'a> {
             b'T' => one(c.root.hex()),
             b't' => one(self.short(&c.root.hex())),
             b'P' => one(parents.join(" ")),
-            b'p' => one(parents.iter().map(|p| self.short(p)).collect::<Vec<_>>().join(" ")),
+            b'p' => one(parents
+                .iter()
+                .map(|p| self.short(p))
+                .collect::<Vec<_>>()
+                .join(" ")),
             b'a' | b'c' if bytes.len() > 1 => {
                 let v = if bytes[0] == b'a' {
                     ident_ph(an, ae, &c.author_date, bytes[1])
@@ -987,7 +1137,12 @@ impl<'a> Printer<'a> {
                 Err(_) => (None, 0),
             },
             b'C' => {
-                for (name, code) in [("red", "\x1b[31m"), ("green", "\x1b[32m"), ("blue", "\x1b[34m"), ("reset", "\x1b[m")] {
+                for (name, code) in [
+                    ("red", "\x1b[31m"),
+                    ("green", "\x1b[32m"),
+                    ("blue", "\x1b[34m"),
+                    ("reset", "\x1b[m"),
+                ] {
                     if rest[1..].starts_with(name) {
                         return (Some(color(code)), 1 + name.len());
                     }
@@ -998,13 +1153,21 @@ impl<'a> Printer<'a> {
                         let force = spec.starts_with("always,");
                         let spec = spec.trim_start_matches("always,");
                         let on = self.color || force;
-                        let code = if spec == "auto" || spec == "auto,reset" { String::new() } else { ansi(spec) };
+                        let code = if spec == "auto" || spec == "auto,reset" {
+                            String::new()
+                        } else {
+                            ansi(spec)
+                        };
                         return (Some(if on { code } else { String::new() }), end + 1);
                     }
                 }
                 (None, 0)
             }
-            b'w' | b'<' | b'>' if rest[1..].starts_with('(') || rest[1..].starts_with("<(") || rest[1..].starts_with(">(") => {
+            b'w' | b'<' | b'>'
+                if rest[1..].starts_with('(')
+                    || rest[1..].starts_with("<(")
+                    || rest[1..].starts_with(">(") =>
+            {
                 // Column/wrapping directives: accepted, not applied.
                 match rest.find(')') {
                     Some(end) => (Some(String::new()), end + 1),
@@ -1017,13 +1180,25 @@ impl<'a> Printer<'a> {
 
     /// Print one commit (and its diff) exactly as `git log` lays it out.
     pub async fn show(&mut self, s: &Shown, out: &mut dyn Write) -> Result<()> {
-        let use_terminator = matches!(self.o.format, Format::Oneline | Format::Reference | Format::User { terminator: true, .. });
+        let use_terminator = matches!(
+            self.o.format,
+            Format::Oneline
+                | Format::Reference
+                | Format::User {
+                    terminator: true,
+                    ..
+                }
+        );
         if self.shown_one && !use_terminator {
             out.write_all(b"\n")?;
         }
         self.shown_one = true;
         let id = self.ctx.id(&s.hash, &s.commit);
-        let shown_id = if self.abbrev_commit { self.short(&id) } else { id.clone() };
+        let shown_id = if self.abbrev_commit {
+            self.short(&id)
+        } else {
+            id.clone()
+        };
         let msg: String;
         let empty_user = matches!(&self.o.format, Format::User { fmt, .. } if fmt.is_empty());
         match &self.o.format {
@@ -1032,7 +1207,11 @@ impl<'a> Printer<'a> {
             }
             Format::Reference => {
                 // Git's reference format defaults to short dates.
-                let fmt = if self.o.date.0 == DateMode::Normal && !self.o.date.1 { "%h (%s, %as)" } else { "%h (%s, %ad)" };
+                let fmt = if self.o.date.0 == DateMode::Normal && !self.o.date.1 {
+                    "%h (%s, %as)"
+                } else {
+                    "%h (%s, %ad)"
+                };
                 msg = self.user_format(fmt, s);
             }
             _ => {
@@ -1047,7 +1226,11 @@ impl<'a> Printer<'a> {
                 if self.o.parents {
                     for p in self.ctx.parent_ids(&s.commit) {
                         line.push(' ');
-                        line.push_str(&if self.abbrev_commit { self.short(&p) } else { p });
+                        line.push_str(&if self.abbrev_commit {
+                            self.short(&p)
+                        } else {
+                            p
+                        });
                     }
                 }
                 if self.decorate {
@@ -1056,7 +1239,11 @@ impl<'a> Printer<'a> {
                 if self.color {
                     line.push_str(C_RESET);
                 }
-                line.push(if self.o.format == Format::Oneline { ' ' } else { '\n' });
+                line.push(if self.o.format == Format::Oneline {
+                    ' '
+                } else {
+                    '\n'
+                });
                 out.write_all(line.as_bytes())?;
                 msg = self.pretty(s);
             }
@@ -1085,7 +1272,11 @@ fn ansi(spec: &str) -> String {
     let mut codes = vec![];
     let mut fg_set = false;
     for w in spec.split_whitespace() {
-        let n = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"].iter().position(|c| *c == w);
+        let n = [
+            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+        ]
+        .iter()
+        .position(|c| *c == w);
         match (w, n) {
             ("reset", _) => return "\x1b[m".into(),
             ("bold", _) => codes.push("1".to_string()),
@@ -1102,5 +1293,9 @@ fn ansi(spec: &str) -> String {
             _ => {}
         }
     }
-    if codes.is_empty() { String::new() } else { format!("\x1b[{}m", codes.join(";")) }
+    if codes.is_empty() {
+        String::new()
+    } else {
+        format!("\x1b[{}m", codes.join(";"))
+    }
 }
