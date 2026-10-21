@@ -1,0 +1,20 @@
+# Deploys site/ to pail.build (a Cloudflare Worker serving static assets; see site/wrangler.jsonc).
+name: site
+on:
+  push:
+    branches: [main]
+    paths: [site/**, .github/workflows/site.yml]
+  workflow_dispatch:
+concurrency: site
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: site/build.sh
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          wranglerVersion: 4.88.0
+          workingDirectory: site
+          command: deploy
