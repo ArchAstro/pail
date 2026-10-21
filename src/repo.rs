@@ -16,7 +16,8 @@ use crate::manifest::{
     BuiltPage, Change, Child, ChunkRef, Entry, Kind, Loc, Page, build_leaves, build_page, build_upper,
     decode_stored_page, diff_sorted, leaf_child, split_runs,
 };
-use crate::objects::{Commit, RefValue, commit_key, page_key, ref_key, validate_branch};
+use crate::objects::{Commit, Landed, RefValue, commit_key, page_key, ref_key, validate_branch};
+use serde::{Deserialize, Serialize};
 use crate::pack::{CHUNK_THRESHOLD, INLINE_MAX, PACK_MAX, PackBuilder, chunk_key, chunk_spans, decode_blob, encode_blob, pack_key};
 use crate::store::{Cas, Store, Version};
 
@@ -83,6 +84,43 @@ pub struct CommitFields {
     pub meta: BTreeMap<String, String>,
 }
 
+/// An immutable object to store.
+#[derive(Clone, Debug)]
+pub struct Upload {
+    pub key: String,
+    pub data: Bytes,
+    /// Ask whether it exists first (large chunks that are often already stored).
+    pub check_first: bool,
+}
+
+/// A commit computed but not yet stored ([`Repo::prepare_commit`]).
+pub struct PreparedCommit {
+    pub commit: Hash,
+    pub data: Bytes,
+    pub pages: Vec<BuiltPage>,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// A branch head the caller already knows, with its version: the first publish attempt can
+/// swap from it without reading the ref (a stale one just fails the swap and is re-read).
+#[derive(Clone, Debug)]
+pub struct KnownHead {
+    pub commit: Hash,
+    pub version: Version,
+    /// The ref's `recent` list at that version, carried forward by the swap.
+    pub recent: Vec<Landed>,
+}
+
+/// Optional parts of a commit (see [`Repo::commit_opts`]).
+#[derive(Default)]
+pub struct CommitOptions<'a> {
+    pub check: Option<PublishCheck<'a>>,
+    /// The files' objects ([`Repo::prepare_files`]), stored with the commit's own.
+    pub uploads: Vec<Upload>,
+    pub known_head: Option<KnownHead>,
+}
+
 /// A commit stored by `write_commit` (not yet on any branch).
 #[derive(Debug, Clone)]
 pub struct Written {
@@ -113,6 +151,12 @@ pub struct CommitOutcome {
     pub bytes: u64,
     /// The commit the publish check approved, when the published one is a replay of it.
     pub replayed_from: Option<Hash>,
+    /// The ref's recent landings after this commit (keep with `version` for a [`KnownHead`]).
+    pub recent: Vec<Landed>,
+    /// The commit the ref pointed at when it had `version`: `commit` itself, unless the
+    /// commit landed inside a combined batch that continued past it. A [`KnownHead`] must
+    /// pair `version` with this, never with `commit`.
+    pub head: Hash,
 }
 
 /// A ref move about to be published: `branch` from `old` to `new`, all objects written.
@@ -144,6 +188,8 @@ pub struct Repo {
     commits: Mutex<HashMap<Hash, Arc<Commit>>>,
     /// Commit metadata (no change lists) served by the local commit graph.
     metas: Mutex<HashMap<Hash, Arc<Commit>>>,
+    /// Commit → (manifest root, generation), learned from refs read and commits prepared.
+    heads: Mutex<HashMap<Hash, (Hash, u64)>>,
     graph: std::sync::OnceLock<Option<crate::graph::Graph>>,
 }
 
@@ -171,6 +217,7 @@ impl Repo {
             pages: Mutex::default(),
             commits: Mutex::default(),
             metas: Mutex::default(),
+            heads: Mutex::default(),
             graph: std::sync::OnceLock::new(),
         }
     }
@@ -201,9 +248,17 @@ impl Repo {
     // ---------- refs ----------
 
     pub async fn read_ref(&self, branch: &str) -> Result<Option<(Hash, Version)>> {
+        Ok(self.read_ref_value(branch).await?.map(|(r, v)| (r.commit, v)))
+    }
+
+    /// A ref with everything it records (see [`RefValue`]) and its version.
+    pub async fn read_ref_value(&self, branch: &str) -> Result<Option<(RefValue, Version)>> {
         let Some((b, v)) = self.store.get_opt(&ref_key(branch)).await? else { return Ok(None) };
         let r: RefValue = serde_json::from_slice(&b).with_context(|| format!("corrupt ref {branch}"))?;
-        Ok(Some((r.commit, v)))
+        if let (Some(root), Some(generation)) = (r.root, r.generation) {
+            self.heads.lock().unwrap().insert(r.commit, (root, generation));
+        }
+        Ok(Some((r, v)))
     }
 
     pub async fn list_refs(&self) -> Result<Vec<(String, Hash)>> {
@@ -220,7 +275,7 @@ impl Repo {
     /// Create a branch pointing at `commit`. Fails if it already exists.
     pub async fn create_branch(&self, name: &str, commit: Hash) -> Result<Version> {
         validate_branch(name)?;
-        let body = Bytes::from(serde_json::to_vec(&RefValue { commit })?);
+        let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, vec![]))?);
         match self.store.cas(&ref_key(name), body, None).await? {
             Cas::Ok(v) => Ok(v),
             Cas::Conflict => bail!("branch {name} already exists"),
@@ -229,13 +284,14 @@ impl Repo {
 
     /// Move a branch to any commit (not necessarily a descendant). Records a reflog entry first.
     pub async fn force_ref(&self, name: &str, commit: Hash) -> Result<()> {
-        let old = self.read_ref(name).await?;
+        let old = self.read_ref_value(name).await?;
         if let Some((old, _)) = &old {
             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
-            let rec = serde_json::json!({"old": old, "new": commit});
+            let rec = serde_json::json!({"old": old.commit, "new": commit});
             self.store.put(&format!("reflog/{name}/{ts:015}"), Bytes::from(rec.to_string())).await?;
         }
-        let body = Bytes::from(serde_json::to_vec(&RefValue { commit })?);
+        let recent = old.as_ref().map(|(r, _)| r.recent.clone()).unwrap_or_default();
+        let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, recent))?);
         match self.store.cas(&ref_key(name), body, old.as_ref().map(|(_, v)| v)).await? {
             Cas::Ok(_) => Ok(()),
             Cas::Conflict => bail!("branch {name} moved concurrently; retry"),
@@ -367,7 +423,12 @@ impl Repo {
 
     pub async fn root_of(&self, commit: Option<Hash>) -> Result<Hash> {
         match commit {
-            Some(h) => Ok(self.commit_obj(&h).await?.root),
+            Some(h) => {
+                if let Some((root, _)) = self.heads.lock().unwrap().get(&h) {
+                    return Ok(*root);
+                }
+                Ok(self.commit_obj(&h).await?.root)
+            }
             None => Ok(build_page(Page::Leaf(vec![])).hash),
         }
     }
@@ -529,25 +590,19 @@ impl Repo {
         Ok(NewTree { root, pages, files, bytes })
     }
 
-    async fn upload_pages(&self, pages: &[BuiltPage]) -> Result<usize> {
-        let empty = build_page(Page::Leaf(vec![])).hash;
-        let todo: Vec<&BuiltPage> = pages.iter().filter(|p| p.hash != empty).collect();
-        let n = todo.len();
-        run_unordered(todo.into_iter().map(|p| async move {
-            self.store.put_new(&page_key(&p.hash), p.data.clone()).await?;
-            self.cache_write("pages", &p.hash, &p.data);
-            self.pages.lock().unwrap().insert(p.hash, Arc::new(p.page.clone()));
-            Ok::<_, anyhow::Error>(())
-        }).collect(), PARALLELISM)
-        .await?;
-        Ok(n)
-    }
-
     // ---------- file contents ----------
 
     /// Store file contents and return their manifest entries (same order as `inputs`).
     /// `reuse` maps content hashes to locations already in the store (dedupe).
     pub async fn write_files(&self, inputs: &[FileInput], reuse: &HashMap<Hash, Loc>) -> Result<Vec<Entry>> {
+        let (entries, uploads) = self.prepare_files(inputs, reuse);
+        self.upload(uploads).await?;
+        Ok(entries)
+    }
+
+    /// [`Repo::write_files`] without the uploads: the entries, and the objects to store before
+    /// any commit referring to them is published. Everything is computed locally.
+    pub fn prepare_files(&self, inputs: &[FileInput], reuse: &HashMap<Hash, Loc>) -> (Vec<Entry>, Vec<Upload>) {
         enum Pending {
             Done(Loc),
             InPack { pack: usize, off: u64, len: u64 },
@@ -593,24 +648,13 @@ impl Repo {
             packs.into_iter().filter(|p| !p.is_empty()).map(|p| p.finish()).collect();
         // Packs are new by construction. Chunks of an edited large file mostly exist already,
         // and a create-if-absent PUT still sends the body, so ask first (a HEAD costs no bytes).
-        let uploads = finished
+        let uploads: Vec<Upload> = finished
             .iter()
-            .map(|(h, d)| (pack_key(h), d.clone(), false))
-            .chain(chunk_uploads.into_iter().map(|(h, d)| (chunk_key(&h), d, true)));
-        run_unordered(
-            uploads
-                .map(|(k, d, check)| async move {
-                    if check && self.store.size(&k).await?.is_some() {
-                        return Ok(false);
-                    }
-                    self.store.put_new(&k, d).await
-                })
-                .collect(),
-            PARALLELISM,
-        )
-        .await?;
+            .map(|(h, d)| Upload { key: pack_key(h), data: d.clone(), check_first: false })
+            .chain(chunk_uploads.into_iter().map(|(h, d)| Upload { key: chunk_key(&h), data: d, check_first: true }))
+            .collect();
 
-        Ok(inputs
+        let entries = inputs
             .iter()
             .zip(slots)
             .map(|(f, (hash, slot))| {
@@ -620,7 +664,21 @@ impl Repo {
                 };
                 Entry { path: f.path.clone(), kind: f.kind, size: f.data.len() as u64, hash, loc }
             })
-            .collect())
+            .collect();
+        (entries, uploads)
+    }
+
+    /// Store immutable objects, all at once.
+    pub async fn upload(&self, uploads: Vec<Upload>) -> Result<()> {
+        run_unordered(uploads.into_iter().map(|u| self.upload_one(u)).collect(), PARALLELISM).await?;
+        Ok(())
+    }
+
+    async fn upload_one(&self, u: Upload) -> Result<bool> {
+        if u.check_first && self.store.size(&u.key).await?.is_some() {
+            return Ok(false);
+        }
+        self.store.put_new(&u.key, u.data).await
     }
 
     /// Read file contents for entries (same order). Every result is hash-verified.
@@ -716,6 +774,38 @@ impl Repo {
     /// commit records its change list against `parent`. Immutable and idempotent: an
     /// unreferenced result is garbage for `gc`.
     pub async fn write_commit(&self, parent: Option<Hash>, delta: &Delta, f: &CommitFields) -> Result<Written> {
+        let prepared = self.prepare_commit(parent, delta, f).await?;
+        self.store_commit(&prepared, vec![]).await
+    }
+
+    /// Store a prepared commit's pages and commit object, with `extra` objects (its files), in
+    /// one concurrent wave: every hash is known up front, so nothing waits on another upload.
+    pub async fn store_commit(&self, p: &PreparedCommit, extra: Vec<Upload>) -> Result<Written> {
+        let empty = build_page(Page::Leaf(vec![])).hash;
+        let pages: Vec<&BuiltPage> = p.pages.iter().filter(|pg| pg.hash != empty).collect();
+        let n = pages.len();
+        let page_puts = pages.into_iter().map(|pg| {
+            futures::future::Either::Left(async move {
+                self.store.put_new(&page_key(&pg.hash), pg.data.clone()).await?;
+                self.cache_write("pages", &pg.hash, &pg.data);
+                self.pages.lock().unwrap().insert(pg.hash, Arc::new(pg.page.clone()));
+                Ok::<_, anyhow::Error>(())
+            })
+        });
+        let commit_put = std::iter::once(futures::future::Either::Right(futures::future::Either::Left(async move {
+            self.store.put_new(&commit_key(&p.commit), p.data.clone()).await?;
+            self.cache_write("commits", &p.commit, &p.data);
+            Ok::<_, anyhow::Error>(())
+        })));
+        let extra_puts = extra
+            .into_iter()
+            .map(|u| futures::future::Either::Right(futures::future::Either::Right(async move { self.upload_one(u).await.map(|_| ()) })));
+        run_unordered(page_puts.chain(commit_put).chain(extra_puts).collect(), PARALLELISM).await?;
+        Ok(Written { commit: p.commit, pages: n, files: p.files, bytes: p.bytes })
+    }
+
+    /// Everything a commit is, computed locally: its pages, its encoded object and its id.
+    pub async fn prepare_commit(&self, parent: Option<Hash>, delta: &Delta, f: &CommitFields) -> Result<PreparedCommit> {
         let parent_root = self.root_of(parent).await?;
         let tree = self.apply_delta(parent_root, delta).await?;
         // The exact change against `parent`: paths whose kind or content differ (no-op edits
@@ -738,10 +828,17 @@ impl Repo {
                 );
             }
         }
-        let pages = self.upload_pages(&tree.pages).await?;
-        let generation = match parent {
-            Some(p) => self.commit_meta(&p).await?.generation + 1,
-            None => 0,
+        let parent_generation = match parent {
+            Some(p) => match self.heads.lock().unwrap().get(&p).map(|k| k.1) {
+                Some(g) => Some(g),
+                None => None,
+            },
+            None => None,
+        };
+        let generation = match (parent, parent_generation) {
+            (Some(_), Some(g)) => g + 1,
+            (Some(p), None) => self.commit_meta(&p).await?.generation + 1,
+            (None, _) => 0,
         };
         let commit = Commit {
             parent,
@@ -758,16 +855,30 @@ impl Repo {
             changes: Some(crate::objects::Changes::new(&changes)),
         };
         let (ch, data) = commit.encode();
-        self.store.put_new(&commit_key(&ch), data.clone()).await?;
-        self.cache_write("commits", &ch, &data);
-        Ok(Written { commit: ch, pages, files: tree.files, bytes: tree.bytes })
+        self.heads.lock().unwrap().insert(ch, (tree.root, generation));
+        // Its pages are readable at once (immutable, content-addressed), so a commit can be
+        // prepared on top of this one before either is stored.
+        {
+            let mut cache = self.pages.lock().unwrap();
+            for p in &tree.pages {
+                cache.insert(p.hash, Arc::new(p.page.clone()));
+            }
+        }
+        Ok(PreparedCommit { commit: ch, data, pages: tree.pages, files: tree.files, bytes: tree.bytes })
     }
 
     /// Move `branch` from `expected` (None: create) to `commit` in one compare-and-swap.
     /// Conflict means someone else moved it first.
-    pub async fn advance_ref(&self, branch: &str, expected: Option<&Version>, commit: Hash) -> Result<Cas> {
-        let body = Bytes::from(serde_json::to_vec(&RefValue { commit })?);
+    /// `recent` is carried forward from the value being replaced (see [`RefValue::recent`]).
+    pub async fn advance_ref(&self, branch: &str, expected: Option<&Version>, commit: Hash, recent: Vec<Landed>) -> Result<Cas> {
+        let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, recent))?);
         self.store.cas(&ref_key(branch), body, expected).await
+    }
+
+    /// A ref value for `commit`, with its root and generation when this client knows them.
+    fn ref_value(&self, commit: Hash, recent: Vec<Landed>) -> RefValue {
+        let known = self.heads.lock().unwrap().get(&commit).copied();
+        RefValue { commit, root: known.map(|k| k.0), generation: known.map(|k| k.1), recent }
     }
 
     /// A delta that reproduces commit `h` on another parent: its change list (new sides), or
@@ -808,7 +919,8 @@ impl Repo {
         loop {
             attempts += 1;
             let (tip, _) = self.read_ref(branch).await?.with_context(|| format!("no branch {branch}"))?;
-            let (onto_tip, version) = self.read_ref(onto).await?.with_context(|| format!("no branch {onto}"))?;
+            let (onto_ref, version) = self.read_ref_value(onto).await?.with_context(|| format!("no branch {onto}"))?;
+            let onto_tip = onto_ref.commit;
             let base = self.merge_base(tip, onto_tip).await?.context("branches share no history")?;
             let mut stack = vec![];
             let mut cur = Some(tip);
@@ -878,7 +990,7 @@ impl Repo {
                 checked = true;
             }
             // The one write that publishes the stack.
-            match self.advance_ref(onto, Some(&version), new_tip).await {
+            match self.advance_ref(onto, Some(&version), new_tip, onto_ref.recent.clone()).await {
                 Ok(Cas::Ok(_)) => {
                     return Ok(LandOutcome { tip: new_tip, landed, fast_forward: ff, attempts });
                 }
@@ -905,89 +1017,426 @@ impl Repo {
 
     /// [`Repo::commit`], asking `check` before the first publish attempt.
     pub async fn commit_with(&self, req: CommitRequest, check: Option<PublishCheck<'_>>) -> Result<CommitOutcome> {
+        self.commit_opts(req, CommitOptions { check, ..Default::default() }).await
+    }
+
+    /// Commit with every option. The path of a commit:
+    ///
+    /// 1. Fast: build the commit on the known head (or the ref, read once), store its objects
+    ///    (and `uploads`) in one concurrent wave, compare-and-swap the ref. Two round trips
+    ///    when the head is known.
+    /// 2. Lost twice: publish an intent and combine (see [`Repo::commit_combining`]).
+    pub async fn commit_opts(&self, req: CommitRequest, opts: CommitOptions<'_>) -> Result<CommitOutcome> {
         validate_branch(&req.branch)?;
+        let CommitOptions { check, uploads, known_head } = opts;
+        // A publish check (a pre-publish hook) must see what is published, so it reads the
+        // ref first rather than swapping blind from a remembered head.
+        let known_head = known_head.filter(|_| check.is_none());
+        let mut uploads = Some(uploads);
         let mut checked: Option<Hash> = None;
         let base_root = self.root_of(req.base).await?;
-        let mut attempts = 0;
         let started = std::time::Instant::now();
         let mut pages_written = 0;
-        loop {
-            attempts += 1;
-            let head = self.read_ref(&req.branch).await?;
-            let (parent, expected) = match &head {
-                Some((h, v)) => (Some(*h), Some(v.clone())),
-                None => (None, None),
+        let fields = CommitFields {
+            author: req.author.clone(),
+            author_date: req.author_date.clone(),
+            committer: req.committer.clone(),
+            committer_date: req.committer_date.clone(),
+            message: req.message.clone(),
+            meta: req.meta.clone(),
+        };
+        let prefix = intent_prefix(&req.branch);
+        for attempt in 1..=DIRECT_ATTEMPTS {
+            let head: Option<(RefValue, Version)> = match &known_head {
+                Some(k) if attempt == 1 && Some(k.commit) == req.base => {
+                    Some((RefValue { commit: k.commit, recent: k.recent.clone(), ..Default::default() }, k.version.clone()))
+                }
+                _ => self.read_ref_value(&req.branch).await?,
             };
             if head.is_none() && req.base.is_some() {
                 bail!("branch {} does not exist", req.branch);
             }
-            let head_root = self.root_of(parent).await?;
+            let parent = head.as_ref().map(|(r, _)| r.commit);
             if parent != req.base {
                 // Someone else committed since our base. Replay only if paths are disjoint.
-                let theirs = self.diff(base_root, head_root).await?;
-                let overlap: Vec<String> =
-                    theirs.into_iter().filter(|c| req.delta.contains_key(&c.path)).map(|c| c.path).collect();
-                if !overlap.is_empty() {
-                    return Err(ConflictError { branch: req.branch.clone(), paths: overlap }.into());
-                }
+                self.check_disjoint(&req.branch, base_root, parent, &req.delta).await?;
             }
-            let fields = CommitFields {
-                author: req.author.clone(),
-                author_date: req.author_date.clone(),
-                committer: req.committer.clone(),
-                committer_date: req.committer_date.clone(),
-                message: req.message.clone(),
-                meta: req.meta.clone(),
-            };
-            let tree = self.write_commit(parent, &req.delta, &fields).await?;
-            pages_written += tree.pages;
-            let ch = tree.commit;
+            let prepared = self.prepare_commit(parent, &req.delta, &fields).await?;
+            // Look for writers already combining while the objects upload (no extra round
+            // trip): swapping past their pending intents would starve them, so join them.
+            let (written, listed) =
+                tokio::try_join!(self.store_commit(&prepared, uploads.take().unwrap_or_default()), self.store.list(&prefix))?;
+            let recent_now: &[Landed] = head.as_ref().map(|(r, _)| r.recent.as_slice()).unwrap_or(&[]);
+            if !pending_intents(recent_now, listed).is_empty() {
+                pages_written += written.pages;
+                if checked.is_none() {
+                    if let Some(check) = check {
+                        check(&Publish { branch: req.branch.clone(), old: parent, new: written.commit })?;
+                    }
+                    checked = Some(written.commit);
+                }
+                break;
+            }
+            pages_written += written.pages;
+            let ch = written.commit;
             if checked.is_none() {
                 if let Some(check) = check {
                     check(&Publish { branch: req.branch.clone(), old: parent, new: ch })?;
                 }
                 checked = Some(ch);
             }
-            let replayed_from = checked.filter(|c| *c != ch);
-            let body = Bytes::from(serde_json::to_vec(&RefValue { commit: ch })?);
-            match self.store.cas(&ref_key(&req.branch), body, expected.as_ref()).await {
-                Ok(Cas::Ok(version)) => {
-                    return Ok(CommitOutcome {
-                        commit: ch,
-                        version,
-                        attempts,
-                        pages_written,
-                        files: tree.files,
-                        bytes: tree.bytes,
-                        replayed_from,
-                    });
-                }
+            let recent = head.as_ref().map(|(r, _)| r.recent.clone()).unwrap_or_default();
+            let expected = head.as_ref().map(|(_, v)| v.clone());
+            let outcome = |version: Version, recent: Vec<Landed>| CommitOutcome {
+                commit: ch,
+                version,
+                attempts: attempt,
+                pages_written,
+                files: written.files,
+                bytes: written.bytes,
+                replayed_from: checked.filter(|c| *c != ch),
+                recent,
+                head: ch,
+            };
+            match self.advance_ref(&req.branch, expected.as_ref(), ch, recent.clone()).await {
+                Ok(Cas::Ok(version)) => return Ok(outcome(version, recent)),
                 Ok(Cas::Conflict) => {}
                 Err(e) => {
                     // Unknown outcome (e.g. timeout): the ref tells us whether we won.
-                    if let Some((now, v)) = self.read_ref(&req.branch).await? {
-                        if now == ch {
-                            return Ok(CommitOutcome {
-                                commit: ch,
-                                version: v,
-                                attempts,
-                                pages_written,
-                                files: tree.files,
-                                bytes: tree.bytes,
-                                replayed_from,
-                            });
-                        }
-                    }
-                    if started.elapsed() >= COMMIT_DEADLINE {
-                        return Err(e);
+                    match self.read_ref_value(&req.branch).await? {
+                        Some((now, v)) if now.commit == ch => return Ok(outcome(v, now.recent)),
+                        _ if attempt == DIRECT_ATTEMPTS => return Err(e),
+                        _ => {}
                     }
                 }
             }
-            if started.elapsed() >= COMMIT_DEADLINE {
-                bail!("gave up after {attempts} attempts in {:?}: {} is too contended", started.elapsed(), req.branch);
-            }
-            backoff(attempts).await;
         }
+        self.commit_combining(&req, &fields, base_root, started, pages_written, checked).await
+    }
+
+    /// Fail with a conflict if `delta` touches a path that changed between `base_root` and
+    /// `parent`.
+    async fn check_disjoint(&self, branch: &str, base_root: Hash, parent: Option<Hash>, delta: &Delta) -> Result<()> {
+        let head_root = self.root_of(parent).await?;
+        let theirs = self.diff(base_root, head_root).await?;
+        let overlap: Vec<String> = theirs.into_iter().filter(|c| delta.contains_key(&c.path)).map(|c| c.path).collect();
+        if !overlap.is_empty() {
+            return Err(ConflictError { branch: branch.to_string(), paths: overlap }.into());
+        }
+        Ok(())
+    }
+
+    /// Land under contention by combining. The writer publishes an intent (its delta and
+    /// fields, under `intents/<branch>/`), then every attempt — its own or any other
+    /// contender's — reads the ref and the pending intents together, builds one commit per
+    /// pending intent on the head (oldest first, skipping any whose paths changed since its
+    /// base), stores them all in one wave and lands the whole batch with one compare-and-swap,
+    /// recording the intents in the ref's `recent` list. Whoever wins lands everyone's pending
+    /// work, so no writer can be starved and a lost race is usually someone landing yours.
+    async fn commit_combining(
+        &self,
+        req: &CommitRequest,
+        fields: &CommitFields,
+        base_root: Hash,
+        started: std::time::Instant,
+        pages_written: usize,
+        checked: Option<Hash>,
+    ) -> Result<CommitOutcome> {
+        let id = intent_id();
+        let key = intent_key(&req.branch, &id);
+        let mine = Intent::new(&id, req.base, &req.delta, fields);
+        self.store.put(&key, Bytes::from(serde_json::to_vec(&mine)?)).await?;
+        let mut attempts = DIRECT_ATTEMPTS;
+        let prefix = intent_prefix(&req.branch);
+        // The head as last seen, and since when: a designated combiner that stops making
+        // progress is taken over.
+        let mut last_seen: Option<(Hash, std::time::Instant)> = None;
+        loop {
+            attempts += 1;
+            let (head, listed) =
+                tokio::try_join!(self.read_ref_value(&req.branch), self.store.list(&prefix))?;
+            let Some((head, version)) = head else {
+                let _ = self.store.delete(&key).await;
+                bail!("branch {} does not exist", req.branch);
+            };
+            if let Some(landed) = head.recent.iter().find(|l| l.intent == id) {
+                let _ = self.store.delete(&key).await;
+                return self
+                    .landed_outcome(landed.commit, head.commit, version, head.recent.clone(), attempts, pages_written, checked)
+                    .await;
+            }
+            // My change must still apply to the head.
+            if let Err(e) = self.check_disjoint(&req.branch, base_root, Some(head.commit), &req.delta).await {
+                let _ = self.store.delete(&key).await;
+                return Err(e);
+            }
+            if started.elapsed() >= COMMIT_DEADLINE {
+                // Withdraw first, so the intent cannot land after we report failure (barring a
+                // combiner that read it in the last instant: see `INTENT_MAX_AGE`).
+                let _ = self.store.delete(&key).await;
+                bail!("gave up after {attempts} attempts in {:?}: {} did not accept the commit", started.elapsed(), req.branch);
+            }
+            if last_seen.is_none_or(|(h, _)| h != head.commit) {
+                last_seen = Some((head.commit, std::time::Instant::now()));
+            }
+            // One designated combiner: the writer of the oldest pending intent. The rest only
+            // watch the ref (one read per poll) unless it stalls; then anyone combines.
+            let oldest = pending_intents(&head.recent, listed.clone()).into_iter().next();
+            let designated = oldest.as_ref().is_none_or(|o| *o >= mine.id);
+            let stalled = last_seen.is_some_and(|(_, at)| at.elapsed() >= COMBINER_TAKEOVER);
+            if !designated && !stalled {
+                tokio::time::sleep(Duration::from_millis(20 + rand::random::<u64>() % 30)).await;
+                continue;
+            }
+            match self.combine(&req.branch, head, &version, listed, &mine).await? {
+                Some((tip, version, recent)) => {
+                    let commit = recent.iter().find(|l| l.intent == id).map(|l| l.commit);
+                    if let Some(commit) = commit {
+                        return self.landed_outcome(commit, tip, version, recent, attempts, pages_written, checked).await;
+                    }
+                }
+                None => {
+                    // Lost the swap: someone else landed a batch (likely including mine).
+                    tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % 15)).await;
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn landed_outcome(
+        &self,
+        commit: Hash,
+        head: Hash,
+        version: Version,
+        recent: Vec<Landed>,
+        attempts: u32,
+        pages_written: usize,
+        checked: Option<Hash>,
+    ) -> Result<CommitOutcome> {
+        let meta = self.commit_meta(&commit).await?;
+        Ok(CommitOutcome {
+            commit,
+            version,
+            attempts,
+            pages_written,
+            files: meta.files,
+            bytes: meta.bytes,
+            replayed_from: checked.filter(|c| *c != commit),
+            recent,
+            head,
+        })
+    }
+
+    /// One combining round: land every pending intent on `head`. Some(the new tip, its version
+    /// and recent list) when this swap won, None when another writer moved the ref first.
+    async fn combine(
+        &self,
+        branch: &str,
+        head: RefValue,
+        version: &Version,
+        listed: Vec<(String, u64)>,
+        mine: &Intent,
+    ) -> Result<Option<(Hash, Version, Vec<Landed>)>> {
+        let mut pending = pending_intents(&head.recent, listed);
+        if !pending.contains(&mine.id) {
+            pending.push(mine.id.clone());
+            pending.sort();
+        }
+        // Read the others' intents (mine is in hand; one that vanished was withdrawn), and
+        // warm the head's root page meanwhile: every commit in the batch builds on it.
+        let head_root = head.root;
+        let warm = async move {
+            if let Some(root) = head_root {
+                let _ = self.page(&root).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let read = run_ordered(
+            pending
+                .iter()
+                .map(|id| async move {
+                    if *id == mine.id {
+                        return Ok::<_, anyhow::Error>(Some(mine.clone()));
+                    }
+                    Ok(match self.store.get_opt(&intent_key(branch, id)).await? {
+                        Some((b, _)) => serde_json::from_slice::<Intent>(&b).ok(),
+                        None => None,
+                    })
+                })
+                .collect(),
+            PARALLELISM,
+        );
+        let (intents, ()): (Vec<Option<Intent>>, ()) = tokio::try_join!(read, warm)?;
+        let mut parent = head.commit;
+        let mut prepared = vec![];
+        let mut batch: Vec<Landed> = vec![];
+        for intent in intents.into_iter().flatten() {
+            let delta = intent.delta()?;
+            // An intent whose paths changed since its base is skipped: its writer sees the
+            // conflict itself.
+            let base_root = self.root_of(intent.base).await?;
+            if let Err(e) = self.check_disjoint(branch, base_root, Some(parent), &delta).await {
+                if e.downcast_ref::<ConflictError>().is_none() {
+                    return Err(e);
+                }
+                combine_trace(|| format!("skip {} (conflict) base {:?} parent {}", intent.id, intent.base.map(|h| h.short()), parent.short()));
+                continue;
+            }
+            let mut fields = intent.fields.to_fields();
+            fields.meta.insert("pail.intent".into(), intent.id.clone());
+            let p = self.prepare_commit(Some(parent), &delta, &fields).await?;
+            parent = p.commit;
+            batch.push(Landed { intent: intent.id.clone(), commit: p.commit });
+            prepared.push(p);
+        }
+        combine_trace(|| format!("{} pending, batch {}, mine {}", pending.len(), batch.len(), batch.iter().any(|l| l.intent == mine.id)));
+        if prepared.is_empty() {
+            return Ok(None);
+        }
+        futures::future::try_join_all(prepared.iter().map(|p| self.store_commit(p, vec![]))).await?;
+        let mut recent = head.recent;
+        recent.extend(batch.iter().cloned());
+        if recent.len() > RECENT_MAX {
+            recent.drain(..recent.len() - RECENT_MAX);
+        }
+        match self.advance_ref(branch, Some(version), parent, recent.clone()).await {
+            Ok(Cas::Ok(v)) => {
+                // Landed: their intents are done (best effort; `recent` guards against repeats).
+                let keys: Vec<String> = batch.iter().map(|l| intent_key(branch, &l.intent)).collect();
+                let _ = futures::future::join_all(keys.iter().map(|k| self.store.delete(k))).await;
+                Ok(Some((parent, v, recent)))
+            }
+            Ok(Cas::Conflict) => {
+                combine_trace(|| "lost the swap".into());
+                Ok(None)
+            }
+            Err(e) => match self.read_ref_value(branch).await? {
+                Some((now, v)) if now.commit == parent => Ok(Some((parent, v, now.recent))),
+                Some(_) => Ok(None),
+                None => Err(e),
+            },
+        }
+    }
+}
+
+fn combine_trace(msg: impl FnOnce() -> String) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("PAIL_TRACE_COMBINE").is_some()) {
+        eprintln!("combine: {}", msg());
+    }
+}
+
+/// How long the ref may stand still before a waiting writer stops trusting the designated
+/// combiner (gone, or crashed) and combines itself.
+const COMBINER_TAKEOVER: Duration = Duration::from_millis(1500);
+
+/// Direct publish attempts before a writer combines.
+const DIRECT_ATTEMPTS: u32 = 2;
+/// How many landed intents a ref remembers.
+const RECENT_MAX: usize = 512;
+/// Intents older than this are ignored: their writers have given up (`COMMIT_DEADLINE`).
+const INTENT_MAX_AGE: Duration = Duration::from_secs(600);
+
+/// Intent ids under a branch's prefix that are neither landed (in `recent`) nor abandoned,
+/// oldest first.
+fn pending_intents(recent: &[Landed], listed: Vec<(String, u64)>) -> Vec<String> {
+    let landed: HashSet<&str> = recent.iter().map(|l| l.intent.as_str()).collect();
+    let now = intent_now();
+    let mut pending: Vec<String> = listed
+        .into_iter()
+        .filter_map(|(k, _)| k.rsplit('/').next().and_then(|f| f.strip_suffix(".json")).map(str::to_string))
+        .filter(|id| !landed.contains(id.as_str()) && intent_age(id, now).is_some_and(|age| age < INTENT_MAX_AGE))
+        .collect();
+    pending.sort();
+    pending
+}
+
+fn intent_prefix(branch: &str) -> String {
+    format!("intents/{branch}/")
+}
+
+fn intent_key(branch: &str, id: &str) -> String {
+    format!("intents/{branch}/{id}.json")
+}
+
+fn intent_now() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
+/// Sortable by creation time: `<nanoseconds since the epoch, 20 digits>-<random>`.
+fn intent_id() -> String {
+    format!("{:020}-{:08x}", intent_now(), rand::random::<u32>())
+}
+
+fn intent_age(id: &str, now: u128) -> Option<Duration> {
+    let nanos: u128 = id.split('-').next()?.parse().ok()?;
+    Some(Duration::from_nanos(now.saturating_sub(nanos).min(u64::MAX as u128) as u64))
+}
+
+/// A commit waiting to be landed by whichever writer wins next.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Intent {
+    id: String,
+    base: Option<Hash>,
+    /// The new entries, as an encoded leaf page (hex).
+    puts: String,
+    deletes: Vec<String>,
+    fields: IntentFields,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct IntentFields {
+    author: String,
+    author_date: String,
+    committer: String,
+    committer_date: String,
+    message: String,
+    meta: BTreeMap<String, String>,
+}
+
+impl IntentFields {
+    fn to_fields(&self) -> CommitFields {
+        CommitFields {
+            author: self.author.clone(),
+            author_date: self.author_date.clone(),
+            committer: self.committer.clone(),
+            committer_date: self.committer_date.clone(),
+            message: self.message.clone(),
+            meta: self.meta.clone(),
+        }
+    }
+}
+
+impl Intent {
+    fn new(id: &str, base: Option<Hash>, delta: &Delta, f: &CommitFields) -> Intent {
+        let puts: Vec<Entry> = delta.values().flatten().cloned().collect();
+        let deletes = delta.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| k.clone()).collect();
+        Intent {
+            id: id.to_string(),
+            base,
+            puts: hex::encode(crate::manifest::encode_page(&Page::Leaf(puts))),
+            deletes,
+            fields: IntentFields {
+                author: f.author.clone(),
+                author_date: f.author_date.clone(),
+                committer: f.committer.clone(),
+                committer_date: f.committer_date.clone(),
+                message: f.message.clone(),
+                meta: f.meta.clone(),
+            },
+        }
+    }
+
+    fn delta(&self) -> Result<Delta> {
+        let Page::Leaf(puts) = crate::manifest::decode_page(&hex::decode(&self.puts)?)? else {
+            bail!("intent {} has no entry list", self.id);
+        };
+        let mut delta: Delta = puts.into_iter().map(|e| (e.path.clone(), Some(e))).collect();
+        for p in &self.deletes {
+            delta.insert(p.clone(), None);
+        }
+        Ok(delta)
     }
 }
 

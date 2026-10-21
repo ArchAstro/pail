@@ -941,3 +941,44 @@ fn proxy_store_with_a_credential_helper() {
     assert!(ok(out).contains("main @"));
     assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2, "asked once more after the 401");
 }
+
+/// Concurrent writers through the CLI, each in its own working copy, committing in a loop on
+/// one branch: every commit any of them reported is on main (none lost to a swap from a
+/// remembered head, none landed twice), whether it landed directly or in a combined batch.
+#[test]
+fn concurrent_cli_writers_lose_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    let (writers, per) = (8usize, 10usize);
+    for w in 0..writers {
+        pail(&t, &["clone", &store, &format!("w{w}")]);
+    }
+    let handles: Vec<_> = (0..writers)
+        .map(|w| {
+            let dir = t.join(format!("w{w}"));
+            std::thread::spawn(move || {
+                for i in 0..per {
+                    write(&dir.join(format!("w{w}/f{i}.txt")), &format!("{w}-{i}"));
+                    pail(&dir, &["add", "-A"]);
+                    pail(&dir, &["commit", "-m", &format!("w{w} c{i}")]);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    pail(&t, &["clone", &store, "check"]);
+    let log = pail(&t.join("check"), &["log", "--format=%s"]);
+    let subjects: Vec<&str> = log.lines().collect();
+    for w in 0..writers {
+        for i in 0..per {
+            let want = format!("w{w} c{i}");
+            assert_eq!(subjects.iter().filter(|s| **s == want).count(), 1, "{want} must be on main exactly once");
+        }
+    }
+    let files = pail(&t.join("check"), &["ls", "-r"]);
+    assert_eq!(files.lines().filter(|l| l.contains("/f")).count(), writers * per);
+}

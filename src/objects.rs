@@ -170,8 +170,25 @@ impl Commit {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RefValue {
+    pub commit: Hash,
+    /// The commit's manifest root and generation, so a writer can build on the head without
+    /// fetching its commit object first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<Hash>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// Intents landed most recently on this ref (newest last), so writers combining pending
+    /// intents never land one twice. Every writer of the ref carries it forward.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent: Vec<Landed>,
+}
+
+/// An intent and the commit it landed as.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Landed {
+    pub intent: String,
     pub commit: Hash,
 }
 

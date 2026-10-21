@@ -34,6 +34,30 @@ pub const DOT: &str = crate::local::DOT;
 pub struct Head {
     pub branch: String,
     pub base: Option<Hash>,
+    /// The branch ref as last seen at `base` (its version and recent landings), so the next
+    /// commit can swap without reading the ref first. Stale is harmless: the swap just fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known: Option<KnownRef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KnownRef {
+    pub version: crate::store::Version,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent: Vec<crate::objects::Landed>,
+}
+
+impl Head {
+    fn at(branch: &str, r: Option<(crate::objects::RefValue, crate::store::Version)>, at: Option<Hash>) -> Head {
+        match (r, at) {
+            (Some((r, version)), None) => Head {
+                branch: branch.to_string(),
+                base: Some(r.commit),
+                known: Some(KnownRef { version, recent: r.recent }),
+            },
+            (_, at) => Head { branch: branch.to_string(), base: at, known: None },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -509,17 +533,20 @@ impl Worktree {
             None => LocalRepo::create(&dot(&root), store, false)?,
         };
         let repo = local.repo()?;
-        let commit = match at {
-            Some(h) => h,
-            None => repo.read_ref(branch).await?.with_context(|| format!("branch {branch} not found"))?.0,
+        let head = match at {
+            Some(h) => Head::at(branch, None, Some(h)),
+            None => {
+                let r = repo.read_ref_value(branch).await?.with_context(|| format!("branch {branch} not found"))?;
+                Head::at(branch, Some(r), None)
+            }
         };
+        let commit = head.base.expect("set above");
         if co.blobs.is_none() {
             co.blobs = repo.blobs.clone();
         }
         let c = repo.commit_obj(&commit).await?;
         let entries = repo.entries(c.root).await?;
         co.materialize(&repo, &root, &entries).await?;
-        let head = Head { branch: branch.to_string(), base: Some(commit) };
         write_json(&dot(&root).join("HEAD.json"), &head)?;
         local.attach(&root)?;
         let wt = Worktree { root, repo, local, head, stage: BTreeMap::new() };
@@ -843,9 +870,11 @@ impl Worktree {
                 }
             }
         }
-        // Content already in the store (moves, reverts to the base version) is reused.
+        // Content already in the store (moves, reverts to the base version) is reused. The
+        // files' objects are stored with the commit's own, in one wave.
         let reuse = base.values().map(|e| (e.hash, e.loc.clone())).collect();
-        for e in self.repo.write_files(&inputs, &reuse).await? {
+        let (entries, uploads) = self.repo.prepare_files(&inputs, &reuse);
+        for e in entries {
             delta.insert(e.path.clone(), Some(e));
         }
         let cfg = crate::config::Config::load(Some(&self.local.dir));
@@ -859,7 +888,7 @@ impl Worktree {
             if !no_verify && hooks.find("pre-publish").is_some() { Some(&pre_publish) } else { None };
         let out = self
             .repo
-            .commit_with(CommitRequest {
+            .commit_opts(CommitRequest {
                 branch: self.head.branch.clone(),
                 base: self.head.base,
                 delta,
@@ -869,12 +898,22 @@ impl Worktree {
                 committer_date: date,
                 message: message.clone(),
                 meta: BTreeMap::new(),
-            }, check)
+            }, crate::repo::CommitOptions {
+                check,
+                uploads,
+                known_head: match (&self.head.known, self.head.base) {
+                    (Some(k), Some(base)) => Some(crate::repo::KnownHead { commit: base, version: k.version.clone(), recent: k.recent.clone() }),
+                    _ => None,
+                },
+            })
             .await?;
         // The branch may have advanced under us (replayed commit). Bring in others' changes.
         let old_base = self.head.base;
         let landed_parent = self.repo.commit_obj(&out.commit).await?.parent;
         self.head.base = Some(out.commit);
+        // The version belongs to the ref at `out.head`; it is only a known head for this base
+        // when the commit is the tip (not the middle of a combined batch).
+        self.head.known = (out.head == out.commit).then(|| KnownRef { version: out.version.clone(), recent: out.recent.clone() });
         self.save_head()?;
         let staged: Vec<String> = self.stage.keys().cloned().collect();
         // The committed snapshots are now shared content: hand them to the blob store so other
@@ -928,13 +967,14 @@ impl Worktree {
         if !st.is_clean() {
             bail!("working copy has changes; commit them or `pail restore` first");
         }
-        let (target, _) = self.repo.read_ref(branch).await?.with_context(|| format!("branch {branch} not found"))?;
+        let r = self.repo.read_ref_value(branch).await?.with_context(|| format!("branch {branch} not found"))?;
+        let target = r.0.commit;
         let from = self.repo.root_of(self.head.base).await?;
         let to = self.repo.root_of(Some(target)).await?;
         let changes = self.repo.diff(from, to).await?;
         self.apply_changes(&changes).await?;
         let prev = self.head.base;
-        self.head = Head { branch: branch.to_string(), base: Some(target) };
+        self.head = Head::at(branch, Some(r), None);
         self.save_head()?;
         self.set_orig_head(prev)?;
         self.hooks().notify("post-checkout", &[&hooks::id(prev), &target.hex(), "1"], None);
@@ -943,12 +983,15 @@ impl Worktree {
 
     /// Fast-forward the base to the branch head, updating untouched files on disk.
     pub async fn sync(&mut self) -> Result<usize> {
-        let (head, _) = self
+        let r = self
             .repo
-            .read_ref(&self.head.branch)
+            .read_ref_value(&self.head.branch)
             .await?
             .with_context(|| format!("branch {} not found", self.head.branch))?;
+        let head = r.0.commit;
         if Some(head) == self.head.base {
+            self.head = Head::at(&self.head.branch.clone(), Some(r), None);
+            self.save_head()?;
             return Ok(0);
         }
         let st = self.status().await?;
@@ -964,6 +1007,7 @@ impl Worktree {
         self.apply_changes(&changes).await?;
         let old = self.head.base;
         self.head.base = Some(head);
+        self.head.known = Some(KnownRef { version: r.1, recent: r.0.recent });
         self.save_head()?;
         self.set_orig_head(old)?;
         self.hooks().notify("post-sync", &[&hooks::id(old), &head.hex()], None);

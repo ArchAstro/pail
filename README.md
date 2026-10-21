@@ -428,31 +428,68 @@ pail-bench --git-dir ~/.cache/pail-mirror/firstlanding.git --store s3://pail/ben
   --work /tmp/bench [--only small,wide,writers,hot,stacks,bigfile,reads,wc] [--no-git] [--out r.json]
 ```
 
-Results (2026-10-20, M-series laptop under load; pail on the local S3 emulator, Git local):
+### Against github.com
 
-| Scenario | pail (S3) | Git (local bare remote) |
+The comparison that matters: the same edits through each CLI (`git add/commit/push` to a
+private github.com repository, `pail add/commit` to a GCS bucket), N writers on one branch,
+20 commits each, from a residential client in Phoenix (RTT ~90 ms to github.com, ~35 ms to
+storage.googleapis.com), 2026-10-20.
+
+| Writers, one branch | git → github.com | pail → GCS |
 |---|---|---|
-| Small commit, library, p50 | 27 ms | n/a |
-| Small commit, CLI working copy (add + commit + publish), p50 | 340 ms | 2,587 ms (add 906, commit 203, push 1,465) |
+| 1 | 0.64–0.74 commits/s, p50 1.4 s | **2.0 commits/s, p50 0.45 s** |
+| 4 | 0.65–0.66 | **2.1** |
+| 16 | 0.68–0.70 (7.9 pushes per commit, p95 44 s) | **3.6, p95 7.4 s, 0 failed** |
+
+Every pail commit reported as landed was checked on main afterwards (exactly once each). The
+library path, without a process per commit, reaches 7.1 commits/s with 16 writers. Both are
+dominated by round trips to distant regions; from a machine in the bucket's region they are
+tens of milliseconds each.
+
+How a commit gets there:
+
+```
+uncontended   [pages ∥ commit object ∥ packs] ──▶ CAS ref        two round trips
+              (the working copy remembers the ref's version: no read first)
+contended     after two lost swaps, the writer PUTs an intent (its delta) under
+              intents/<branch>/; the writer of the oldest pending intent combines:
+              GET ref ∥ LIST intents → one commit per intent, in order, on the head
+              → [all objects] → ONE CAS lands the batch, recording the intents in the
+              ref's `recent` list (so none lands twice); waiting writers watch the ref,
+              and take over if it stands still for 1.5 s
+```
+
+1. **Linear history, nothing squashed:** each intent is its own commit; an intent whose
+   paths changed since its base is skipped and its writer gets the conflict (exit 4).
+2. **No starvation:** a direct attempt lists pending intents while its objects upload, and
+   joins the batch instead of racing past it. (Before this, 16 writers lost 5 of 320
+   commits to a 60 s give-up.)
+3. **Remembered heads are exact:** a commit that landed inside a batch does not become a
+   known head (the ref's version belongs to the batch's tip); a regression test drives
+   concurrent CLI writers and checks every reported commit is on main.
+
+### Local measurements
+
+Earlier results (2026-10-20, laptop under load; pail on the local S3 emulator, Git to a
+**local** bare remote, so the Git push cost here is far below github.com's):
+
+| Scenario | pail (S3 emulator) | Git (local bare remote) |
+|---|---|---|
 | Edit 2,000 files, one commit | 0.25 s, 53 PUTs | 4.2 s |
 | Add 5,000 files | 0.27 s | 5.7 s |
 | Delete 3,200-file dir / rename 2,100-file dir | 0.04 s / 0.05 s | 1.1 s / 0.8 s |
-| 1 / 4 / 16 writers, one branch (commits/s) | 37 / 11 / 7 | 1.6 / 0.6 / 0.1 |
-| 16 writers: attempts per commit, p95 | 5.1, 12 s | 11.4 pushes, 596 s |
 | Land 40 stacks while main moves, p50 | 118 ms | n/a |
-| 8 stacks landing at once, p50 | 2.2 s (4.25 attempts) | n/a |
 | Change 1 MB of a 256 MB file | 3.8 MB uploaded | n/a |
 | `log` 240 commits / `log -- path` | 20 ms / 30 ms | n/a |
 | Clone a working copy (29k files) | 22 s | 9.8 s (`--shared`) |
 
-What the numbers say:
+Notes:
 
-1. Writes are cheap and proportional to the change: a few pages per commit, content reused on rename.
-2. One branch is one CAS slot. Every commit to it wins a CAS round trip, so contention, not
-   bandwidth, is the ceiling (16 writers: 5 attempts per commit, each rewriting its pages).
-   Batching writers into one CAS (a group commit, the merge queue in the spec) is the fix.
-3. A clone writes each file twice (into the shared content cache, then a CoW clone into the
+1. Writes are proportional to the change: a few pages per commit, content reused on rename.
+2. A clone writes each file twice (into the shared content cache, then a CoW clone into the
    worktree). That is the price of worktrees costing ~0 extra disk.
+3. `PAIL_TRACE_STORE=1` prints every store request with its timing; `PAIL_TRACE_COMBINE=1`
+   prints each combining round.
 
 ## Tests
 

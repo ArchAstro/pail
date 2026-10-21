@@ -383,3 +383,85 @@ async fn publish_check_runs_once_before_the_cas() {
     let files: Vec<String> = repo.entries(repo.commit_obj(&out.commit).await.unwrap().root).await.unwrap().into_iter().map(|e| e.path).collect();
     assert_eq!(files, ["a.txt", "b.txt", "c.txt"]);
 }
+
+/// Many writers on one branch: every commit lands (no give-ups, nothing lost or landed twice),
+/// history stays linear, and contended writers are landed in batches by whoever wins the swap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn contended_writers_all_land_by_combining() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", dir.path().join("bucket").display());
+    let repo = Arc::new(Repo::with_store(Store::open(&url).unwrap(), None));
+    let d0 = put_files(&repo, &[("seed.txt", "s")]).await;
+    let c0 = repo.commit(req("main", None, d0, "init")).await.unwrap().commit;
+    let (writers, per) = (24usize, 15usize);
+    let mut tasks = vec![];
+    for w in 0..writers {
+        let repo = repo.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut head = Some(c0);
+            let mut combined = 0;
+            for i in 0..per {
+                let d = put_files(&repo, &[(&format!("w{w:02}/f{i:02}.txt"), &format!("{w}-{i}"))]).await;
+                let out = repo.commit(req("main", head, d, &format!("w{w}-{i}"))).await.unwrap();
+                if out.attempts > 2 {
+                    combined += 1;
+                }
+                head = Some(out.commit);
+            }
+            combined
+        }));
+    }
+    let mut combined = 0;
+    for t in tasks {
+        combined += t.await.unwrap();
+    }
+    // Every change is on main exactly once, in a linear history.
+    let (tip, _) = repo.read_ref("main").await.unwrap().unwrap();
+    let mut messages = vec![];
+    let mut cur = Some(tip);
+    while let Some(h) = cur {
+        let c = repo.commit_obj(&h).await.unwrap();
+        messages.push(c.message.clone());
+        cur = c.parent;
+    }
+    assert_eq!(messages.len(), writers * per + 1, "one commit per change, plus init");
+    let unique: std::collections::BTreeSet<&String> = messages.iter().collect();
+    assert_eq!(unique.len(), messages.len(), "no change landed twice");
+    let files = repo.entries(repo.commit_obj(&tip).await.unwrap().root).await.unwrap();
+    assert_eq!(files.len(), writers * per + 1);
+    // Pending intents are cleaned up once landed.
+    assert!(repo.store.list("intents/").await.unwrap().is_empty(), "intents left behind");
+    eprintln!("{combined} of {} commits landed by combining", writers * per);
+}
+
+/// A combined intent whose paths another writer changed is not landed; its writer gets the
+/// conflict and withdraws the intent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn combining_never_lands_a_conflicting_intent() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", dir.path().join("bucket").display());
+    let repo = Arc::new(Repo::with_store(Store::open(&url).unwrap(), None));
+    let d0 = put_files(&repo, &[("shared.txt", "seed")]).await;
+    let c0 = repo.commit(req("main", None, d0, "init")).await.unwrap().commit;
+    // Everyone edits the same file from the same base (each to new content: an edit that
+    // leaves the file unchanged is a no-op and conflicts with nothing): exactly one may win.
+    let mut tasks = vec![];
+    for w in 0..12 {
+        let repo = repo.clone();
+        tasks.push(tokio::spawn(async move {
+            let d = put_files(&repo, &[("shared.txt", &format!("{w}"))]).await;
+            repo.commit(req("main", Some(c0), d, &format!("w{w}"))).await
+        }));
+    }
+    let mut ok = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(_) => ok += 1,
+            Err(e) => assert!(e.downcast_ref::<ConflictError>().is_some(), "{e:#}"),
+        }
+    }
+    assert_eq!(ok, 1);
+    let (tip, _) = repo.read_ref("main").await.unwrap().unwrap();
+    assert_eq!(repo.commit_obj(&tip).await.unwrap().generation, 1);
+    assert!(repo.store.list("intents/").await.unwrap().is_empty(), "intents left behind");
+}

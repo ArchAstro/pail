@@ -171,6 +171,7 @@ impl Store {
 
     /// Read an object with its version token, or `None` if it does not exist.
     pub async fn get_opt(&self, key: &str) -> Result<Option<(Bytes, Version)>> {
+        let _trace = Trace::start("get", key);
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         if let Some(root) = &self.local_root {
             let p = root.join(key);
@@ -205,6 +206,7 @@ impl Store {
 
     /// Fetch several byte ranges of one object; adjacent ranges are coalesced into one request.
     pub async fn get_ranges(&self, key: &str, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
+        let _trace = Trace::start("ranges", key);
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let path = self.path(key);
         let out = self.retry(|| self.inner.get_ranges(&path, ranges)).await.with_context(|| format!("range read {key}"))?;
@@ -215,6 +217,7 @@ impl Store {
 
     /// One byte range of an object with the object's total size, or None if it doesn't exist.
     pub async fn read_range(&self, key: &str, range: Range<u64>) -> Result<Option<(Bytes, u64)>> {
+        let _trace = Trace::start("range", key);
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let path = self.path(key);
         let got = self.retry(|| async {
@@ -239,6 +242,7 @@ impl Store {
     /// Write an immutable object. Returns false if it already existed (which is fine:
     /// content addressing means the existing bytes are identical).
     pub async fn put_new(&self, key: &str, data: Bytes) -> Result<bool> {
+        let _trace = Trace::start("put_new", key);
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
         let path = self.path(key);
@@ -260,6 +264,7 @@ impl Store {
 
     /// Unconditional write (used for best-effort side records like intents and reflogs).
     pub async fn put(&self, key: &str, data: Bytes) -> Result<()> {
+        let _trace = Trace::start("put", key);
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
         let path = self.path(key);
@@ -269,6 +274,7 @@ impl Store {
 
     /// Compare-and-swap. `expected = None` means "create only if absent".
     pub async fn cas(&self, key: &str, data: Bytes, expected: Option<&Version>) -> Result<Cas> {
+        let _trace = Trace::start("cas", key);
         self.stats.puts.fetch_add(1, Ordering::Relaxed);
         self.stats.cas.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_up.fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -298,6 +304,7 @@ impl Store {
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
+        let _trace = Trace::start("delete", key);
         if let Some(root) = &self.local_root {
             let _ = std::fs::remove_file(root.join(key));
             return Ok(());
@@ -316,6 +323,7 @@ impl Store {
     /// List keys under a prefix with size and last-modified time (unix seconds).
     /// An object's size, or None if it doesn't exist.
     pub async fn size(&self, key: &str) -> Result<Option<u64>> {
+        let _trace = Trace::start("head", key);
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let p = self.path(key);
         match self.retry(|| self.inner.head(&p)).await {
@@ -326,6 +334,7 @@ impl Store {
     }
 
     pub async fn list_meta(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
+        let _trace = Trace::start("list", prefix);
         let p = self.path(prefix.trim_end_matches('/'));
         let strip = if self.prefix.is_empty() { 0 } else { self.prefix.len() + 1 };
         let items: Vec<_> = match self.retry(|| self.inner.list(Some(&p)).try_collect()).await {
@@ -428,5 +437,39 @@ where
                 tokio::time::sleep(std::time::Duration::from_millis(ms / 2 + rand::random::<u64>() % (ms / 2))).await;
             }
         }
+    }
+}
+
+/// `PAIL_TRACE_STORE=1`: one stderr line per store request (start offset, duration), to see
+/// which requests sit on a command's critical path.
+struct Trace {
+    op: &'static str,
+    key: String,
+    start: std::time::Instant,
+}
+
+fn trace_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PAIL_TRACE_STORE").is_some())
+}
+
+fn process_start() -> std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(std::time::Instant::now)
+}
+
+impl Trace {
+    fn start(op: &'static str, key: &str) -> Option<Trace> {
+        trace_enabled().then(|| {
+            process_start();
+            Trace { op, key: key.to_string(), start: std::time::Instant::now() }
+        })
+    }
+}
+
+impl Drop for Trace {
+    fn drop(&mut self) {
+        let at = self.start.duration_since(process_start()).as_millis();
+        eprintln!("store {at:>6}ms +{:>4}ms {:8} {}", self.start.elapsed().as_millis(), self.op, self.key);
     }
 }
