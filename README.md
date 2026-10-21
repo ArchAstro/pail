@@ -541,3 +541,7 @@ cargo test --release
 PAIL_TEST_STORES="s3://pail/test" AWS_ENDPOINT=http://localhost:19000 AWS_ALLOW_HTTP=true \
   AWS_ACCESS_KEY_ID=x AWS_SECRET_ACCESS_KEY=x AWS_REGION=us-east-1 cargo test --release --test backends
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -32,7 +32,7 @@ jobs:
       - name: Package
         run: |
           d=pail-${{ matrix.platform }}
-          mkdir $d && cp target/${{ matrix.target }}/release/pail README.md $d/
+          mkdir $d && cp target/${{ matrix.target }}/release/pail README.md LICENSE $d/
           tar czf $d.tar.gz $d
       - uses: actions/upload-artifact@v4
         with:

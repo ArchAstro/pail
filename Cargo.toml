@@ -1,6 +1,9 @@
 [package]
 name = "pail"
 version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/ArchAstro/pail"
+homepage = "https://pail.build"
 edition = "2024"
 description = "A simple, serverless version control system stored in S3/GCS"
 
