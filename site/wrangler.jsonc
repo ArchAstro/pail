@@ -1,0 +1,16 @@
+// pail.build: the site as a Cloudflare Worker serving static assets (no code).
+// Build first (`./build.sh` writes dist/), then `wrangler deploy` from this directory.
+{
+  "name": "pail-build-site",
+  "account_id": "62091491bf3eb0db18a5ad1ddb83f964",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  },
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "pail.build", "custom_domain": true },
+    { "pattern": "www.pail.build", "custom_domain": true }
+  ]
+}
