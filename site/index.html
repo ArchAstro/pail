@@ -1,0 +1,373 @@
+<title>pail</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="pail is version control that lives in your bucket: no server, one write per commit, Git-readable.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a single left-aligned column of sections on galvanized steel; the hero pairs the
+   thesis with a live bucket listing where a commit lands. */
+:root {
+  --steel: #e9eef0;      /* page: galvanized sheet */
+  --sheet: #f7f9fa;      /* raised surfaces */
+  --ink: #12181b;
+  --muted: #5a6870;
+  --rule: #cdd6da;
+  --water: #0a6a86;      /* accent */
+  --water-soft: #d6eaf0;
+  --amber: #b97806;      /* the moment a ref swaps */
+  --amber-soft: #fbedd0;
+  --code-bg: #10171a;
+  --code-fg: #d9e4e8;
+  --code-dim: #7d9099;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --steel: #0e1417; --sheet: #151d21; --ink: #e5ecef; --muted: #93a5ad; --rule: #263238;
+    --water: #55b8d4; --water-soft: #13313b; --amber: #f0b43c; --amber-soft: #3a2c10;
+    --code-bg: #0a0f11; --code-fg: #d9e4e8; --code-dim: #6d818a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --steel: #0e1417; --sheet: #151d21; --ink: #e5ecef; --muted: #93a5ad; --rule: #263238;
+  --water: #55b8d4; --water-soft: #13313b; --amber: #f0b43c; --amber-soft: #3a2c10;
+  --code-bg: #0a0f11; --code-fg: #d9e4e8; --code-dim: #6d818a; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--steel); color: var(--ink); font: 400 17px/1.6 var(--body);
+  font-variation-settings: "wdth" 100;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+a { color: var(--water); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--water); outline-offset: 3px; border-radius: 3px; }
+.wrap { max-width: 1120px; margin: 0 auto; }
+code, .mono { font-family: var(--mono); font-size: 0.88em; }
+p code, li code, td code { background: var(--water-soft); padding: 1px 5px; border-radius: 4px; }
+
+/* top bar */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 22px 0; }
+.mark { display: flex; align-items: baseline; gap: 10px; font: 800 26px/1 var(--display); font-variation-settings: "wdth" 125; letter-spacing: -0.02em; color: var(--ink); text-decoration: none; }
+.mark small { font: 500 13px/1 var(--mono); color: var(--muted); letter-spacing: 0; }
+.bar nav { display: flex; gap: 20px; flex-wrap: wrap; font-size: 15px; }
+.bar nav a { color: var(--muted); text-decoration: none; }
+.bar nav a:hover { color: var(--ink); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 48px; align-items: center; padding-block: 64px 72px; }
+.hero h1 {
+  font: 800 clamp(40px, 6.2vw, 76px)/0.98 var(--display); font-variation-settings: "wdth" 118;
+  letter-spacing: -0.03em; margin: 0 0 22px; text-wrap: balance;
+}
+.lede { font-size: 20px; line-height: 1.55; color: var(--muted); max-width: 34em; margin: 0 0 28px; }
+.lede strong { color: var(--ink); font-weight: 600; }
+.install { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cmd { display: inline-flex; align-items: center; gap: 12px; background: var(--code-bg); color: var(--code-fg); font: 500 15px/1 var(--mono); padding: 14px 16px; border-radius: 8px; min-width: 0; max-width: 100%; overflow-x: auto; }
+.cmd span { color: var(--code-dim); }
+.btn { font: 600 14px/1 var(--body); border: 1px solid var(--rule); background: var(--sheet); color: var(--ink); padding: 12px 14px; border-radius: 8px; cursor: pointer; }
+.btn:hover { border-color: var(--muted); }
+
+/* the bucket */
+.bucket { background: var(--code-bg); color: var(--code-fg); border: 1px solid var(--rule); border-radius: 14px; padding: 20px 20px 18px; font: 13.5px/1.75 var(--mono); min-width: 0; box-shadow: 0 30px 60px -30px rgba(10, 30, 40, 0.45); }
+.bucket .head { display: flex; justify-content: space-between; gap: 12px; color: var(--code-dim); font-size: 12.5px; margin-bottom: 10px; flex-wrap: wrap; }
+.bucket .head b { color: var(--code-fg); font-weight: 600; }
+.rows { overflow-x: auto; }
+.row { display: grid; grid-template-columns: 1.6em minmax(0, 1fr) auto; gap: 10px; padding: 1px 8px; border-radius: 5px; white-space: nowrap; transition: background 400ms, color 400ms; }
+.row .k { overflow: hidden; text-overflow: ellipsis; }
+.row .t { color: var(--code-dim); }
+.row .i { color: var(--code-dim); }
+.row.dir .k { color: var(--code-dim); }
+.row.new { background: rgba(85, 184, 212, 0.16); }
+.row.new .i { color: #55b8d4; }
+.row.ref { color: #f3d58c; }
+.row.swap { background: rgba(240, 180, 60, 0.22); }
+.row.swap .i { color: #f0b43c; }
+.bucket .foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #22313a; color: var(--code-dim); font-size: 12.5px; flex-wrap: wrap; }
+.bucket .foot output { color: #f3d58c; }
+@media (prefers-reduced-motion: reduce) { .row { transition: none; } }
+
+/* sections */
+section { padding-block: 72px; border-top: 1px solid var(--rule); }
+.eyebrow { font: 600 13px/1 var(--mono); color: var(--water); letter-spacing: 0.02em; margin: 0 0 14px; }
+h2 { font: 800 clamp(30px, 4vw, 46px)/1.04 var(--display); font-variation-settings: "wdth" 112; letter-spacing: -0.025em; margin: 0 0 18px; max-width: 18em; text-wrap: balance; }
+h3 { font: 700 20px/1.25 var(--display); font-variation-settings: "wdth" 105; margin: 0 0 8px; }
+.prose { max-width: 40em; color: var(--muted); }
+.prose p { margin: 0 0 14px; }
+.prose strong { color: var(--ink); font-weight: 600; }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: start; margin-top: 36px; }
+.split > * { min-width: 0; }
+
+pre.code { margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 12px; padding: 18px 20px; font: 13.5px/1.7 var(--mono); overflow-x: auto; }
+pre.code .c { color: var(--code-dim); }
+pre.code .k { color: #55b8d4; }
+pre.code .a { color: #f3d58c; }
+
+.layout { background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 20px; font: 14px/1.9 var(--mono); overflow-x: auto; }
+.layout .mut { color: var(--amber); font-weight: 600; }
+.layout .imm { color: var(--water); }
+.layout .note { color: var(--muted); font-family: var(--body); font-size: 13.5px; }
+
+.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 16px; counter-reset: s; }
+.steps li { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: start; }
+.steps li::before { counter-increment: s; content: counter(s); font: 700 15px/34px var(--mono); text-align: center; background: var(--water-soft); color: var(--water); border-radius: 50%; width: 34px; height: 34px; }
+.steps p { margin: 0; color: var(--muted); }
+.steps b { color: var(--ink); }
+
+/* numbers */
+.numbers { margin-top: 36px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 14px 16px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 600 13px/1.3 var(--mono); color: var(--muted); }
+td.p { font-weight: 700; color: var(--ink); }
+td .sub { display: block; font-size: 13.5px; color: var(--muted); font-weight: 400; }
+.bar-cell { display: grid; gap: 6px; min-width: 200px; }
+.meter { height: 8px; background: var(--rule); border-radius: 4px; overflow: hidden; }
+.meter i { display: block; height: 100%; border-radius: 4px; }
+.meter.g i { background: var(--muted); }
+.meter.p i { background: var(--water); }
+.fine { font-size: 14px; color: var(--muted); max-width: 46em; margin-top: 16px; }
+
+/* features */
+.features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px 40px; margin-top: 36px; }
+.features div { min-width: 0; }
+.features p { margin: 0; color: var(--muted); }
+
+/* conventions */
+.conv { margin-top: 28px; overflow-x: auto; }
+.conv table { min-width: 620px; }
+.conv td:first-child { font-family: var(--mono); font-size: 14px; white-space: nowrap; color: var(--water); }
+.flow { margin-top: 36px; }
+
+.cta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: center; }
+footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+@media (max-width: 900px) {
+  .hero, .split, .cta { grid-template-columns: minmax(0, 1fr); }
+  .features { grid-template-columns: minmax(0, 1fr); }
+  .hero { padding-block: 40px 56px; gap: 36px; }
+  section { padding-block: 56px; }
+}
+</style>
+
+<div class="wrap">
+  <header class="bar">
+    <a class="mark" href="#top">pail <small>pail.build</small></a>
+    <nav aria-label="Sections">
+      <a href="#how">How it works</a>
+      <a href="#numbers">Numbers</a>
+      <a href="#extend">Extend</a>
+      <a href="#start">Get started</a>
+    </nav>
+  </header>
+
+  <div class="hero" id="top">
+    <div>
+      <h1>Version control that lives in your bucket.</h1>
+      <p class="lede">A pail repository is a prefix in S3, GCS or any object store. <strong>There is no server and no push:</strong> a commit is new immutable objects plus one conditional write to its branch, so every clone sees it at once. History reads as Git, byte for byte.</p>
+      <div class="install">
+        <div class="cmd" id="cmd"><span>$</span> pail init gs://your-bucket/app</div>
+        <button class="btn" id="copy" type="button">Copy</button>
+      </div>
+    </div>
+
+    <figure class="bucket" aria-label="A pail repository as a bucket listing, with a commit landing">
+      <div class="head"><span>gs://acme-vcs/<b>app</b>/</span><span id="phase">committing "Fix the parser"</span></div>
+      <div class="rows" id="rows"></div>
+      <div class="foot"><span>mutable objects: 1 per branch</span><output id="note">refs/main → 7f3a…</output></div>
+    </figure>
+  </div>
+
+  <section id="how">
+    <p class="eyebrow">How it works</p>
+    <h2>Everything is immutable except the branch pointers.</h2>
+    <div class="prose">
+      <p>File contents go into packs, and the tree of every commit is a <strong>prolly-tree manifest</strong>: pages named by their BLAKE3 hash, so a commit that changes three files writes three or four small pages no matter how large the repository is. Commits, pages and packs are never modified, which makes them safe to cache anywhere.</p>
+      <p>The only object that ever changes is <code>refs/&lt;branch&gt;</code>, and it changes only by compare-and-swap, the conditional write every major object store now supports. That one write is the commit.</p>
+    </div>
+    <div class="split">
+      <div class="layout" role="img" aria-label="Repository layout in the bucket">
+        <div><span class="mut">refs/main</span> <span class="note">the branch: {commit, version} · moved only by CAS</span></div>
+        <div><span class="mut">refs/pr/hello</span></div>
+        <div><span class="imm">commits/7f3a…</span> <span class="note">parent, root, author, message, changed paths</span></div>
+        <div><span class="imm">pages/c684…</span> <span class="note">manifest: path → size, hash, location</span></div>
+        <div><span class="imm">packs/91be….pack</span> <span class="note">file contents, zstd</span></div>
+        <div><span class="imm">chunks/…</span> <span class="note">large files, content-defined chunks</span></div>
+        <div><span class="mut">intents/main/…</span> <span class="note">commits waiting to be combined</span></div>
+      </div>
+      <ol class="steps">
+        <li><p><b>Prepare locally.</b> Hash the changed files, rebuild the few pages on their path, encode the commit. Every object's name is known before anything is sent.</p></li>
+        <li><p><b>Upload in one wave.</b> Packs, pages and the commit object go up in parallel: one round trip.</p></li>
+        <li><p><b>Swap the branch.</b> One conditional write from the version this working copy last saw: the second round trip. If another writer got there first on different files, pail replays the commit on the new head automatically.</p></li>
+        <li><p><b>Under contention, combine.</b> A writer that loses publishes an intent; the oldest waiting writer lands every pending intent with one swap, each as its own commit, in order. On GCS, which allows about one write per second to an object, batches grow with the load instead of the swap rate.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="numbers">
+    <p class="eyebrow">Numbers</p>
+    <h2>Measured against git push to github.com.</h2>
+    <div class="prose">
+      <p>The same edits through each CLI, N writers on one branch, 20 commits each, from the same laptop: <code>git add/commit/push</code> to a private github.com repository, <code>pail add/commit</code> to a GCS bucket. After every pail run, each reported commit was checked on main.</p>
+    </div>
+    <div class="numbers">
+      <table>
+        <thead><tr><th>Writers on one branch</th><th>git → github.com</th><th>pail → GCS</th><th>Commits per second</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>0.7 /s<span class="sub">1.4 s per commit</span></td><td class="p">2.0 /s<span class="sub">0.45 s per commit</span></td>
+            <td><div class="bar-cell"><div class="meter g"><i style="width:19%"></i></div><div class="meter p"><i style="width:56%"></i></div></div></td></tr>
+          <tr><td>4</td><td>0.65 /s</td><td class="p">2.1 /s</td>
+            <td><div class="bar-cell"><div class="meter g"><i style="width:18%"></i></div><div class="meter p"><i style="width:58%"></i></div></div></td></tr>
+          <tr><td>16</td><td>0.7 /s<span class="sub">7.9 pushes per commit</span></td><td class="p">3.6 /s<span class="sub">none lost</span></td>
+            <td><div class="bar-cell"><div class="meter g"><i style="width:19%"></i></div><div class="meter p"><i style="width:100%"></i></div></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fine">Residential client in Phoenix, about 90 ms from github.com and 35 ms from storage.googleapis.com, October 2026. Both systems are bound by round trips; from a machine in the bucket's region, each costs tens of milliseconds. Without a process per commit, pail's library reached 7.1 commits per second with 16 writers.</p>
+  </section>
+
+  <section id="agents">
+    <p class="eyebrow">Built for agent fleets</p>
+    <h2>Many writers, one history, no queue.</h2>
+    <div class="features">
+      <div><h3>Stacks land atomically</h3><p><code>pail land feature --stack</code> puts every commit of a branch onto main in one swap, fast-forward or replayed. Run it again after a failure; it is idempotent.</p></div>
+      <div><h3>Worktrees cost almost nothing</h3><p>Working copies are copy-on-write clones of one shared content cache, and ignored build output is cloned from the current copy, so a new worktree starts warm without doubling the disk.</p></div>
+      <div><h3>Git reads it</h3><p><code>pail log</code>, <code>show</code>, <code>cat-file</code> and <code>ls-tree</code> take Git's options and print Git's output. A live mirror proves every commit of a real monorepo byte for byte.</p></div>
+      <div><h3>Your bucket, your account</h3><p>Data never leaves your cloud. Credential providers mint short-lived tokens scoped to one repository, so people need no bucket keys of their own.</p></div>
+      <div><h3>Conflicts are explicit</h3><p>Disjoint changes replay on their own. When two writers change the same path, the later one gets exit code 4 and the path list, and syncs.</p></div>
+      <div><h3>Hooks where they belong</h3><p>pre-commit, commit-msg and pre-publish run before the swap; the pre-publish hook checks the exact commit that will land.</p></div>
+    </div>
+  </section>
+
+  <section id="extend">
+    <p class="eyebrow">Extend</p>
+    <h2>Features are programs that agree on names.</h2>
+    <div class="prose">
+      <p>Pull requests and CI need no server here. Every publish is a write to <code>refs/&lt;branch&gt;</code>, and object stores already announce writes. A tool subscribes to those notifications, reads what it needs, and records results as commits on a <code>_meta</code> branch, which makes every record atomic, versioned and conflict-checked.</p>
+    </div>
+    <div class="conv">
+      <table>
+        <thead><tr><th>Name</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>pr/*</td><td>Branches proposed for review.</td></tr>
+          <tr><td>_meta:prs/12.json</td><td>A pull request: title, head, base, author, state. Claimed once with <code>pail put --if-absent</code>.</td></tr>
+          <tr><td>_meta:prs/12/reviews/bob.json</td><td>A review: approve or request changes.</td></tr>
+          <tr><td>_meta:checks/&lt;commit&gt;/test.json</td><td>A check result for one commit, written by CI.</td></tr>
+          <tr><td>main:pail.ci.json</td><td>The checks a commit declares, and which are required to merge.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="split flow">
+      <pre class="code" aria-label="CI driven by bucket events"><span class="c"># wire the bucket's notifications once</span>
+<span class="k">gcloud</span> storage buckets notifications create gs://acme-vcs \
+  --topic=pail-refs --object-prefix=app/refs/
+
+<span class="c"># CI: follow ref events, build the exact commit,</span>
+<span class="c"># record each check on _meta</span>
+<span class="k">pail-ci</span> run --branch <span class="a">'pr/*'</span> \
+  --gcs-subscription projects/acme/subscriptions/pail-ci
+
+<span class="c"># under the hood: plain pail commands</span>
+<span class="k">pail</span> events --branch <span class="a">'pr/*'</span>
+<span class="k">pail</span> clone gs://acme-vcs/app src --at 126ebf48
+<span class="k">pail</span> put _meta --file checks/126ebf48/test.json=-</pre>
+      <pre class="code" aria-label="A pull request from open to merge"><span class="k">pail</span> switch -c pr/hello
+<span class="k">pail</span> commit -am <span class="a">"Say hello"</span>
+<span class="k">pail-pr</span> open pr/hello --title <span class="a">"Say hello"</span>
+<span class="c">opened PR 1: pr/hello → main</span>
+
+<span class="k">pail-pr</span> review 1 --approve       <span class="c"># as Bob</span>
+<span class="k">pail-pr</span> merge 1
+<span class="c">landed 1 commit(s) from pr/hello onto main</span>
+<span class="c">merged PR 1 into main @ 126ebf48d9dc</span></pre>
+    </div>
+    <p class="fine">Both extensions are short programs that only call the pail CLI. Measured on GCS, a ref event reached the subscriber 1.2 to 1.6 seconds after the commit started. Notifications are at-least-once and unordered, so <code>pail events</code> re-reads the ref and drops duplicates, and CI keys every result by commit.</p>
+  </section>
+
+  <section id="start">
+    <div class="cta">
+      <div>
+        <p class="eyebrow">Get started</p>
+        <h2>One bucket, one command.</h2>
+        <div class="prose"><p>Any S3, GCS or file:// location works. People without bucket credentials sign in through a credential provider, or reach the repository through a proxy.</p></div>
+      </div>
+      <pre class="code" aria-label="Getting started"><span class="k">pail</span> init gs://acme-vcs/app
+<span class="k">pail</span> clone gs://acme-vcs/app && cd app
+<span class="k">pail</span> add -A
+<span class="k">pail</span> commit -m <span class="a">"First commit"</span>   <span class="c"># published</span>
+<span class="k">pail</span> log --oneline</pre>
+    </div>
+  </section>
+
+  <footer>
+    <span>pail · version control that lives in your bucket</span>
+    <span>Built at ArchAstro</span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const rows = document.getElementById("rows");
+  const phase = document.getElementById("phase");
+  const note = document.getElementById("note");
+  const listing = [
+    { k: "commits/", dir: true },
+    { k: "  41c9…e2a0", t: "commit" },
+    { k: "  7f3a…91bd", t: "commit", fresh: 3 },
+    { k: "pages/", dir: true },
+    { k: "  0b72…d401", t: "page" },
+    { k: "  c684…3f19", t: "page", fresh: 2 },
+    { k: "  e115…aa07", t: "page", fresh: 2 },
+    { k: "packs/", dir: true },
+    { k: "  91be…4c55.pack", t: "1.2 MB" },
+    { k: "  d03a…77e1.pack", t: "18 KB", fresh: 1 },
+    { k: "refs/", dir: true },
+    { k: "  main", t: "→ 7f3a…", ref: true },
+    { k: "  pr/hello", t: "→ 41c9…", ref: true },
+  ];
+  const els = listing.map((r) => {
+    const d = document.createElement("div");
+    d.className = "row" + (r.dir ? " dir" : "") + (r.ref ? " ref" : "");
+    d.innerHTML = `<span class="i"></span><span class="k"></span><span class="t"></span>`;
+    d.querySelector(".k").textContent = r.k;
+    d.querySelector(".t").textContent = r.t || "";
+    rows.appendChild(d);
+    return d;
+  });
+  const main = els[listing.findIndex((r) => r.k.trim() === "main")];
+  const steps = [
+    { phase: 'committing "Fix the parser"', fresh: 0, swap: false },
+    { phase: "upload pack ∥ pages ∥ commit", fresh: 3, swap: false },
+    { phase: "CAS refs/main  41c9 → 7f3a", fresh: 3, swap: true },
+    { phase: "published: every clone sees 7f3a", fresh: 3, swap: "done" },
+  ];
+  function show(i) {
+    const s = steps[i];
+    phase.textContent = s.phase;
+    listing.forEach((r, j) => {
+      const on = r.fresh && r.fresh <= s.fresh;
+      els[j].classList.toggle("new", !!on && s.swap !== "done");
+      els[j].querySelector(".i").textContent = on ? "+" : "";
+    });
+    main.classList.toggle("swap", s.swap === true || s.swap === "done");
+    main.querySelector(".i").textContent = s.swap ? "⇄" : "";
+    main.querySelector(".t").textContent = s.swap ? "→ 7f3a…" : "→ 41c9…";
+    note.textContent = s.swap ? "refs/main → 7f3a… (1 write)" : "refs/main → 41c9…";
+  }
+  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let i = still ? 3 : 0;
+  show(i);
+  if (!still) setInterval(() => { i = (i + 1) % steps.length; show(i); }, 1700);
+
+  const btn = document.getElementById("copy");
+  btn.addEventListener("click", async () => {
+    const text = "pail init gs://your-bucket/app";
+    try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+    catch { const r = document.createRange(); r.selectNodeContents(document.getElementById("cmd")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); btn.textContent = "Selected"; }
+    setTimeout(() => (btn.textContent = "Copy"), 1600);
+  });
+})();
+</script>
