@@ -828,13 +828,7 @@ impl Repo {
                 );
             }
         }
-        let parent_generation = match parent {
-            Some(p) => match self.heads.lock().unwrap().get(&p).map(|k| k.1) {
-                Some(g) => Some(g),
-                None => None,
-            },
-            None => None,
-        };
+        let parent_generation = parent.and_then(|p| self.heads.lock().unwrap().get(&p).map(|k| k.1));
         let generation = match (parent, parent_generation) {
             (Some(_), Some(g)) => g + 1,
             (Some(p), None) => self.commit_meta(&p).await?.generation + 1,
