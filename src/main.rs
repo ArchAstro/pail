@@ -433,11 +433,12 @@ enum PolicyCmd {
 
 #[derive(Subcommand)]
 enum AuthCmd {
-    /// Installed credential providers (pail-credential-* extensions) and bundled ones.
+    /// Installed credential providers (pail-credential-* extensions) and where they came from.
     List,
-    /// Install a provider: a bundled one by name (gcloud, gcs-downscoped) or an executable.
+    /// Install a provider from its GitHub repository (like `gh extension install`) or a file.
     Install {
-        /// A bundled provider's name, or a path to an executable (pail-credential-<name>).
+        /// `gcloud` (ArchAstro/pail-credential-gcloud), `owner/pail-credential-<name>[@ref]`,
+        /// or a path to an executable.
         source: String,
         /// Install under this name (default: from the file name).
         #[arg(long)]
@@ -445,6 +446,13 @@ enum AuthCmd {
         /// Replace an installed provider of the same name.
         #[arg(long)]
         force: bool,
+    },
+    /// Update providers installed from GitHub to their latest release (pinned ones stay).
+    Upgrade {
+        /// A provider's name (default: with --all, every one).
+        name: Option<String>,
+        #[arg(long)]
+        all: bool,
     },
     /// Uninstall a provider from pail's extensions directory.
     Remove { name: String },
@@ -910,20 +918,22 @@ async fn run(cli: Cli) -> Result<()> {
             let installed = pail::creds::installed();
             for (name, exe) in &installed {
                 let what = pail::creds::description(exe).unwrap_or_default();
-                println!("{name:16} {what}\n{:16} {}", "", exe.display());
+                let from = match pail::extensions::installed_manifest(name) {
+                    Some(m) if m.source == "github" => format!(
+                        "{}@{}{}",
+                        m.repo.unwrap_or_default(),
+                        m.r#ref.unwrap_or_default(),
+                        if m.pinned { " (pinned)" } else { "" }
+                    ),
+                    Some(m) => format!("local: {}", m.path.unwrap_or_default()),
+                    None => exe.display().to_string(),
+                };
+                println!("{name:16} {what}\n{:16} {from}", "");
             }
             if installed.is_empty() {
                 println!("no credential providers installed (the ambient cloud SDK chain is used)");
-            }
-            let bundled: Vec<&str> = pail::creds::BUNDLED
-                .iter()
-                .map(|(n, _)| *n)
-                .filter(|n| !installed.iter().any(|(i, _)| i == n))
-                .collect();
-            if !bundled.is_empty() {
                 println!(
-                    "\nbundled, not installed: {}   (pail auth install <name>)",
-                    bundled.join(", ")
+                    "install one: pail auth install gcloud   (or owner/pail-credential-<name>, or a file)"
                 );
             }
         }
@@ -931,13 +941,16 @@ async fn run(cli: Cli) -> Result<()> {
             source,
             name,
             force,
-        }) => auth_install(&source, name, force)?,
+        }) => auth_install(&source, name, force).await?,
+        Cmd::Auth(AuthCmd::Upgrade { name, all }) => auth_upgrade(name, all).await?,
         Cmd::Auth(AuthCmd::Remove { name }) => {
-            let dir = pail::creds::extensions_dir()
-                .context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
-            let p = dir.join(format!("{}{name}", pail::creds::PREFIX));
-            std::fs::remove_file(&p)
-                .with_context(|| format!("{} is not installed in {}", name, dir.display()))?;
+            let p = pail::extensions::install_dir(&name)?;
+            if p.is_dir() {
+                std::fs::remove_dir_all(&p)?;
+            } else {
+                std::fs::remove_file(&p)
+                    .with_context(|| format!("{name} is not installed ({})", p.display()))?;
+            }
             println!("removed {}", p.display());
         }
         Cmd::Auth(AuthCmd::Use {
@@ -1994,24 +2007,11 @@ async fn auth_status(store: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn auth_install(source: &str, name: Option<String>, force: bool) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = pail::creds::extensions_dir()
-        .context("no extensions directory (set HOME or PAIL_EXTENSIONS_DIR)")?;
-    let (name, body) = match pail::creds::BUNDLED.iter().find(|(n, _)| *n == source) {
-        Some((n, body)) => (
-            name.unwrap_or_else(|| n.to_string()),
-            body.as_bytes().to_vec(),
-        ),
-        None => {
-            let p = std::path::Path::new(source);
-            let body = std::fs::read(p).with_context(|| {
-                let bundled: Vec<&str> = pail::creds::BUNDLED.iter().map(|(n, _)| *n).collect();
-                format!(
-                    "`{source}` is neither a file nor a bundled provider ({})",
-                    bundled.join(", ")
-                )
-            })?;
+async fn auth_install(source: &str, name: Option<String>, force: bool) -> Result<()> {
+    use pail::extensions::{Installed, Source};
+    let (name, body, m, describe) = match pail::extensions::parse_source(source)? {
+        Source::Local(p) => {
+            let body = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
             let file = p
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
@@ -2021,31 +2021,74 @@ fn auth_install(source: &str, name: Option<String>, force: bool) -> Result<()> {
                     .unwrap_or(&file)
                     .to_string()
             });
-            (n, body)
+            let path = std::fs::canonicalize(&p).unwrap_or(p).display().to_string();
+            let m = Installed {
+                name: n.clone(),
+                source: "local".into(),
+                repo: None,
+                r#ref: None,
+                commit: None,
+                pinned: true,
+                kind: "script".into(),
+                path: Some(path.clone()),
+                sha256: String::new(),
+                installed_at: 0,
+            };
+            (n, body, m, format!("from {path}"))
+        }
+        Source::GitHub { owner, repo, r#ref } => {
+            let f = pail::extensions::fetch(&owner, &repo, r#ref.as_deref()).await?;
+            let what = format!(
+                "from {}@{} ({}, {} {})",
+                f.manifest.repo.as_deref().unwrap_or(""),
+                f.manifest.r#ref.as_deref().unwrap_or(""),
+                &f.manifest.commit.as_deref().unwrap_or("")
+                    [..12.min(f.manifest.commit.as_deref().unwrap_or("").len())],
+                f.manifest.kind,
+                f.manifest.path.as_deref().unwrap_or("")
+            );
+            (name.unwrap_or(f.name), f.body, f.manifest, what)
         }
     };
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!("provider names are letters, digits, - and _ (got {name:?}); pass --name");
-    }
-    std::fs::create_dir_all(&dir)?;
-    let dest = dir.join(format!("{}{name}", pail::creds::PREFIX));
-    if dest.exists() && !force {
-        bail!(
-            "{name} is already installed at {} (--force replaces it)",
-            dest.display()
-        );
-    }
-    std::fs::write(&dest, body)?;
-    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-    println!("installed {name} at {}", dest.display());
-    if let Some(d) = pail::creds::description(&dest) {
+    let exe = pail::extensions::write_install(&name, &body, m, force)?;
+    println!("installed {name} {describe}");
+    println!("  {}", exe.display());
+    if let Some(d) = pail::creds::description(&exe) {
         println!("  {d}");
     }
     println!("use it: pail auth use {name} [--for <store-url>] [--global]");
+    Ok(())
+}
+
+async fn auth_upgrade(name: Option<String>, all: bool) -> Result<()> {
+    let names: Vec<String> = match (name, all) {
+        (Some(n), false) => vec![n],
+        (None, true) => pail::creds::installed()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect(),
+        _ => bail!("name a provider, or pass --all"),
+    };
+    for n in names {
+        let Some(m) = pail::extensions::installed_manifest(&n) else {
+            println!("{n:16} skipped: not installed by `pail auth install` from GitHub");
+            continue;
+        };
+        let (Some(repo), "github") = (m.repo.clone(), m.source.as_str()) else {
+            println!("{n:16} skipped: installed from a file");
+            continue;
+        };
+        let (owner, r) = repo.split_once('/').context("bad repo in manifest")?;
+        let want = m.pinned.then(|| m.r#ref.clone()).flatten();
+        let f = pail::extensions::fetch(owner, r, want.as_deref()).await?;
+        if f.manifest.commit == m.commit && pail::extensions::sha256_hex(&f.body) == m.sha256 {
+            println!("{n:16} up to date ({repo}@{})", m.r#ref.unwrap_or_default());
+            continue;
+        }
+        let to = f.manifest.r#ref.clone().unwrap_or_default();
+        pail::extensions::write_install(&n, &f.body, f.manifest, true)?;
+        println!("{n:16} {} -> {to}", m.r#ref.unwrap_or_default());
+    }
     Ok(())
 }
 

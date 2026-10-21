@@ -125,9 +125,10 @@ dev ──────── token ───────────▶ GCS: all
           http://metadata/computeMetadata/v1/instance/service-accounts/default/token | jq -r .access_token'
    ```
    The output is already the credential-provider format (`{"token","expires_at"}`).
-3. **Client** = a credential provider that calls the broker (see `extensions/pail-credential-*`):
+3. **Client** = a credential provider that calls the broker, in its own repository like
+   `ArchAstro/pail-credential-gcs-downscoped` (the reference: it does the same STS exchange):
    ```sh
-   pail auth install ./pail-credential-acme && pail auth use acme --for gs://acme-vcs
+   pail auth install acme/pail-credential-acme && pail auth use acme --for gs://acme-vcs
    ```
 4. **How the boundary encodes the policy** (`pail policy boundary --as …`):
    | Rule | Role | Condition |

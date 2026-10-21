@@ -345,15 +345,26 @@ pail ─▶ provider for ────┼ pail-credential-gcs-downscoped   gcloud
 ```
 
 ```sh
-pail auth list                               # installed providers, bundled ones
-pail auth install gcs-downscoped             # bundled; or a path: ./pail-credential-acme
+pail auth list                               # installed providers and their source
+pail auth install gcs-downscoped             # ArchAstro/pail-credential-gcs-downscoped
+pail auth install acme/pail-credential-sso@v1.2   # any GitHub repo; or a path: ./pail-credential-acme
+pail auth upgrade --all                      # newest releases; pinned installs stay
 pail auth use gcs-downscoped --for gs://acme-vcs --global
 pail auth status                             # provider, expiry, and a read of the store
 pail auth logout                             # forget cached credentials
 ```
 
-1. **Extension:** an executable `pail-credential-<name>` in `$PAIL_EXTENSIONS_DIR`, else
-   `~/.local/share/pail/extensions` (where `pail auth install` puts it), else `$PATH`.
+1. **Extension:** its own GitHub repository `pail-credential-<name>`, installed like a gh
+   extension. The repository's `pail-extension.json` names a script
+   (`{"name","protocol":"pail-credential/1","description","script":"<path>"}`) or release
+   binaries per platform (`"binaries": {"darwin-arm64": "<asset>", …}`); without one, an
+   executable `pail-credential-<name>` at the root, else a release asset
+   `pail-credential-<name>-<os>-<arch>`. The ref is `@ref` (pinned), else the latest release,
+   else the default branch, resolved to a commit first. Installs land in
+   `~/.local/share/pail/extensions/pail-credential-<name>/` (or `$PAIL_EXTENSIONS_DIR`) with a
+   `manifest.json` (repo, ref, commit, sha256); `$PATH` is searched too. Private repositories
+   work with `GH_TOKEN`, `GITHUB_TOKEN` or a `gh` login; `PAIL_GITHUB_API` points at GitHub
+   Enterprise. Official providers: `ArchAstro/pail-credential-{gcloud,gcs-downscoped,archdev}`.
    `get` reads `{"protocol":"pail-credential/1","store":…,"scheme":…}` on stdin and prints
    `{"token":…,"expires_at":…}` (GCS, https), `{"aws":{…},"expires_at":…}` (S3) or a bare
    token. `describe` (optional) prints one line for `pail auth list`.

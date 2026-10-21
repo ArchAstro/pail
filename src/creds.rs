@@ -4,8 +4,9 @@
 //! a company SSO) and how narrowly it is scoped is the extension's business.
 //!
 //! ```text
-//! extension   an executable named pail-credential-<name>, found in $PAIL_EXTENSIONS_DIR,
-//!             else ~/.local/share/pail/extensions, else $PATH
+//! extension   an executable named pail-credential-<name>, installed by `pail auth install`
+//!             (from its own GitHub repository, see `extensions`) into
+//!             $PAIL_EXTENSIONS_DIR or ~/.local/share/pail/extensions, or found on $PATH
 //!               <exe> get        JSON request on stdin, credential on stdout   (required)
 //!               <exe> describe   one line for `pail auth list`                 (optional)
 //! ambient     no provider: the cloud SDK's chain (gcloud ADC, GOOGLE_*, AWS_*)
@@ -49,22 +50,6 @@ pub const PROTOCOL: &str = "pail-credential/1";
 pub const PREFIX: &str = "pail-credential-";
 /// A bare token's assumed lifetime (Google access tokens live an hour).
 const BARE_TOKEN_SECS: u64 = 45 * 60;
-
-/// Extensions that ship with pail and `pail auth install <name>` writes out.
-pub const BUNDLED: &[(&str, &str)] = &[
-    (
-        "archdev",
-        include_str!("../extensions/pail-credential-archdev"),
-    ),
-    (
-        "gcloud",
-        include_str!("../extensions/pail-credential-gcloud"),
-    ),
-    (
-        "gcs-downscoped",
-        include_str!("../extensions/pail-credential-gcs-downscoped"),
-    ),
-];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Provider {
@@ -117,10 +102,15 @@ pub fn find_extension(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
         .unwrap_or_default();
-    extensions_dir()
+    let installed = extensions_dir().map(|d| d.join(&file).join(&file));
+    installed
         .into_iter()
-        .chain(path)
-        .map(|d| d.join(&file))
+        .chain(
+            extensions_dir()
+                .into_iter()
+                .chain(path)
+                .map(|d| d.join(&file)),
+        )
         .find(|p| executable(p))
 }
 
@@ -134,11 +124,14 @@ pub fn installed() -> Vec<(String, PathBuf)> {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let f = e.file_name().to_string_lossy().to_string();
             if let Some(name) = f.strip_prefix(PREFIX) {
-                if !name.contains('.')
-                    && executable(&e.path())
-                    && !out.iter().any(|(n, _)| n == name)
-                {
-                    out.push((name.to_string(), e.path()));
+                // Installed providers are directories: <dir>/pail-credential-<name>/<same>.
+                let exe = if e.path().is_dir() {
+                    e.path().join(&f)
+                } else {
+                    e.path()
+                };
+                if !name.contains('.') && executable(&exe) && !out.iter().any(|(n, _)| n == name) {
+                    out.push((name.to_string(), exe));
                 }
             }
         }

@@ -1782,3 +1782,213 @@ fn proxy_enforces_branch_policy() {
     ));
     assert_eq!(pail(&t, &["--store", &direct, "cat", "main:x.txt"]), "x");
 }
+
+/// A fake GitHub REST API for `pail auth install`: routes → (status, body). Serves until
+/// the test ends; returns its base URL and a log of the paths asked for.
+fn fake_github(
+    routes: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, Vec<u8>)>>>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+    let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let l = log.clone();
+    std::thread::spawn(move || {
+        for req in server.incoming_requests() {
+            let url = req.url().to_string();
+            let auth = req.headers().iter().any(|h| h.field.equiv("Authorization"));
+            l.lock()
+                .unwrap()
+                .push(format!("{url}{}", if auth { " (auth)" } else { "" }));
+            let (code, body) = routes
+                .lock()
+                .unwrap()
+                .get(&url)
+                .cloned()
+                .unwrap_or((404, br#"{"message":"Not Found"}"#.to_vec()));
+            let _ = req.respond(tiny_http::Response::from_data(body).with_status_code(code));
+        }
+    });
+    (base, log)
+}
+
+/// Providers live in their own repositories, like gh extensions: `pail auth install <name>`
+/// reads ArchAstro/pail-credential-<name>'s manifest at its latest release and installs the
+/// script it names; owner/repo@ref pins; binaries come from release assets; upgrade moves
+/// unpinned installs to the newest release.
+#[test]
+fn auth_install_from_github() {
+    use std::collections::HashMap;
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let routes = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let (api, log) = fake_github(routes.clone());
+    let script = |v: &str| {
+        format!("#!/bin/sh\n[ \"$1\" = describe ] && echo 'demo {v}' && exit 0\necho tok-{v}\n")
+            .into_bytes()
+    };
+    let set = |rs: &[(&str, u16, Vec<u8>)]| {
+        let mut r = routes.lock().unwrap();
+        for (k, c, b) in rs {
+            r.insert(k.to_string(), (*c, b.clone()));
+        }
+    };
+    let repo = "/repos/ArchAstro/pail-credential-demo";
+    let manifest = br#"{"name":"demo","protocol":"pail-credential/1","description":"demo","script":"bin/demo.sh"}"#.to_vec();
+    set(&[
+        (repo, 200, br#"{"default_branch":"main"}"#.to_vec()),
+        (
+            &format!("{repo}/releases/latest"),
+            200,
+            br#"{"tag_name":"v1","assets":[]}"#.to_vec(),
+        ),
+        (&format!("{repo}/commits/v1"), 200, b"c1".to_vec()),
+        (
+            &format!("{repo}/contents/pail-extension.json?ref=c1"),
+            200,
+            manifest.clone(),
+        ),
+        (
+            &format!("{repo}/contents/bin/demo.sh?ref=c1"),
+            200,
+            script("v1"),
+        ),
+    ]);
+    let run = |args: &[&str]| {
+        let o = cmd(t, args)
+            .env("PAIL_GITHUB_API", &api)
+            .env("PAIL_EXTENSIONS_DIR", t.join("ext"))
+            .env("GH_TOKEN", "gh-test")
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        )
+    };
+    let (ok, out) = run(&["auth", "install", "demo"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains(
+            "installed demo from ArchAstro/pail-credential-demo@v1 (c1, script bin/demo.sh)"
+        ),
+        "{out}"
+    );
+    let exe = t.join("ext/pail-credential-demo/pail-credential-demo");
+    assert_eq!(
+        String::from_utf8(std::process::Command::new(&exe).output().unwrap().stdout).unwrap(),
+        "tok-v1\n"
+    );
+    let m: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(t.join("ext/pail-credential-demo/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (m["commit"].as_str(), m["pinned"].as_bool()),
+        (Some("c1"), Some(false))
+    );
+    assert!(
+        log.lock().unwrap().iter().all(|l| l.ends_with("(auth)")),
+        "GH_TOKEN is sent"
+    );
+    let (_, list) = run(&["auth", "list"]);
+    assert!(
+        list.contains("demo v1") && list.contains("ArchAstro/pail-credential-demo@v1"),
+        "{list}"
+    );
+    // Already installed: refuse without --force.
+    assert!(!run(&["auth", "install", "demo"]).0);
+
+    // A new release: upgrade moves to it.
+    set(&[
+        (
+            &format!("{repo}/releases/latest"),
+            200,
+            br#"{"tag_name":"v2","assets":[]}"#.to_vec(),
+        ),
+        (&format!("{repo}/commits/v2"), 200, b"c2".to_vec()),
+        (
+            &format!("{repo}/contents/pail-extension.json?ref=c2"),
+            200,
+            manifest.clone(),
+        ),
+        (
+            &format!("{repo}/contents/bin/demo.sh?ref=c2"),
+            200,
+            script("v2"),
+        ),
+    ]);
+    let (ok, out) = run(&["auth", "upgrade", "--all"]);
+    assert!(ok && out.contains("demo             v1 -> v2"), "{out}");
+    assert_eq!(
+        String::from_utf8(std::process::Command::new(&exe).output().unwrap().stdout).unwrap(),
+        "tok-v2\n"
+    );
+    assert!(run(&["auth", "upgrade", "demo"]).1.contains("up to date"));
+
+    // Pinned to a tag: upgrade leaves it there.
+    set(&[(
+        &format!("{repo}/releases/tags/v1"),
+        200,
+        br#"{"tag_name":"v1","assets":[]}"#.to_vec(),
+    )]);
+    assert!(
+        run(&[
+            "auth",
+            "install",
+            "ArchAstro/pail-credential-demo@v1",
+            "--force"
+        ])
+        .0
+    );
+    assert!(run(&["auth", "upgrade", "demo"]).1.contains("up to date"));
+    assert_eq!(
+        String::from_utf8(std::process::Command::new(&exe).output().unwrap().stdout).unwrap(),
+        "tok-v1\n"
+    );
+
+    // A binary provider: no script, a release asset for this platform.
+    let bin = "/repos/acme/pail-credential-sso";
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
+    let asset = format!("pail-credential-sso-{os}-{arch}");
+    set(&[
+        (bin, 200, br#"{"default_branch":"main"}"#.to_vec()),
+        (
+            &format!("{bin}/releases/latest"),
+            200,
+            format!(
+                r#"{{"tag_name":"v3","assets":[{{"name":"{asset}","url":"{api}/assets/9"}}]}}"#
+            )
+            .into_bytes(),
+        ),
+        (&format!("{bin}/commits/v3"), 200, b"c3".to_vec()),
+        ("/assets/9", 200, script("sso")),
+    ]);
+    let (ok, out) = run(&["auth", "install", "acme/pail-credential-sso"]);
+    assert!(ok && out.contains(&format!("binary {asset}")), "{out}");
+    // Wrong repository name, missing repository.
+    assert!(
+        run(&["auth", "install", "acme/sso"])
+            .1
+            .contains("pail-credential-<name>")
+    );
+    assert!(
+        run(&["auth", "install", "nobody/pail-credential-x"])
+            .1
+            .contains("repository not found")
+    );
+    let (ok, out) = run(&["auth", "remove", "sso"]);
+    assert!(ok && !t.join("ext/pail-credential-sso").exists(), "{out}");
+}

@@ -233,15 +233,18 @@ store) and config keys complete, besides commands and options.
 
 pub const AUTH: &str = "\
 Most people have no bucket credentials, so pail asks a credential provider for short-lived,
-delegated ones. Providers are extensions you install: executables named
-pail-credential-<name> (in ~/.local/share/pail/extensions or on PATH) that speak the
-pail-credential/1 protocol. Without one, pail uses the cloud SDK's chain (ambient).
+delegated ones. Providers are extensions, each in its own GitHub repository named
+pail-credential-<name>, like gh extensions; `pail auth install` reads the repository's
+pail-extension.json and installs the script or release binary it names into
+~/.local/share/pail/extensions. Without one, pail uses the cloud SDK's chain (ambient).
 
-  pail auth list                           # installed and bundled providers
-  pail auth install archdev                # bundled: your ArchDev login (pail.archdev.ai)
-  pail auth install gcloud                 # bundled: your gcloud login
-  pail auth install gcs-downscoped         # bundled: gcloud, narrowed to one repository
-  pail auth install ./pail-credential-acme # anything you or your company ships
+  pail auth list                           # installed providers and where they came from
+  pail auth install gcloud                 # ArchAstro/pail-credential-gcloud: your gcloud login
+  pail auth install gcs-downscoped         # gcloud, narrowed to one repository
+  pail auth install archdev                # your ArchDev login (pail.archdev.ai)
+  pail auth install acme/pail-credential-sso@v1.2   # any repository; @ref pins it
+  pail auth install ./pail-credential-acme # a local file
+  pail auth upgrade --all                  # latest releases (pinned ones stay)
   pail auth use acme --for gs://acme-vcs   # [credential \"gs://acme-vcs\"] provider = acme
   pail auth use gcloud --global            # every store without a closer match
   pail auth status                         # which provider, and can it read the store?
