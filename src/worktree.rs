@@ -963,11 +963,20 @@ impl Worktree {
 
     /// Switch the working copy to another branch. Requires a clean working copy.
     pub async fn switch(&mut self, branch: &str) -> Result<usize> {
+        let r = self.repo.read_ref_value(branch).await?.with_context(|| format!("branch {branch} not found"))?;
+        // A branch at this working copy's base (`switch -c`, or a branch that has not moved)
+        // changes no file, so local changes and the stage come along, as with Git.
+        if Some(r.0.commit) == self.head.base {
+            let prev = self.head.base;
+            self.head = Head::at(branch, Some(r), None);
+            self.save_head()?;
+            self.set_orig_head(prev)?;
+            return Ok(0);
+        }
         let st = self.status().await?;
         if !st.is_clean() {
             bail!("working copy has changes; commit them or `pail restore` first");
         }
-        let r = self.repo.read_ref_value(branch).await?.with_context(|| format!("branch {branch} not found"))?;
         let target = r.0.commit;
         let from = self.repo.root_of(self.head.base).await?;
         let to = self.repo.root_of(Some(target)).await?;

@@ -1084,3 +1084,67 @@ fn pr_and_ci_extensions() {
     let (_, show) = run(&w, "pail-pr", &["show", "1"], "Alice <a@x>");
     assert!(show.contains("[merged]") && show.contains("Bob"), "{show}");
 }
+
+/// Branch policy enforced by `pail serve`: the auth command names the caller and its groups,
+/// the repository's `_policy` branch says who may write what, and every request is checked.
+#[test]
+fn proxy_enforces_branch_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let bucket = format!("file://{}", t.join("bucket").display());
+    // Seed the repository and its policy directly in the bucket (as its owner would).
+    let direct = format!("{bucket}/app");
+    pail(&t, &["init", &direct]);
+    write(
+        &t.join("policy.json"),
+        r#"{"version":1,"admins":["role:admin"],"branches":{"main":{"writers":["lander"],"approvals":1,"required_checks":["test"]},"_policy":{"writers":["role:admin"]},"*":{"writers":["*"]}}}"#,
+    );
+    pail(&t, &["--store", &direct, "policy", "set", &t.join("policy.json").to_string_lossy()]);
+    let check = cmd(&t, &["--store", &direct, "policy", "check", "--as", "user:alice", "write", "main"]).output().unwrap();
+    assert_eq!(check.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&check.stdout).contains("main is protected"));
+    let req = pail(&t, &["--store", &direct, "policy", "requirements", "main"]);
+    assert!(req.contains("\"approvals\": 1") && req.contains("\"test\""), "{req}");
+    // Tokens name callers: tok-alice is alice; tok-lander is the lander.
+    let auth = t.join("auth.sh");
+    write(&auth, "#!/bin/sh\ncase \"$PAIL_AUTH_TOKEN\" in\n  tok-alice) echo user:alice; echo group:eng;;\n  tok-lander) echo lander;;\n  *) exit 1;;\nesac\n");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _server = Child(
+        cmd(&t, &["serve", "--store", &bucket, "--addr", &format!("127.0.0.1:{port}"), "--auth-command", &auth.to_string_lossy()])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let store = format!("http://127.0.0.1:{port}/app");
+    let as_who = |dir: &Path, token: &str, args: &[&str]| {
+        cmd(dir, args).env("PAIL_CREDENTIAL_HELPER", format!("echo {token} #")).env("XDG_CACHE_HOME", t.join(format!("cache-{token}"))).output().unwrap()
+    };
+    let ok = |o: std::process::Output| {
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    };
+    ok(as_who(&t, "tok-alice", &["clone", &store, "a"]));
+    let a = t.join("a");
+    write(&a.join("x.txt"), "x");
+    ok(as_who(&a, "tok-alice", &["add", "-A"]));
+    let denied = as_who(&a, "tok-alice", &["commit", "-m", "to main"]);
+    assert!(!denied.status.success());
+    let err = String::from_utf8_lossy(&denied.stderr);
+    assert!(err.contains("permission denied") && err.contains("protected"), "{err}");
+    // Moving the change to a PR branch keeps it (the branch is at the same commit).
+    ok(as_who(&a, "tok-alice", &["switch", "-c", "pr/x"]));
+    ok(as_who(&a, "tok-alice", &["commit", "-m", "on a pr branch"]));
+    // Alice cannot rewrite the policy; the lander can land.
+    let open = t.join("open.json");
+    write(&open, r#"{"version":1,"branches":{"*":{"writers":["*"]}}}"#);
+    assert!(!as_who(&t, "tok-alice", &["--store", &store, "policy", "set", &open.to_string_lossy()]).status.success());
+    ok(as_who(&t, "tok-lander", &["--store", &store, "land", "pr/x", "--stack", "--onto", "main"]));
+    assert_eq!(pail(&t, &["--store", &direct, "cat", "main:x.txt"]), "x");
+}

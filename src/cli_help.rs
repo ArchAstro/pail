@@ -45,6 +45,7 @@ Working copies and caches
 Extend
   put <branch> --file P=SRC Commit files to a branch without a working copy
   events [--branch GLOB]    Stream ref changes (bucket notifications, or polling)
+  policy show|set|check     Branch policy: who may write what (brokers and landers build on it)
 
 Access
   auth list|install|use     Credential providers (extensions) for stores you can't reach directly
@@ -295,3 +296,21 @@ Wire a GCS bucket once:
 Examples:
   pail events --branch 'pr/*' --branch main
   pail --store gs://acme/app events --gcs-subscription projects/acme/subscriptions/pail-ci";
+
+pub const POLICY: &str = "\
+The repository's policy lives on the _policy branch as policy.json: who may read, which
+identities may write each branch (exact names or trailing-* globs, most specific wins; a
+branch no rule names is writable by nobody), who may delete history (gc), and what a lander
+requires before moving a branch (approvals, required checks). See docs/protecting-branches.md.
+
+Enforcement points built from these commands:
+  pail serve --auth-command CMD   CMD prints the principal, then its groups; every request
+                                  is checked against the policy
+  pail policy token --as P        a broker: GCS token whose access boundary is the policy
+  pail policy requirements B      what a lander checks before `pail land`
+
+Examples:
+  pail policy set policy.json
+  pail policy check --as user:alice write main          # deny: main is protected
+  pail policy check --as lander write refs/main         # allow
+  pail policy token --as user:alice@acme.dev --group group:eng";

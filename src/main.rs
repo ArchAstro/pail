@@ -363,6 +363,9 @@ enum Cmd {
         #[arg(long)]
         initial: bool,
     },
+    /// Branch policy: who may write what; the pieces a broker or lander is built from.
+    #[command(subcommand, arg_required_else_help = true, after_long_help = cli_help::POLICY)]
+    Policy(PolicyCmd),
     /// Print a shell completion script that completes branch names live.
     #[command(after_long_help = cli_help::COMPLETION)]
     Completion {
@@ -374,6 +377,57 @@ enum Cmd {
     Help {
         /// The command (and subcommand), e.g. `land` or `worktree add`.
         command: Vec<String>,
+    },
+}
+
+#[derive(clap::Args, Clone)]
+struct AsIdentity {
+    /// The caller's principal, e.g. user:alice@acme.dev, or lander.
+    #[arg(long = "as", value_name = "PRINCIPAL")]
+    principal: String,
+    /// A group or role the caller holds (repeatable), e.g. group:eng, role:admin.
+    #[arg(long = "group", value_name = "GROUP")]
+    groups: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Print the repository's policy (the `_policy` branch's policy.json).
+    Show,
+    /// Validate a policy file and commit it to the `_policy` branch.
+    Set {
+        file: PathBuf,
+        #[arg(short, long, default_value = "Update policy")]
+        message: String,
+    },
+    /// May this caller read, write or delete this object? Exit 0 if allowed, 1 if not.
+    Check {
+        #[command(flatten)]
+        who: AsIdentity,
+        /// read, write or delete.
+        #[arg(value_parser = ["read", "write", "delete"])]
+        op: String,
+        /// An object key in the repository (refs/main, packs/…), or a branch name.
+        key: String,
+    },
+    /// A branch's rule as JSON: writers, approvals, required checks (what a lander enforces).
+    Requirements {
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
+        branch: String,
+    },
+    /// The GCS access boundary that encodes the policy for one caller (JSON).
+    Boundary {
+        #[command(flatten)]
+        who: AsIdentity,
+    },
+    /// Mint a token for one caller: the boundary, exchanged at Google STS for a downscoped
+    /// token. Prints a pail-credential/1 answer: this command is a broker's core.
+    Token {
+        #[command(flatten)]
+        who: AsIdentity,
+        /// Command printing the broad source token (the broker's service account).
+        #[arg(long, default_value = "gcloud auth print-access-token")]
+        source_token_cmd: String,
     },
 }
 
@@ -531,6 +585,14 @@ fn main() {
             eprintln!("error: {h}");
             std::process::exit(pail::hooks::REFUSED_EXIT);
         }
+        let text = format!("{e:#}");
+        if text.contains("refs/") && (text.contains("403") || text.contains("lacked the necessary privileges")) {
+            // The store's answer repeats itself several times; the first clause names what failed.
+            let what = text.split(": ").next().unwrap_or(&text);
+            eprintln!("error: {what}: permission denied (403)");
+            eprintln!("hint: the branch is protected by the repository's policy (`pail policy requirements <branch>`); push to a branch you may write, such as pr/*, and land it through the lander");
+            std::process::exit(1);
+        }
         if let Some(c) = e.downcast_ref::<pail::repo::ConflictError>() {
             eprintln!("error: {c}");
             eprintln!("hint: another writer changed the same paths; `pail sync`, then try again");
@@ -679,6 +741,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     match cmd {
         Cmd::Completion { shell } => complete::registration(&shell)?,
+        Cmd::Policy(cmd) => policy_cmd(cmd, cli.store, cli.repo, ids).await?,
         Cmd::Put { branch, message, files, deletes, if_absent } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let repo = &ctx.repo;
@@ -1599,6 +1662,87 @@ fn auth_use(provider: &str, url: Option<String>, global: bool) -> Result<()> {
     f.save()?;
     println!("{key} = {provider}   ({})", if matches!(scope, Scope::Global) { "user config" } else { "repository config" });
     Ok(())
+}
+
+
+async fn policy_cmd(cmd: PolicyCmd, store: Option<String>, repo: Option<PathBuf>, ids: Ids) -> Result<()> {
+    use pail::policy::{Identity, Op, Policy};
+    let ctx = Ctx::open(store, repo, ids).await?;
+    let load = || async { Policy::load(&ctx.repo).await?.context("this repository has no policy (`pail policy set <file>`)") };
+    let id = |w: &AsIdentity| Identity::new(&w.principal, &w.groups);
+    match cmd {
+        PolicyCmd::Show => println!("{}", serde_json::to_string_pretty(&load().await?)?),
+        PolicyCmd::Set { file, message } => {
+            let data = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            Policy::parse(&data)?;
+            let es = ctx.repo.write_files(&[pail::repo::FileInput { path: pail::policy::FILE.into(), kind: pail::manifest::Kind::File, data: data.into() }], &Default::default()).await?;
+            let base = ctx.repo.read_ref(pail::policy::BRANCH).await?.map(|(h, _)| h);
+            let date = now_date();
+            let out = ctx
+                .repo
+                .commit(CommitRequest {
+                    branch: pail::policy::BRANCH.into(),
+                    base,
+                    delta: es.into_iter().map(|e| (e.path.clone(), Some(e))).collect(),
+                    author: ctx.config.identity("author")?,
+                    author_date: date.clone(),
+                    committer: ctx.config.identity("committer")?,
+                    committer_date: date,
+                    message,
+                    meta: BTreeMap::new(),
+                })
+                .await?;
+            println!("[{} {}] policy updated", pail::policy::BRANCH, out.commit.short());
+        }
+        PolicyCmd::Check { who, op, key } => {
+            let p = load().await?;
+            let op = match op.as_str() {
+                "read" => Op::Read,
+                "write" => Op::Write,
+                _ => Op::Delete,
+            };
+            let key = if key.contains('/') && ["refs/", "intents/", "reflog/", "commits/", "pages/", "packs/", "chunks/"].iter().any(|p| key.starts_with(p)) || key == "HEAD" { key } else { format!("refs/{key}") };
+            let d = p.decide(&id(&who), op, &key);
+            println!("{} {} {key}: {}", if d.allow { "allow" } else { "deny" }, who.principal, d.reason);
+            if !d.allow {
+                std::process::exit(1);
+            }
+        }
+        PolicyCmd::Requirements { branch } => {
+            let p = load().await?;
+            let out = match p.rule_for(&branch) {
+                Some((glob, r)) => serde_json::json!({"branch": branch, "rule": glob, "protected": p.is_protected(&branch),
+                    "writers": r.writers, "approvals": r.approvals.unwrap_or(0), "required_checks": r.required_checks}),
+                None => serde_json::json!({"branch": branch, "rule": null, "protected": true, "writers": [], "approvals": 0, "required_checks": []}),
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        PolicyCmd::Boundary { who } => {
+            let p = load().await?;
+            let (bucket, prefix) = gcs_location(&ctx.repo.store.url)?;
+            println!("{}", serde_json::to_string_pretty(&p.gcs_boundary(&id(&who), &bucket, &prefix)?)?);
+        }
+        PolicyCmd::Token { who, source_token_cmd } => {
+            let p = load().await?;
+            let (bucket, prefix) = gcs_location(&ctx.repo.store.url)?;
+            let boundary = p.gcs_boundary(&id(&who), &bucket, &prefix)?;
+            let source = std::process::Command::new("sh").args(["-c", &source_token_cmd]).output()?;
+            if !source.status.success() {
+                bail!("source token command failed: {}", String::from_utf8_lossy(&source.stderr).trim());
+            }
+            let source = String::from_utf8(source.stdout)?.trim().to_string();
+            let (token, expires_at) = pail::policy::gcs_downscope(&source, &boundary).await?;
+            println!("{}", serde_json::json!({"token": token, "expires_at": expires_at}));
+        }
+    }
+    Ok(())
+}
+
+/// (bucket, prefix) of a gs:// store.
+fn gcs_location(url: &str) -> Result<(String, String)> {
+    let rest = url.strip_prefix("gs://").context("token boundaries are for gs:// stores")?;
+    let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+    Ok((bucket.to_string(), prefix.trim_matches('/').to_string()))
 }
 
 #[cfg(test)]

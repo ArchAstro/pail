@@ -13,6 +13,12 @@
 //!
 //! Answers are cached for a minute per (token, repo, op). Nothing else is kept between
 //! requests, so any number of instances can serve one bucket.
+//!
+//! The auth command's stdout names the caller for the repository's policy (see `policy`): the
+//! first line is the principal (`user:alice@acme.dev`), further lines its groups and roles
+//! (`group:eng`, `role:admin`). When the repository has a `_policy` branch, every request is
+//! also checked against it: a write to `refs/main` by someone the policy does not name as a
+//! writer answers 403 with the reason.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -24,6 +30,7 @@ use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 
 use crate::httpstore::ListEntry;
+use crate::policy::{Identity, Op as PolicyOp, Policy};
 use crate::store::{Cas, Store, Version};
 
 /// Largest request body: a full pack plus headroom.
@@ -34,8 +41,12 @@ pub struct Proxy {
     root: String,
     auth: Option<String>,
     stores: Mutex<HashMap<String, Store>>,
-    decisions: Mutex<HashMap<(String, String, &'static str), (u16, Instant)>>,
+    decisions: Mutex<HashMap<(String, String, &'static str), (u16, Identity, Instant)>>,
+    policies: Mutex<HashMap<String, (Option<Arc<Policy>>, Instant)>>,
 }
+
+/// How long a repository's policy is trusted before it is read again.
+const POLICY_TTL: Duration = Duration::from_secs(30);
 
 struct Reply {
     status: u16,
@@ -77,7 +88,20 @@ impl Proxy {
             auth,
             stores: Mutex::new(HashMap::new()),
             decisions: Mutex::new(HashMap::new()),
+            policies: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn policy(&self, repo: &str, store: &Store) -> Result<Option<Arc<Policy>>> {
+        if let Some((p, at)) = self.policies.lock().unwrap().get(repo) {
+            if at.elapsed() < POLICY_TTL {
+                return Ok(p.clone());
+            }
+        }
+        let r = crate::repo::Repo::with_store(store.clone(), None);
+        let p = Policy::load(&r).await?.map(Arc::new);
+        self.policies.lock().unwrap().insert(repo.to_string(), (p.clone(), Instant::now()));
+        Ok(p)
     }
 
     fn store(&self, repo: &str) -> Result<Store> {
@@ -91,20 +115,20 @@ impl Proxy {
     }
 
     /// Ok(principal) or the reply refusing the request.
-    fn authorize(&self, token: Option<&str>, repo: &str, op: &'static str) -> Result<(), Reply> {
-        let Some(cmd) = &self.auth else { return Ok(()) };
+    fn authorize(&self, token: Option<&str>, repo: &str, op: &'static str) -> Result<Identity, Reply> {
+        let Some(cmd) = &self.auth else { return Ok(Identity::new("anonymous", &[])) };
         let Some(token) = token else {
             return Err(Reply::new(401, "a bearer token is required").header("WWW-Authenticate", "Bearer".into()));
         };
         let key = (blake3::hash(token.as_bytes()).to_hex().to_string(), repo.to_string(), op);
-        let answer = |status: u16| match status {
-            200 => Ok(()),
+        let answer = |status: u16, id: Identity| match status {
+            200 => Ok(id),
             403 => Err(Reply::new(403, format!("not allowed to {op} {repo}"))),
             _ => Err(Reply::new(401, "the token was not accepted").header("WWW-Authenticate", "Bearer".into())),
         };
-        if let Some((status, at)) = self.decisions.lock().unwrap().get(&key) {
+        if let Some((status, id, at)) = self.decisions.lock().unwrap().get(&key) {
             if at.elapsed() < AUTH_TTL {
-                return answer(*status);
+                return answer(*status, id.clone());
             }
         }
         let out = Command::new("sh")
@@ -115,10 +139,13 @@ impl Proxy {
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
             .output();
+        let mut id = Identity::new("anonymous", &[]);
         let status = match &out {
             Ok(o) if o.status.success() => {
-                let who = String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").to_string();
-                if !who.is_empty() {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+                if let Some(who) = lines.next() {
+                    id = Identity::new(who, &lines.map(str::to_string).collect::<Vec<_>>());
                     eprintln!("auth: {who} may {op} {repo}");
                 }
                 200
@@ -128,8 +155,8 @@ impl Proxy {
             // The auth command could not run: not a verdict on the token, so not cached.
             Err(e) => return Err(Reply::new(503, format!("auth command failed: {e}"))),
         };
-        self.decisions.lock().unwrap().insert(key, (status, Instant::now()));
-        answer(status)
+        self.decisions.lock().unwrap().insert(key, (status, id.clone(), Instant::now()));
+        answer(status, id)
     }
 
     async fn handle(&self, method: &str, url: &str, headers: &[(String, String)], body: Bytes) -> Reply {
@@ -156,9 +183,19 @@ impl Proxy {
         }
         let op = if matches!(method, "GET" | "HEAD") { "read" } else { "write" };
         let token = h("authorization").and_then(|a| a.strip_prefix("Bearer ")).map(str::trim);
-        self.authorize(token, repo, op)?;
+        let caller = self.authorize(token, repo, op)?;
         let store = self.store(repo).map_err(|e| Reply::new(500, format!("{e:#}")))?;
         let fail = |e: anyhow::Error| Reply::new(502, format!("{e:#}"));
+        let policy = self.policy(repo, &store).await.map_err(|e| Reply::new(500, format!("reading the policy: {e:#}")))?;
+        let check = |op: PolicyOp, key: &str| -> Result<(), Reply> {
+            match &policy {
+                Some(p) => {
+                    let d = p.decide(&caller, op, key);
+                    if d.allow { Ok(()) } else { Err(Reply::new(403, format!("policy: {}", d.reason))) }
+                }
+                None => Ok(()),
+            }
+        };
 
         if rest == "_ls" {
             if method != "GET" {
@@ -168,6 +205,7 @@ impl Proxy {
                 .find(|(k, _)| k == "prefix")
                 .map(|(_, v)| v.to_string())
                 .unwrap_or_default();
+            check(PolicyOp::Read, &prefix)?;
             let items: Vec<ListEntry> = store
                 .list_meta(&prefix)
                 .await
@@ -181,6 +219,16 @@ impl Proxy {
         if !valid_key(key) {
             return Err(Reply::new(400, "bad key"));
         }
+        // Branch objects are written and deleted by their writers; immutable content may only
+        // be created (an unconditional write or a delete counts as rewriting history).
+        let content = ["commits/", "pages/", "packs/", "chunks/"].iter().any(|p| key.starts_with(p));
+        let pop = match method {
+            "GET" | "HEAD" => PolicyOp::Read,
+            "PUT" if content && h("if-none-match") != Some("*") => PolicyOp::Delete,
+            "DELETE" if content => PolicyOp::Delete,
+            _ => PolicyOp::Write,
+        };
+        check(pop, key)?;
         match method {
             "HEAD" => match store.size(key).await.map_err(fail)? {
                 Some(n) => Ok(Reply::new(200, vec![]).header("X-Pail-Size", n.to_string())),

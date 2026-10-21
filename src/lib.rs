@@ -21,6 +21,7 @@ pub mod local;
 pub mod manifest;
 pub mod objects;
 pub mod pack;
+pub mod policy;
 pub mod repo;
 pub mod rev;
 pub mod serve;

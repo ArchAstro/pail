@@ -372,6 +372,20 @@ pail auth logout                             # forget cached credentials
    Answers are cached a minute. On a 401, pail drops its cached credential, asks the provider
    again and retries once.
 
+## Protecting branches: who may push, what landing requires
+
+One policy (`_policy:policy.json`: readers, admins, gc, per-branch writers, approvals,
+required checks) and three enforcement points, none stateful:
+
+1. `pail serve --auth-command` checks every request against it (any backend).
+2. A broker runs `pail policy token --as <principal>`: a GCS token whose Credential Access
+   Boundary encodes the policy, so **GCS** refuses `refs/main` to anyone but its writers.
+3. A lander (`pail policy requirements main`, then `pail land`) is the only writer of
+   protected branches and checks reviews and checks first.
+
+`pail policy show|set|check|requirements|boundary|token`. How to build each piece, IAM setup
+and STS limits: [docs/protecting-branches.md](docs/protecting-branches.md).
+
 ## Hooks
 
 Executables pail runs at fixed points, like Git's, but shaped by pail's model: a commit is

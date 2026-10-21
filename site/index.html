@@ -307,30 +307,30 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
       </table>
     </div>
     <div class="split flow">
-      <pre class="code" aria-label="Branch policy"><span class="c"># _policy:branches.json</span>
-{
+      <pre class="code" aria-label="Branch policy"><span class="c"># _policy:policy.json  (pail policy set)</span>
+{ <span class="a">"version"</span>: 1, <span class="a">"admins"</span>: [<span class="a">"role:admin"</span>], <span class="a">"branches"</span>: {
   <span class="a">"main"</span>: {
     <span class="a">"writers"</span>: [<span class="a">"lander"</span>],
     <span class="a">"approvals"</span>: 1,
-    <span class="a">"required_checks"</span>: [<span class="a">"test"</span>, <span class="a">"lint"</span>],
-    <span class="a">"code_owners"</span>: <span class="a">"main:CODEOWNERS"</span>
+    <span class="a">"required_checks"</span>: [<span class="a">"test"</span>, <span class="a">"lint"</span>]
   },
   <span class="a">"release/*"</span>: { <span class="a">"writers"</span>: [<span class="a">"lander"</span>], <span class="a">"approvals"</span>: 2 },
-  <span class="a">"pr/*"</span>: { <span class="a">"writers"</span>: [<span class="a">"*"</span>] }
-}</pre>
+  <span class="a">"_policy"</span>: { <span class="a">"writers"</span>: [<span class="a">"role:admin"</span>] },
+  <span class="a">"*"</span>: { <span class="a">"writers"</span>: [<span class="a">"*"</span>] }
+} }</pre>
       <ol class="steps">
-        <li><p><b>Sign in, get a narrow token.</b> Your credential provider mints a short-lived token for one repository. Its access boundary leaves out protected refs and every delete, so a direct push to main fails at the bucket.</p></li>
+        <li><p><b>Sign in, get a narrow token.</b> A broker checks who you are and runs <code>pail policy token --as you</code>: a short-lived token whose access boundary is the policy, so a direct push to main fails at the bucket.</p></li>
         <li><p><b>Push to a PR branch.</b> Commits land on <code>pr/*</code> as usual; CI records checks from the bucket's events.</p></li>
-        <li><p><b>Reviews are signed.</b> An approval is an attestation signed by the identity service ("bob approved 126ebf48"), so no one can write a review in someone else's name.</p></li>
-        <li><p><b>The lander merges.</b> A merge request is an event. The lander, the only identity allowed to write <code>refs/main</code>, checks approvals from people other than the author, required checks on the exact head commit and code owners, then lands the stack with one swap.</p></li>
+        <li><p><b>Reviews can't be forged.</b> An approval is a record for one exact commit, written by a review tool that stamps the authenticated reviewer, so no one can approve in someone else's name.</p></li>
+        <li><p><b>The lander merges.</b> A merge request is an event. The lander, the only identity allowed to write <code>refs/main</code>, reads <code>pail policy requirements main</code>, checks approvals from people other than the author and required checks on the exact head commit, then lands the stack with one swap.</p></li>
       </ol>
     </div>
     <div class="features">
-      <div><h3>Three places to enforce</h3><p>Bucket IAM for the floor (create-only content, no deletes). A token broker plus lander for repositories in your own bucket, with no server in the path. Or a gateway such as ArchDev's, which checks every request against the branch rules.</p></div>
+      <div><h3>Three places to enforce</h3><p>One policy, three enforcement points: <code>pail serve</code> checks every request (any backend); a broker's <code>pail policy token</code> makes GCS enforce it; a lander turns reviews and checks into a branch move.</p></div>
       <div><h3>No combining across trust</h3><p>Combining lands other writers' changes with the combiner's permissions. On a protected branch that would let a privileged writer land unreviewed work, so only the lander writes there, and it batches only changes it approved.</p></div>
       <div><h3>Authors are claims, signatures are proof</h3><p>A commit's author field says who the writer typed in. Policy decisions rely only on authenticated writers or signed records, never on that field.</p></div>
     </div>
-    <p class="fine">Verified on GCS: a downscoped token with these rules can read the repository, create content and write <code>refs/pr/*</code>, and gets 403 on every write to <code>refs/main</code>, <code>refs/release/*</code> and <code>intents/main/</code>, on every overwrite or delete of history, and on other repositories. Enforcement holds when people have no bucket roles of their own and get tokens only from a broker. Next: the policy file, the lander and signed reviews.</p>
+    <p class="fine">Verified on GCS: a downscoped token with these rules can read the repository, create content and write <code>refs/pr/*</code>, and gets 403 on every write to <code>refs/main</code>, <code>refs/release/*</code> and <code>intents/main/</code>, on every overwrite or delete of history, and on other repositories. Enforcement holds when people have no bucket roles of their own and get tokens only from a broker. How to build the broker and lander: <code>docs/protecting-branches.md</code>.</p>
   </section>
 
   <section id="start">
