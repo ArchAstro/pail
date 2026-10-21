@@ -330,7 +330,7 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
       <div><h3>No combining across trust</h3><p>Combining lands other writers' changes with the combiner's permissions. On a protected branch that would let a privileged writer land unreviewed work, so only the lander writes there, and it batches only changes it approved.</p></div>
       <div><h3>Authors are claims, signatures are proof</h3><p>A commit's author field says who the writer typed in. Policy decisions rely only on authenticated writers or signed records, never on that field.</p></div>
     </div>
-    <p class="fine">Status: today, credential providers already mint tokens scoped to one repository prefix (verified on GCS), and the PR prototype checks approvals and required checks before landing. Next: the policy file, the lander, signed reviews, and per-ref token boundaries.</p>
+    <p class="fine">Verified on GCS: a downscoped token with these rules can read the repository, create content and write <code>refs/pr/*</code>, and gets 403 on every write to <code>refs/main</code>, <code>refs/release/*</code> and <code>intents/main/</code>, on every overwrite or delete of history, and on other repositories. Enforcement holds when people have no bucket roles of their own and get tokens only from a broker. Next: the policy file, the lander and signed reviews.</p>
   </section>
 
   <section id="start">
