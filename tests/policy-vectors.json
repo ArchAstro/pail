@@ -1,0 +1,1432 @@
+{
+ "comment": "Language-neutral branch-policy vectors for pail's Policy::decide (src/policy.rs). Every enforcement point (pail serve, the ArchDev gateway) must agree. op is read|write|delete; key is relative to the repository.",
+ "policies": {
+  "std": {
+   "version": 1,
+   "admins": [
+    "role:admin"
+   ],
+   "gc": [
+    "role:gc"
+   ],
+   "branches": {
+    "main": {
+     "writers": [
+      "lander"
+     ],
+     "approvals": 1,
+     "required_checks": [
+      "test"
+     ]
+    },
+    "release/*": {
+     "writers": [
+      "lander"
+     ],
+     "approvals": 2
+    },
+    "_policy": {
+     "writers": [
+      "role:admin"
+     ]
+    },
+    "*": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  },
+  "strict": {
+   "version": 1,
+   "branches": {
+    "main": {
+     "writers": [
+      "lander"
+     ]
+    }
+   }
+  },
+  "private": {
+   "version": 1,
+   "readers": [
+    "group:eng",
+    "user:bob"
+   ],
+   "admins": [
+    "user:root"
+   ],
+   "gc": [
+    "user:gcbot"
+   ],
+   "branches": {
+    "main": {
+     "writers": [
+      "group:eng"
+     ]
+    },
+    "pr/*": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  },
+  "nested": {
+   "version": 1,
+   "branches": {
+    "pr/*": {
+     "writers": [
+      "group:eng"
+     ]
+    },
+    "pr/a/*": {
+     "writers": [
+      "user:alice"
+     ]
+    },
+    "pr/a/b": {
+     "writers": [
+      "user:bob"
+     ]
+    },
+    "release/*": {
+     "writers": [
+      "lander"
+     ]
+    },
+    "release/hotfix": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  },
+  "empty": {
+   "version": 1
+  },
+  "closed_readers": {
+   "version": 1,
+   "readers": [],
+   "branches": {
+    "*": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  }
+ },
+ "cases": [
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": false,
+   "note": "protected exact rule beats *"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/2026",
+   "allow": false,
+   "note": "glob release/* beats *"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/2026",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/a/b",
+   "allow": true,
+   "note": "glob prefix covers nested names"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/pr/hello",
+   "allow": true,
+   "note": "fallback * rule"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/pr/a/b",
+   "allow": true,
+   "note": "nested branch name via *"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/alice/wip",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/_policy",
+   "allow": false,
+   "note": "_policy is protected by its own rule"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "refs/_policy",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "refs/pr/hello",
+   "allow": true,
+   "note": "ref delete needs branch writer, same as write"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "refs/main",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "refs/main",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/main/0001-ab.json",
+   "allow": false,
+   "note": "no combining into a protected branch"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/main/0001-ab.json",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/pr/hello/1.json",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/pr/a/b/1.json",
+   "allow": true,
+   "note": "nested branch pr/a/b: branch is all but last segment"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/release/2026/1.json",
+   "allow": false,
+   "note": "intents/release/2026 -> branch release/2026"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/release/2026/1.json",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "reflog/main/1700000000",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "reflog/main/1700000000",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "reflog/pr/a/b/1700000000",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "reflog/_policy/1700000000",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "reflog/_policy/1700000000",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/main",
+   "allow": true,
+   "note": "no '/' after the prefix: branch is empty, which only the * rule matches (pail quirk, kept identical)"
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/main",
+   "allow": false,
+   "note": "same shape under a policy without a * rule"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "commits/abc",
+   "allow": true,
+   "note": "create-only content"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "commits/abc",
+   "allow": false,
+   "note": "history is create-only"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "commits/abc",
+   "allow": false,
+   "note": "writers are not gc"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "delete",
+   "key": "commits/abc",
+   "allow": true,
+   "note": "gc may delete"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "delete",
+   "key": "commits/abc",
+   "allow": false,
+   "note": "admins are not gc"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "pages/abc",
+   "allow": true,
+   "note": "create-only content"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "pages/abc",
+   "allow": false,
+   "note": "history is create-only"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "pages/abc",
+   "allow": false,
+   "note": "writers are not gc"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "delete",
+   "key": "pages/abc",
+   "allow": true,
+   "note": "gc may delete"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "delete",
+   "key": "pages/abc",
+   "allow": false,
+   "note": "admins are not gc"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": true,
+   "note": "create-only content"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "packs/x.pack",
+   "allow": false,
+   "note": "history is create-only"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "packs/x.pack",
+   "allow": false,
+   "note": "writers are not gc"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "delete",
+   "key": "packs/x.pack",
+   "allow": true,
+   "note": "gc may delete"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "delete",
+   "key": "packs/x.pack",
+   "allow": false,
+   "note": "admins are not gc"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "chunks/abc",
+   "allow": true,
+   "note": "create-only content"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "chunks/abc",
+   "allow": false,
+   "note": "history is create-only"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "chunks/abc",
+   "allow": false,
+   "note": "writers are not gc"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "delete",
+   "key": "chunks/abc",
+   "allow": true,
+   "note": "gc may delete"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "delete",
+   "key": "chunks/abc",
+   "allow": false,
+   "note": "admins are not gc"
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": false,
+   "note": "alice writes no branch"
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": true
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "commits/abc",
+   "allow": true
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "delete",
+   "key": "packs/x.pack",
+   "allow": false,
+   "note": "no gc list in strict"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": true,
+   "note": "* writers includes everyone"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": true
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": true,
+   "note": "pr/* is open to *"
+  },
+  {
+   "policy": "empty",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": false,
+   "note": "no branch rules: nobody writes"
+  },
+  {
+   "policy": "empty",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": false,
+   "note": "unnamed branch denied"
+  },
+  {
+   "policy": "empty",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": true,
+   "note": "readers default to *"
+  },
+  {
+   "policy": "empty",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": false
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/feature",
+   "allow": false,
+   "note": "unnamed branches are writable by nobody"
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/feature",
+   "allow": false,
+   "note": "even the main writer"
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": true
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/mainx",
+   "allow": false,
+   "note": "exact rules do not prefix-match"
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main/sub",
+   "allow": false
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/feature/1.json",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": true,
+   "note": "admin sets the default branch"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "delete",
+   "key": "HEAD",
+   "allow": true
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": true
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": false
+  },
+  {
+   "policy": "empty",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "HEAD",
+   "allow": false,
+   "note": "no admins listed"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "config.json",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "lock/x",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "delete",
+   "key": "anything",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "refs",
+   "allow": false,
+   "note": "'refs' without slash is not a ref"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "write",
+   "key": "commitsx/abc",
+   "allow": false,
+   "note": "prefix must include the slash"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": true,
+   "note": "default readers *"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "read",
+   "key": "packs/x.pack",
+   "allow": true
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "read",
+   "key": "",
+   "allow": true,
+   "note": "listing the whole repo"
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": false,
+   "note": "not in readers"
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:bob",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": true,
+   "note": "principal named in readers"
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:carol",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "read",
+   "key": "packs/x.pack",
+   "allow": true,
+   "note": "group named in readers"
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:alice",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": true
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "read",
+   "key": "",
+   "allow": false
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:root",
+    "groups": [
+     "role:admin"
+    ]
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": false,
+   "note": "admins are not implicitly readers"
+  },
+  {
+   "policy": "closed_readers",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "read",
+   "key": "refs/main",
+   "allow": false,
+   "note": "empty readers list: nobody reads"
+  },
+  {
+   "policy": "closed_readers",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": true,
+   "note": "read rule does not affect writes"
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:bob",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": true,
+   "note": "bob is in group:eng"
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/main",
+   "allow": false
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/pr/x",
+   "allow": true
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:gcbot",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "packs/x.pack",
+   "allow": true
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:gcbot",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/x.pack",
+   "allow": true,
+   "note": "pr/* is open"
+  },
+  {
+   "policy": "private",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "packs/x.pack",
+   "allow": false
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/anything",
+   "allow": true
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:carol",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "write",
+   "key": "refs/pr/x",
+   "allow": true,
+   "note": "pr/* -> group:eng"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/pr/x",
+   "allow": false,
+   "note": "alice not in group:eng"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/pr/a/x",
+   "allow": true,
+   "note": "pr/a/* is longer than pr/*"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:carol",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "write",
+   "key": "refs/pr/a/x",
+   "allow": false,
+   "note": "longest prefix wins, eng no longer applies"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:bob",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "write",
+   "key": "refs/pr/a/b",
+   "allow": true,
+   "note": "exact beats glob"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/pr/a/b",
+   "allow": false,
+   "note": "exact pr/a/b names only bob"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/pr/a/b/c",
+   "allow": true,
+   "note": "pr/a/b is exact: pr/a/b/c falls to pr/a/*"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/pr/a/b/c/1.json",
+   "allow": true,
+   "note": "branch pr/a/b/c -> pr/a/*"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "intents/pr/a/b/1.json",
+   "allow": false,
+   "note": "branch pr/a/b -> exact rule, bob only"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:bob",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "write",
+   "key": "intents/pr/a/b/1.json",
+   "allow": true
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "reflog/pr/a/b/17",
+   "allow": false
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:bob",
+    "groups": [
+     "group:eng"
+    ]
+   },
+   "op": "write",
+   "key": "reflog/pr/a/b/17",
+   "allow": true
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/hotfix",
+   "allow": true,
+   "note": "exact release/hotfix beats release/*"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/other",
+   "allow": false
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/other",
+   "allow": true
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/hotfix2",
+   "allow": true,
+   "note": "release/hotfix is exact, hotfix2 uses release/*"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/hotfix2",
+   "allow": false
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/other",
+   "allow": false,
+   "note": "no catch-all"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "user:nobody",
+    "groups": []
+   },
+   "op": "write",
+   "key": "packs/p.pack",
+   "allow": true,
+   "note": "release/hotfix is open to *, so any caller writes a branch"
+  },
+  {
+   "policy": "nested",
+   "identity": {
+    "principal": "lander",
+    "groups": []
+   },
+   "op": "write",
+   "key": "refs/release/",
+   "allow": true,
+   "note": "branch 'release/' matches release/* (prefix)"
+  }
+ ],
+ "invalid_policies": [
+  {
+   "version": 1,
+   "branches": {
+    "a*b": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  },
+  {
+   "version": 1,
+   "branches": {
+    "*a": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  },
+  {
+   "version": 1,
+   "branches": {
+    "a**": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  },
+  {
+   "version": 1,
+   "branches": {
+    "": {
+     "writers": [
+      "*"
+     ]
+    }
+   }
+  },
+  {
+   "version": 2
+  },
+  {
+   "version": 0
+  }
+ ]
+}
