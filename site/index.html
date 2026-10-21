@@ -1,6 +1,6 @@
 <title>pail</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="pail is version control that lives in your bucket: no server, one write per commit, Git-readable.">
+<meta name="description" content="pail is version control that lives in your S3 or GCS bucket. There's no server, and a commit is one write to the branch.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=JetBrains+Mono:wght@400;600&display=swap">
@@ -168,7 +168,7 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
   <div class="hero" id="top">
     <div>
       <h1>Version control that lives in your bucket.</h1>
-      <p class="lede">A pail repository is a prefix in S3, GCS or any object store. <strong>There is no server and no push:</strong> a commit is new immutable objects plus one conditional write to its branch, so every clone sees it at once. History reads as Git, byte for byte.</p>
+      <p class="lede">A pail repository is just a folder in S3, GCS or any other object store. <strong>There's no server, and there's no push.</strong> When you commit, pail uploads a few new files and does one conditional write to the branch, and everyone sees the commit right away. <code>pail log</code> and <code>pail show</code> print exactly what Git would.</p>
       <div class="install">
         <div class="cmd" id="cmd"><span>$</span> pail init gs://your-bucket/app</div>
         <button class="btn" id="copy" type="button">Copy</button>
@@ -184,14 +184,14 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
 
   <section id="how">
     <p class="eyebrow">How it works</p>
-    <h2>Everything is immutable except the branch pointers.</h2>
+    <h2>Nothing in the bucket changes except the branch pointers.</h2>
     <div class="prose">
-      <p>File contents go into packs, and the tree of every commit is a <strong>prolly-tree manifest</strong>: pages named by their BLAKE3 hash, so a commit that changes three files writes three or four small pages no matter how large the repository is. Commits, pages and packs are never modified, which makes them safe to cache anywhere.</p>
-      <p>The only object that ever changes is <code>refs/&lt;branch&gt;</code>, and it changes only by compare-and-swap, the conditional write every major object store now supports. That one write is the commit.</p>
+      <p>File contents go into packs. The file tree of each commit is a <strong>prolly tree</strong>, split into small pages named by their BLAKE3 hash. Change three files and you write three or four small pages, whether the repository has a hundred files or a million. Commits, pages and packs are never modified after they're written, so you can cache them anywhere.</p>
+      <p>The only thing that ever changes is <code>refs/&lt;branch&gt;</code>, and only through compare-and-swap. Every major object store supports that kind of conditional write now. That one write is the commit.</p>
     </div>
     <div class="split">
       <div class="layout" role="img" aria-label="Repository layout in the bucket">
-        <div><span class="mut">refs/main</span> <span class="note">the branch: {commit, version} · moved only by CAS</span></div>
+        <div><span class="mut">refs/main</span> <span class="note">the branch: {commit, version}, only moved by CAS</span></div>
         <div><span class="mut">refs/pr/hello</span></div>
         <div><span class="imm">commits/7f3a…</span> <span class="note">parent, root, author, message, changed paths</span></div>
         <div><span class="imm">pages/c684…</span> <span class="note">manifest: path → size, hash, location</span></div>
@@ -200,19 +200,19 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
         <div><span class="mut">intents/main/…</span> <span class="note">commits waiting to be combined</span></div>
       </div>
       <ol class="steps">
-        <li><p><b>Prepare locally.</b> Hash the changed files, rebuild the few pages on their path, encode the commit. Every object's name is known before anything is sent.</p></li>
-        <li><p><b>Upload in one wave.</b> Packs, pages and the commit object go up in parallel: one round trip.</p></li>
-        <li><p><b>Swap the branch.</b> One conditional write from the version this working copy last saw: the second round trip. If another writer got there first on different files, pail replays the commit on the new head automatically.</p></li>
-        <li><p><b>Under contention, combine.</b> A writer that loses publishes an intent; the oldest waiting writer lands every pending intent with one swap, each as its own commit, in order. On GCS, which allows about one write per second to an object, batches grow with the load instead of the swap rate.</p></li>
+        <li><p><b>Prepare locally.</b> pail hashes the changed files, rebuilds the few pages above them and writes the commit object. It knows the name of everything it's going to upload before it sends a byte.</p></li>
+        <li><p><b>Upload everything at once.</b> Packs, pages and the commit go up in parallel, so that's one round trip.</p></li>
+        <li><p><b>Move the branch.</b> One conditional write, from the version your working copy last saw. That's the second round trip. If someone else got there first and touched different files, pail replays your commit on top of theirs.</p></li>
+        <li><p><b>When it's busy, batch.</b> A writer that loses the race leaves an intent instead of retrying. The oldest waiting writer lands all pending intents in one write, each as its own commit, in order. This matters on GCS, which only allows about one write per second to the same object.</p></li>
       </ol>
     </div>
   </section>
 
   <section id="numbers">
     <p class="eyebrow">Numbers</p>
-    <h2>Measured against git push to github.com.</h2>
+    <h2>How it compares to pushing to GitHub</h2>
     <div class="prose">
-      <p>The same edits through each CLI, N writers on one branch, 20 commits each, from the same laptop: <code>git add/commit/push</code> to a private github.com repository, <code>pail add/commit</code> to a GCS bucket. After every pail run, each reported commit was checked on main.</p>
+      <p>We ran the same edits through both CLIs from the same laptop. Each writer made 20 commits to one shared branch: <code>git add/commit/push</code> to a private GitHub repository, and <code>pail add/commit</code> to a GCS bucket. After each pail run we checked that every commit actually made it onto main.</p>
     </div>
     <div class="numbers">
       <table>
@@ -227,27 +227,27 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
         </tbody>
       </table>
     </div>
-    <p class="fine">Residential client in Phoenix, about 90 ms from github.com and 35 ms from storage.googleapis.com, October 2026. Both systems are bound by round trips; from a machine in the bucket's region, each costs tens of milliseconds. Without a process per commit, pail's library reached 7.1 commits per second with 16 writers.</p>
+    <p class="fine">A caveat: this was a home connection in Phoenix in October 2026, about 90 ms from github.com and 35 ms from storage.googleapis.com. Both tools spend most of their time waiting on round trips, so both get faster from a machine in the bucket's region. Calling pail as a library, without starting a process per commit, got to 7.1 commits per second with 16 writers.</p>
   </section>
 
   <section id="agents">
-    <p class="eyebrow">Built for agent fleets</p>
-    <h2>Many writers, one history, no queue.</h2>
+    <p class="eyebrow">Agents</p>
+    <h2>Built for lots of agents committing to the same branch</h2>
     <div class="features">
-      <div><h3>Stacks land atomically</h3><p><code>pail land feature --stack</code> puts every commit of a branch onto main in one swap, fast-forward or replayed. Run it again after a failure; it is idempotent.</p></div>
-      <div><h3>Worktrees cost almost nothing</h3><p>Working copies are copy-on-write clones of one shared content cache, and ignored build output is cloned from the current copy, so a new worktree starts warm without doubling the disk.</p></div>
-      <div><h3>Git reads it</h3><p><code>pail log</code>, <code>show</code>, <code>cat-file</code> and <code>ls-tree</code> take Git's options and print Git's output. A live mirror proves every commit of a real monorepo byte for byte.</p></div>
-      <div><h3>Your bucket, your account</h3><p>Data never leaves your cloud. Credential providers mint short-lived tokens scoped to one repository, so people need no bucket keys of their own.</p></div>
-      <div><h3>Conflicts are explicit</h3><p>Disjoint changes replay on their own. When two writers change the same path, the later one gets exit code 4 and the path list, and syncs.</p></div>
-      <div><h3>Hooks where they belong</h3><p>pre-commit, commit-msg and pre-publish run before the swap; the pre-publish hook checks the exact commit that will land.</p></div>
+      <div><h3>Land a whole stack at once</h3><p><code>pail land feature --stack</code> puts every commit on a branch onto main in one write. If it fails partway, run it again. It picks up where it left off.</p></div>
+      <div><h3>Cheap worktrees</h3><p>Working copies are copy-on-write clones of one shared cache. Build output gets cloned too, so a new worktree starts with a warm build and doesn't double your disk usage.</p></div>
+      <div><h3>Same output as Git</h3><p><code>pail log</code>, <code>show</code>, <code>cat-file</code> and <code>ls-tree</code> take Git's flags and print Git's output. We mirror our own monorepo into pail as it changes and check every commit byte for byte. Thousands of commits so far, no mismatches.</p></div>
+      <div><h3>Your data stays in your bucket</h3><p>Nothing leaves your cloud account. People don't need bucket keys either: a credential provider hands out short-lived tokens that only work for one repository.</p></div>
+      <div><h3>Real conflicts stop you</h3><p>Changes to different files just work. When two writers change the same file, the second one gets exit code 4 and a list of the files, so a script or an agent knows exactly what to sync.</p></div>
+      <div><h3>Hooks run before anything lands</h3><p><code>pre-commit</code>, <code>commit-msg</code> and <code>pre-publish</code> all run before the branch moves. <code>pre-publish</code> sees the exact commit that's about to land.</p></div>
     </div>
   </section>
 
   <section id="extend">
     <p class="eyebrow">Extend</p>
-    <h2>Features are programs that agree on names.</h2>
+    <h2>PRs and CI are just programs that read and write branches</h2>
     <div class="prose">
-      <p>Pull requests and CI need no server here. Every publish is a write to <code>refs/&lt;branch&gt;</code>, and object stores already announce writes. A tool subscribes to those notifications, reads what it needs, and records results as commits on a <code>_meta</code> branch, which makes every record atomic, versioned and conflict-checked.</p>
+      <p>You don't need a server for pull requests or CI. Every commit is a write to <code>refs/&lt;branch&gt;</code>, and object stores already send a notification when something is written. A tool listens for those, reads what it needs, and saves its results as commits on a <code>_meta</code> branch. That way every record gets history and conflict checks for free.</p>
     </div>
     <div class="conv">
       <table>
@@ -285,24 +285,24 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
 <span class="c">landed 1 commit(s) from pr/hello onto main</span>
 <span class="c">merged PR 1 into main @ 126ebf48d9dc</span></pre>
     </div>
-    <p class="fine">Both extensions are short programs that only call the pail CLI. Measured on GCS, a ref event reached the subscriber 1.2 to 1.6 seconds after the commit started. Notifications are at-least-once and unordered, so <code>pail events</code> re-reads the ref and drops duplicates, and CI keys every result by commit.</p>
+    <p class="fine">Both are short scripts that only call the pail CLI. On GCS, the notification showed up 1.2 to 1.6 seconds after the commit started. Notifications can arrive twice or out of order, so <code>pail events</code> re-reads the branch and drops duplicates, and CI files every result under the commit it tested.</p>
   </section>
 
   <section id="protect">
     <p class="eyebrow">Protect branches</p>
-    <h2>The bucket's permissions are the rule book.</h2>
+    <h2>The bucket itself enforces branch protection</h2>
     <div class="prose">
-      <p>With no server in the write path, a rule only holds if the store enforces it. So pail puts protection where the bytes are: <strong>nobody but a lander can write a protected ref</strong>, content is create-only, and the lander moves <code>refs/main</code> only after the policy is met.</p>
+      <p>There's no server in the middle, so a rule only means something if the object store enforces it. That's where pail puts it. <strong>Only a lander can write a protected branch.</strong> Everyone else can add history but never delete or rewrite it, and the lander only moves <code>refs/main</code> once the reviews and checks pass.</p>
     </div>
     <div class="conv">
       <table>
         <thead><tr><th>Object</th><th>People and agents</th><th>Lander</th><th>Why</th></tr></thead>
         <tbody>
-          <tr><td>refs/main, refs/release/*</td><td>read</td><td>write</td><td>Protected branches move only through review.</td></tr>
-          <tr><td>refs/pr/*, refs/&lt;you&gt;/*</td><td>write</td><td>write</td><td>Work in progress stays fast and unreviewed.</td></tr>
-          <tr><td>commits/ pages/ packs/</td><td>create only</td><td>create only</td><td>History cannot be deleted or overwritten. Only GC deletes.</td></tr>
-          <tr><td>intents/main/*</td><td>none</td><td>write</td><td>No combining on a protected branch (see below).</td></tr>
-          <tr><td>_policy</td><td>read</td><td>admins only</td><td>The rules themselves are protected.</td></tr>
+          <tr><td>refs/main, refs/release/*</td><td>read</td><td>write</td><td>Protected branches only move after review.</td></tr>
+          <tr><td>refs/pr/*, refs/&lt;you&gt;/*</td><td>write</td><td>write</td><td>Work in progress doesn't wait on anyone.</td></tr>
+          <tr><td>commits/ pages/ packs/</td><td>create only</td><td>create only</td><td>Nobody can delete or rewrite history. Only garbage collection deletes.</td></tr>
+          <tr><td>intents/main/*</td><td>none</td><td>write</td><td>No batching on protected branches (more below).</td></tr>
+          <tr><td>_policy</td><td>read</td><td>admins only</td><td>Only admins can change the rules.</td></tr>
         </tbody>
       </table>
     </div>
@@ -319,26 +319,26 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
   <span class="a">"*"</span>: { <span class="a">"writers"</span>: [<span class="a">"*"</span>] }
 } }</pre>
       <ol class="steps">
-        <li><p><b>Sign in, get a narrow token.</b> A broker checks who you are and runs <code>pail policy token --as you</code>: a short-lived token whose access boundary is the policy, so a direct push to main fails at the bucket.</p></li>
-        <li><p><b>Push to a PR branch.</b> Commits land on <code>pr/*</code> as usual; CI records checks from the bucket's events.</p></li>
-        <li><p><b>Reviews can't be forged.</b> An approval is a record for one exact commit, written by a review tool that stamps the authenticated reviewer, so no one can approve in someone else's name.</p></li>
-        <li><p><b>The lander merges.</b> A merge request is an event. The lander, the only identity allowed to write <code>refs/main</code>, reads <code>pail policy requirements main</code>, checks approvals from people other than the author and required checks on the exact head commit, then lands the stack with one swap.</p></li>
+        <li><p><b>Sign in and get a token.</b> A broker checks who you are and runs <code>pail policy token --as you</code>. The token it hands back is short-lived and only allows what the policy allows, so committing straight to main fails at the bucket.</p></li>
+        <li><p><b>Commit to a PR branch.</b> Commits to <code>pr/*</code> work like any other commit. CI hears about them from the bucket's notifications and records its checks.</p></li>
+        <li><p><b>Get a review.</b> An approval is a record for one exact commit. A review tool writes it and stamps who actually signed in, so you can't approve in someone else's name.</p></li>
+        <li><p><b>The lander merges.</b> The lander is the only identity that can write <code>refs/main</code>. It reads <code>pail policy requirements main</code>, makes sure someone other than the author approved and the required checks passed on that exact commit, and then lands the stack in one write.</p></li>
       </ol>
     </div>
     <div class="features">
-      <div><h3>Three places to enforce</h3><p>One policy, three enforcement points: <code>pail serve</code> checks every request (any backend); a broker's <code>pail policy token</code> makes GCS enforce it; a lander turns reviews and checks into a branch move.</p></div>
-      <div><h3>No combining across trust</h3><p>Combining lands other writers' changes with the combiner's permissions. On a protected branch that would let a privileged writer land unreviewed work, so only the lander writes there, and it batches only changes it approved.</p></div>
-      <div><h3>Authors are claims, signatures are proof</h3><p>A commit's author field says who the writer typed in. Policy decisions rely only on authenticated writers or signed records, never on that field.</p></div>
+      <div><h3>Where the rules are checked</h3><p>The same policy file works three ways. <code>pail serve</code> checks every request, on any backend. A broker runs <code>pail policy token</code> so GCS enforces it directly. The lander checks reviews and CI before it moves a branch.</p></div>
+      <div><h3>No batching on protected branches</h3><p>When pail batches commits, the writer doing the batching lands everyone else's changes too. On main, that would be a way to sneak in unreviewed work. So only the lander writes there, and it only batches changes it has already approved.</p></div>
+      <div><h3>The author field isn't trusted</h3><p>A commit's author is whatever the writer typed in. Policy decisions only look at who actually authenticated, or at records a trusted tool wrote. They never look at the author field.</p></div>
     </div>
-    <p class="fine">Verified on GCS: a downscoped token with these rules can read the repository, create content and write <code>refs/pr/*</code>, and gets 403 on every write to <code>refs/main</code>, <code>refs/release/*</code> and <code>intents/main/</code>, on every overwrite or delete of history, and on other repositories. Enforcement holds when people have no bucket roles of their own and get tokens only from a broker. How to build the broker and lander: <code>docs/protecting-branches.md</code>.</p>
+    <p class="fine">We tested this on GCS. A token built from these rules can read the repository, add history and write <code>refs/pr/*</code>. It gets a 403 when it tries to write <code>refs/main</code> or <code>refs/release/*</code>, delete or overwrite history, or touch another repository. One requirement: people can't have bucket permissions of their own. They only get tokens from the broker. <code>docs/protecting-branches.md</code> explains how to build the broker and the lander.</p>
   </section>
 
   <section id="start">
     <div class="cta">
       <div>
         <p class="eyebrow">Get started</p>
-        <h2>One bucket, one command.</h2>
-        <div class="prose"><p>Any S3, GCS or file:// location works. People without bucket credentials sign in through a credential provider, or reach the repository through a proxy.</p></div>
+        <h2>All you need is a bucket</h2>
+        <div class="prose"><p>Any S3 or GCS bucket works, or a local folder with <code>file://</code>. People who don't have bucket credentials can sign in through a credential provider, or go through <code>pail serve</code>.</p></div>
       </div>
       <pre class="code" aria-label="Getting started"><span class="k">pail</span> init gs://acme-vcs/app
 <span class="k">pail</span> clone gs://acme-vcs/app && cd app
@@ -349,7 +349,7 @@ footer { padding-block: 40px 56px; border-top: 1px solid var(--rule); color: var
   </section>
 
   <footer>
-    <span>pail · version control that lives in your bucket</span>
+    <span>pail: version control that lives in your bucket</span>
     <span>Built at ArchAstro</span>
   </footer>
 </div>
