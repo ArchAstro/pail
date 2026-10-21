@@ -608,6 +608,13 @@ fn main() {
             eprintln!("error: {h}");
             std::process::exit(pail::hooks::REFUSED_EXIT);
         }
+        if let Some(n) = e
+            .chain()
+            .find_map(|c| c.downcast_ref::<pail::httpstore::NeedsSignIn>())
+        {
+            eprintln!("error: {n}");
+            std::process::exit(1);
+        }
         let text = format!("{e:#}");
         if text.contains("refs/")
             && (text.contains("403") || text.contains("lacked the necessary privileges"))
@@ -1051,15 +1058,20 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             let store = pail::rev::store_url(&store)?;
             // The store's default branch unless one is named.
-            let default = match Repo::remote(&store)?
-                .store
-                .get_opt(pail::rev::STORE_HEAD_KEY)
-                .await?
-            {
-                Some((d, _)) => serde_json::from_slice::<pail::rev::StoreHead>(&d)?.branch,
+            let repo = Repo::remote(&store)?;
+            let head = repo.store.get_opt(pail::rev::STORE_HEAD_KEY).await?;
+            let default = match &head {
+                Some((d, _)) => serde_json::from_slice::<pail::rev::StoreHead>(d)?.branch,
                 None => Config::load(None).default_branch(),
             };
             let branch = branch.unwrap_or_else(|| default.clone());
+            if (store.starts_with("https://") || store.starts_with("http://"))
+                && head.is_none()
+                && repo.read_ref_value(&branch).await?.is_none()
+            {
+                // Servers answer 404 for private repositories on purpose.
+                bail!("{store}: the repository doesn't exist, or you don't have access to it");
+            }
             let name = store
                 .trim_end_matches('/')
                 .rsplit('/')
