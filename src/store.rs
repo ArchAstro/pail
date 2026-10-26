@@ -166,6 +166,19 @@ impl Store {
         }
     }
 
+    /// A store over any object store, such as an in-memory bucket or one wrapped to inject
+    /// faults (the refinement tests do both).
+    pub fn from_object_store(url: &str, inner: Arc<dyn ObjectStore>) -> Store {
+        Store {
+            inner,
+            prefix: String::new(),
+            local_root: None,
+            url: url.to_string(),
+            stats: Arc::new(Stats::default()),
+            creds: None,
+        }
+    }
+
     /// The shortest sustainable interval between writes to one object: GCS allows about one
     /// write per second to the same name; S3 and local stores have no per-key limit.
     /// `PAIL_SWAP_INTERVAL_MS` overrides.
