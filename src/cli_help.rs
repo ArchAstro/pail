@@ -235,6 +235,7 @@ pub const CONFIG: &str = "\
 Git's config format and layering: the repository's .pail/config, then --global
 (~/.config/pail/config). Keys pail reads:
   user.name, user.email          identity (or PAIL_AUTHOR=\"Name <email>\")
+  (env) PAIL_DATE               commit date as \"<unix seconds> [+zone]\", for reproducible ids
   init.defaultBranch             branch for `pail init`
   core.hooksPath                 hooks directory (relative to the working copy; empty: off)
   core.pager, color.ui, log.date, log.abbrevCommit, format.pretty, …   as Git

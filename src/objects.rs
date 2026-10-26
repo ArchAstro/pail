@@ -295,8 +295,16 @@ pub fn validate_branch(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Current time as a Git-style `<unix seconds> +0000` date.
+/// Current time as a Git-style `<unix seconds> +0000` date. `PAIL_DATE` (`<unix seconds>
+/// [<+zone>]`) stands in for it, as Git's GIT_AUTHOR_DATE/GIT_COMMITTER_DATE do: commit ids
+/// then depend only on content, for reproducible tests and scripts.
 pub fn now_date() -> String {
+    if let Ok(d) = std::env::var("PAIL_DATE") {
+        let mut parts = d.split_whitespace();
+        if let Some(secs) = parts.next().filter(|s| s.parse::<u64>().is_ok()) {
+            return format!("{secs} {}", parts.next().unwrap_or("+0000"));
+        }
+    }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

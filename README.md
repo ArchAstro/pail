@@ -584,6 +584,11 @@ PAIL_TEST_STORES="s3://pail/test" AWS_ENDPOINT=http://localhost:19000 AWS_ALLOW_
   AWS_ACCESS_KEY_ID=x AWS_SECRET_ACCESS_KEY=x AWS_REGION=us-east-1 cargo test --release --test backends
 ```
 
+Scenario tests (`tests/scenarios/*.t`) are shell transcripts of common Git workflows run in pail
+(often beside Git itself): conflicts, feature branches, stacked PRs, interactive rebase.
+`PAIL_BLESS=1 cargo test --test scenarios` records new output; see
+[tests/scenarios/README.md](tests/scenarios/README.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
