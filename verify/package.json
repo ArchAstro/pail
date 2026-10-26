@@ -1,0 +1,15 @@
+{
+  "name": "pail-verify",
+  "private": true,
+  "description": "Quint model of pail's publish protocol and the tools that check it",
+  "scripts": {
+    "compile": "quint-refinements compile scenarios.qnt --module scenarios --artifact quint-refinements.json --rust ../tests/refinement/generated.rs",
+    "check": "npm run compile -- --check",
+    "test": "quint test store_test.qnt --main=storeTest --match='Run$' && quint test scenarios.qnt --main=scenarios --match='Run$'",
+    "simulate": "quint run publish.qnt --main=publish --invariant=safety --max-steps=20 --max-samples=20000"
+  },
+  "devDependencies": {
+    "@informalsystems/quint": "0.33.0",
+    "quint-refinements": "https://codeload.github.com/ArchAstro/quint-refinements/tar.gz/83bf4348e48f852dc54589db048e74e5c436ca7f"
+  }
+}

@@ -589,6 +589,10 @@ Scenario tests (`tests/scenarios/*.t`) are shell transcripts of common Git workf
 `PAIL_BLESS=1 cargo test --test scenarios` records new output; see
 [tests/scenarios/README.md](tests/scenarios/README.md).
 
+Publishing is also modelled in Quint ([verify/](verify/README.md)): the model's properties are
+checked over random interleavings of writers and lost CAS replies, and `tests/refinement.rs`
+runs real clients through the model's scenarios one store request at a time.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

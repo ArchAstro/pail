@@ -1276,6 +1276,7 @@ dependencies = [
  "libc",
  "memmap2",
  "object_store",
+ "quint-refinements",
  "rand 0.9.5",
  "regex",
  "reqwest",
@@ -1425,6 +1426,15 @@ dependencies = [
  "socket2",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "quint-refinements"
+version = "0.2.0"
+source = "git+https://github.com/ArchAstro/quint-refinements?rev=83bf4348e48f852dc54589db048e74e5c436ca7f#83bf4348e48f852dc54589db048e74e5c436ca7f"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

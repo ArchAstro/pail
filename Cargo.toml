@@ -38,3 +38,7 @@ tokio = { version = "1", features = ["full"] }
 unicode-width = "0.2"
 url = "2"
 zstd = "0.13"
+
+[dev-dependencies]
+# Checks `Repo::commit` against the Quint model in verify/ (tests/refinement.rs).
+quint-refinements = { git = "https://github.com/ArchAstro/quint-refinements", rev = "83bf4348e48f852dc54589db048e74e5c436ca7f" }
