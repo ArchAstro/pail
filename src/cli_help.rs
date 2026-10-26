@@ -29,6 +29,7 @@ Branches and landing
   branch [<name>]           List, create (-d delete, --default the default branch)
   switch <branch>           Switch the working copy (-c: create at the current base)
   land <branch>             Land onto the default branch: squashed, or --stack commit by commit
+  rebase [<upstream>]       Rewrite a branch's commits in one publish (-i, --plan, --undo)
 
 History (Git's interface and output)
   log, show                 History and commits, as `git log` / `git show`
@@ -145,6 +146,40 @@ Examples:
 --stack fast-forwards when it can and otherwise replays the stack on the new head; landing
 a branch stacked on another lands both. A --stack landing is idempotent: after a failure,
 run it again. Overlapping changes fail with exit 4.";
+
+pub const REBASE: &str = "\
+Examples:
+  pail rebase                              # replay the branch onto the default branch's tip
+  pail rebase -i HEAD~3                    # reorder, reword, squash, fixup or drop the last 3
+  pail rebase --autosquash                 # meld `fixup! <subject>` commits into their targets
+  pail rebase main --branch feature-b      # restack a branch built on main's old history
+  pail rebase feature-a --branch feature-b # ...or on a branch that was itself rewritten
+  pail rebase --print-plan > plan.json     # the plan as JSON; edit it, then:
+  pail rebase --plan plan.json --dry-run --json
+  pail rebase --undo                       # back to before the last rewrite
+
+The whole plan is carried out in memory from each commit's change list, then published in
+one compare-and-swap: there is no stopped state, no --continue, and a conflict (exit 4)
+publishes nothing. A commit conflicts when a path it changes is not, on the new history, as
+its parent had it (or already as the commit leaves it); a commit whose changes are all there
+already is dropped. Unchanged commits on their original parent are kept as they are.
+
+Commits others add to the branch meanwhile are carried onto the new history. Each rewrite
+bumps the branch's epoch and records old -> new for every commit (reflog/<branch>/), so
+working copies and branches built on the old history find their place in the new one:
+`pail sync` and `pail commit` say when that happened, and land/rebase start a stacked branch
+where it left the old history. --undo is a rewrite too (it can itself be undone).
+
+Rewritten commits keep author, date and message (committer: you), and name the commits they
+replace in rewritten.from. The default branch is refused unless --rewrite-default. Hooks:
+pre-publish <branch> rebase, then post-rewrite rebase with <old> <new> lines.
+
+Plan JSON (--plan FILE or -; revisions may be short ids):
+  {\"branch\": \"feature\", \"expect\": \"<tip>\", \"base\": \"<after this>\", \"onto\": \"<new base>\",
+   \"steps\": [{\"pick\": \"a1\"}, {\"reword\": \"b2\", \"message\": \"New subject\\n\"},
+             {\"squash\": \"c3\"}, {\"fixup\": \"d4\"}, {\"drop\": \"e5\"}]}
+Editors: PAIL_SEQUENCE_EDITOR or sequence.editor for the todo list; PAIL_EDITOR, core.editor,
+VISUAL or EDITOR for messages.";
 
 pub const GIT_READS: &str = "\
 Takes Git's options and prints Git's output (byte for byte) for pail history; Git's

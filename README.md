@@ -26,8 +26,8 @@ four binaries, `SHA256SUMS` and the GitHub release that `install.sh` downloads f
 ```
 <store>/
 ├─ HEAD                  {"branch": "main"}: the default branch
-├─ refs/<branch>         {"commit": "<id>"}: the only mutable objects, moved by CAS
-├─ reflog/<branch>/…     written only when a branch is force-moved
+├─ refs/<branch>         {"commit": "<id>", "epoch": n}: the only mutable objects, moved by CAS
+├─ reflog/<branch>/…     one record per rewrite: old → new tip and each old commit's successor
 ├─ commits/<blake3>      commit objects (JSON)
 ├─ pages/<blake3>        manifest pages: a prolly tree over sorted full paths
 ├─ packs/<blake3>.pack   small files, concatenated, read with range GETs
@@ -152,6 +152,47 @@ pail land feature                    # or: one squashed commit (--onto <branch> 
 Built from two store primitives: `write_commit` (store a commit on any parent without moving a
 ref) and `advance_ref` (one CAS from the tip the caller saw). `commit` is one of each;
 `land --stack` is N `write_commit`s and one `advance_ref`.
+
+### Rewriting history: rebase
+
+Interactive and scripted rebases are one thing: a **plan** (Git's todo verbs) carried out in
+memory from each commit's change list, then published in one CAS. No working copy, no
+stopped state, no `--continue`: a conflict (exit 4) publishes nothing.
+
+```sh
+pail rebase                              # onto the default branch's tip
+pail rebase -i HEAD~3                    # pick / reword / squash / fixup / drop, reorder
+pail rebase --autosquash                 # `fixup! <subject>` commits meld into their targets
+pail rebase --print-plan > plan.json     # agents: edit the JSON, then
+pail rebase --plan plan.json --dry-run --json
+pail rebase --undo                       # itself a rewrite, so it can be undone too
+```
+
+```
+plan ─▶ build (prepare commits, check each path) ─▶ store ─▶ reflog record ─▶ CAS: epoch + 1
+                     │ conflict: nothing written            (old → new map)    (commits added
+                     ▼                                                          meanwhile are
+                  exit 4                                                        carried over)
+```
+
+1. **Conflicts are per path:** a commit conflicts when a path it changes is not, on the new
+   history, as its parent had it (or already as the commit leaves it). A commit whose changes
+   are all there already is dropped; an unchanged commit on its original parent is reused.
+2. **Versioned refs:** every rewrite bumps the branch's `epoch` and writes a record mapping each
+   old commit to its successor (or none: dropped). Fast-forwards carry the epoch unchanged.
+3. **Nobody has to be told first.** There is no list of who has a working copy (no server, and
+   readers may not write), so instead every client can tell afterwards:
+   1. `pail sync` / `pail commit` from a base of an older epoch say the branch was rewritten
+      and where the base went; the files move by tree diff as always, local changes kept.
+   2. A branch built on the old history (a stack) starts where it left it: `land` and
+      `rebase <upstream>` take the fork point from the upstream's rewrite records, not the
+      merge base, so the old commits are not counted as the stack's own. `pail rebase` names
+      the branches it left behind (`hint: fb is built on the old fa: …`).
+   3. Copies of copies are recognised: `rewritten.from` (several ids for a squash) is followed
+      through every rewrite, so landing a stack after its base was rebased and landed skips it.
+4. **Safety:** commits added on top of the planned tip meanwhile are carried onto the new
+   history (or the rewrite conflicts); any other move of the branch fails the rewrite. The
+   default branch is refused without `--rewrite-default`; policy still decides who may write.
 
 S3 settings come from the usual `AWS_*` variables (`AWS_ENDPOINT`, `AWS_ALLOW_HTTP` for
 emulators). GCS settings come from `GOOGLE_*`.
@@ -416,6 +457,7 @@ publish check sees the exact commit before the single CAS that publishes it.
 pail commit   pre-commit ─▶ commit-msg $1 ─▶ [objects written] ─▶ pre-publish ─▶ CAS
               ─▶ post-rewrite replay (only if another writer landed after the check) ─▶ post-commit
 pail land     pre-publish ─▶ CAS ─▶ post-rewrite land
+pail rebase   pre-publish ─▶ CAS ─▶ post-rewrite rebase
 switch, clone, worktree add   post-checkout <prev> <new> 1
 sync                          post-sync <old> <new>
 ```
@@ -424,9 +466,9 @@ sync                          post-sync <old> <new>
 |---|---|---|---|
 | `pre-commit` | none; may restage with `pail add` | yes | pre-commit |
 | `commit-msg` | `$1` = message file, may be edited | yes | commit-msg |
-| `pre-publish` | `<branch> commit\|land`; stdin `<branch> <old> <new>` | yes | pre-push |
+| `pre-publish` | `<branch> commit\|land\|rebase`; stdin `<branch> <old> <new>` | yes | pre-push |
 | `post-commit` | none | no | post-commit |
-| `post-rewrite` | `replay\|land`; stdin `<old> <new>` lines | no | post-rewrite |
+| `post-rewrite` | `replay\|land\|rebase`; stdin `<old> <new>` lines | no | post-rewrite |
 | `post-checkout` | `<prev> <new> 1` | no | post-checkout |
 | `post-sync` | `<old> <new>` (and `ORIG_HEAD`) | no | post-merge |
 
@@ -434,7 +476,7 @@ sync                          post-sync <old> <new>
    dirs work); default `<repo>/hooks`; empty or `/dev/null` turns hooks off. Only files named
    exactly after a hook and executable run, so helpers like `_lib` can sit beside them.
 2. **Skip:** `pail commit -n/--no-verify` skips pre-commit, commit-msg and pre-publish;
-   `pail land --no-verify` skips pre-publish. post-* hooks always run and never fail a command.
+   `pail land --no-verify` and `pail rebase --no-verify` skip pre-publish. post-* hooks always run and never fail a command.
 3. **Environment:** the caller's, plus `PAIL_HOOK=<name>`, `PAIL_HOOK_BRANCH`,
    `PAIL_HOOK_WORKTREE`, with the running pail first on `PATH`. Pail exports nothing that
    locates a repository, so a hook's build/test children cannot be retargeted at the real

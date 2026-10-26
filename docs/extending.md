@@ -7,6 +7,7 @@ object store itself. Features are programs that agree on names:
 ```
 writes   pail put <branch> --file PATH=SRC     atomic commit to any branch, no working copy
          pail land <branch> --stack            every commit of a branch, one atomic swap
+         pail rebase --plan FILE --json        rewrite a branch from a JSON plan, one atomic swap
 reads    pail cat <rev>:<path>, pail ls -r <rev>:<dir>, pail log, pail rev-parse
 events   pail events [--branch GLOB] [--gcs-subscription SUB]
          one JSON line per ref change: {"branch","commit","old","source","at"}

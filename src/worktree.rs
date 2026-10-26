@@ -3,7 +3,7 @@
 //! working copy the one `.pail/repo` names.
 //!
 //! ```text
-//! .pail/HEAD.json       {"branch": "...", "base": "<commit>"}
+//! .pail/HEAD.json       {"branch": "...", "base": "<commit>", "epoch": n, "rewrite": "<id>"}
 //! .pail/stage.json      staged delta only: path → put|del (size O(changes), not O(repo))
 //! .pail/pending/<hash>  staged file contents, snapshotted at `add` time
 //! .pail/statcache.bin   path → (mtime, size, inode, hash) — a cache, safe to delete
@@ -38,6 +38,24 @@ pub struct Head {
     /// commit can swap without reading the ref first. Stale is harmless: the swap just fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known: Option<KnownRef>,
+    /// The branch's lineage at `base`: a ref from a later epoch was rewritten since.
+    #[serde(flatten)]
+    pub lineage: crate::objects::Lineage,
+}
+
+/// The branch was rewritten after this working copy's base: what moved where.
+#[derive(Debug, Clone)]
+pub struct Rewritten {
+    pub branch: String,
+    pub from: crate::objects::Lineage,
+    pub to: crate::objects::Lineage,
+    /// The old base.
+    pub base: Option<Hash>,
+    /// The old base's place in the new history (None: nothing of it survived).
+    pub successor: Option<Hash>,
+    /// Who rewrote it last, and how.
+    pub by: String,
+    pub op: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -61,11 +79,13 @@ impl Head {
                     version,
                     recent: r.recent,
                 }),
+                lineage: r.lineage,
             },
             (_, at) => Head {
                 branch: branch.to_string(),
                 base: at,
                 known: None,
+                lineage: Default::default(),
             },
         }
     }
@@ -149,6 +169,9 @@ pub struct Worktree {
     pub local: LocalRepo,
     pub head: Head,
     pub stage: BTreeMap<String, Staged>,
+    /// Set by `commit` and `sync` when the branch turned out to have been rewritten since the
+    /// base.
+    pub rewritten: Option<Rewritten>,
 }
 
 fn dot(root: &Path) -> PathBuf {
@@ -578,6 +601,7 @@ impl Worktree {
             local,
             head,
             stage,
+            rewritten: None,
         })
     }
 
@@ -630,6 +654,7 @@ impl Worktree {
             local,
             head,
             stage: BTreeMap::new(),
+            rewritten: None,
         };
         let mut cache = HashMap::new();
         for e in &entries {
@@ -1102,6 +1127,7 @@ impl Worktree {
                             commit: base,
                             version: k.version.clone(),
                             recent: k.recent.clone(),
+                            lineage: self.head.lineage.clone(),
                         }),
                         _ => None,
                     },
@@ -1111,7 +1137,9 @@ impl Worktree {
         // The branch may have advanced under us (replayed commit). Bring in others' changes.
         let old_base = self.head.base;
         let landed_parent = self.repo.commit_obj(&out.commit).await?.parent;
+        self.rewritten = self.rewritten_to(&out.lineage, landed_parent).await?;
         self.head.base = Some(out.commit);
+        self.head.lineage = out.lineage.clone();
         // The version belongs to the ref at `out.head`; it is only a known head for this base
         // when the commit is the tip (not the middle of a combined batch).
         self.head.known = (out.head == out.commit).then(|| KnownRef {
@@ -1211,7 +1239,42 @@ impl Worktree {
         Ok(changes.len())
     }
 
-    /// Fast-forward the base to the branch head, updating untouched files on disk.
+    /// Whether the branch, now at `tip` with lineage `to`, was rewritten since this working
+    /// copy's base: a later epoch whose history no longer contains the base.
+    async fn rewritten_to(
+        &self,
+        to: &crate::objects::Lineage,
+        tip: Option<Hash>,
+    ) -> Result<Option<Rewritten>> {
+        let (Some(base), Some(tip)) = (self.head.base, tip) else {
+            return Ok(None);
+        };
+        if *to == self.head.lineage || self.repo.is_ancestor(base, tip).await? {
+            return Ok(None);
+        }
+        let branch = &self.head.branch;
+        let successor = self
+            .repo
+            .successor(branch, base, &self.head.lineage, to)
+            .await?;
+        let last = match &to.rewrite {
+            Some(id) => self.repo.read_rewrite(branch, id).await.ok(),
+            None => None,
+        };
+        Ok(Some(Rewritten {
+            branch: branch.clone(),
+            from: self.head.lineage.clone(),
+            to: to.clone(),
+            base: Some(base),
+            successor,
+            by: last.as_ref().map(|r| r.by.clone()).unwrap_or_default(),
+            op: last.map(|r| r.op).unwrap_or_default(),
+        }))
+    }
+
+    /// Fast-forward the base to the branch head, updating untouched files on disk. After a
+    /// rewrite of the branch, the files move from the old base's tree to the new head's the
+    /// same way (local changes come along, clashes refuse), and `rewritten` says so.
     pub async fn sync(&mut self) -> Result<usize> {
         let r = self
             .repo
@@ -1219,6 +1282,7 @@ impl Worktree {
             .await?
             .with_context(|| format!("branch {} not found", self.head.branch))?;
         let head = r.0.commit;
+        self.rewritten = self.rewritten_to(&r.0.lineage, Some(head)).await?;
         if Some(head) == self.head.base {
             self.head = Head::at(&self.head.branch.clone(), Some(r), None);
             self.save_head()?;
@@ -1252,6 +1316,7 @@ impl Worktree {
             version: r.1,
             recent: r.0.recent,
         });
+        self.head.lineage = r.0.lineage;
         self.save_head()?;
         self.set_orig_head(old)?;
         self.hooks()

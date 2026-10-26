@@ -185,6 +185,48 @@ enum Cmd {
         #[arg(short = 'n', long)]
         no_verify: bool,
     },
+    /// Rewrite a branch's commits (reorder, reword, squash, fixup, drop, move onto another
+    /// base) in one atomic publish.
+    #[command(after_long_help = cli_help::REBASE)]
+    Rebase {
+        /// What the branch's own commits sit on: a branch or a commit (default: the default
+        /// branch). Its commits after this are rewritten.
+        #[arg(add = ArgValueCandidates::new(complete::branches))]
+        upstream: Option<String>,
+        /// The branch to rewrite (default: the working copy's branch).
+        #[arg(short, long, add = ArgValueCandidates::new(complete::branches))]
+        branch: Option<String>,
+        /// Put the commits on this branch or commit instead of the upstream.
+        #[arg(long, add = ArgValueCandidates::new(complete::branches))]
+        onto: Option<String>,
+        /// Edit the plan as a todo list first (Git's verbs).
+        #[arg(short, long)]
+        interactive: bool,
+        /// Meld `fixup! <subject>` and `squash! <subject>` commits into their targets.
+        #[arg(long)]
+        autosquash: bool,
+        /// Run this plan (JSON, `-` for stdin; see --print-plan) instead of building one.
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["upstream", "onto", "interactive", "autosquash"])]
+        plan: Option<String>,
+        /// Print the plan as JSON and stop.
+        #[arg(long)]
+        print_plan: bool,
+        /// Build the new history and report it, publishing nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Undo the branch's latest rewrite (itself a rewrite: commits added since are kept).
+        #[arg(long, conflicts_with_all = ["upstream", "onto", "interactive", "autosquash", "plan"])]
+        undo: bool,
+        /// Allow rewriting the store's default branch, which everyone builds on.
+        #[arg(long)]
+        rewrite_default: bool,
+        /// Skip the pre-publish hook.
+        #[arg(short = 'n', long)]
+        no_verify: bool,
+    },
     /// Show history, with `git log`'s options and output.
     #[command(after_long_help = cli_help::GIT_READS)]
     #[command(disable_help_flag = true)]
@@ -628,8 +670,22 @@ fn main() {
             std::process::exit(1);
         }
         if let Some(c) = e.downcast_ref::<pail::repo::ConflictError>() {
-            eprintln!("error: {c}");
-            eprintln!("hint: another writer changed the same paths; `pail sync`, then try again");
+            if e.to_string() == c.to_string() {
+                eprintln!("error: {c}");
+                eprintln!(
+                    "hint: another writer changed the same paths; `pail sync`, then try again"
+                );
+            } else {
+                // A rebase step: which commit, then the paths.
+                eprintln!("error: {e:#}");
+                eprintln!(
+                    "hint: nothing was published; change the plan (or the commits) and retry"
+                );
+            }
+            std::process::exit(4);
+        }
+        if let Some(m) = e.downcast_ref::<pail::repo::MovedError>() {
+            eprintln!("error: {m}");
             std::process::exit(4);
         }
         eprintln!("error: {e:#}");
@@ -1194,6 +1250,9 @@ async fn run(cli: Cli) -> Result<()> {
                 wt.add(&[String::new()], true).await?;
             }
             let (out, message) = wt.commit(&message, no_verify).await?;
+            if let Some(r) = &wt.rewritten {
+                note_rewritten(r);
+            }
             let retried = if out.attempts > 1 {
                 format!(", landed after {} attempts", out.attempts)
             } else {
@@ -1209,6 +1268,9 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Sync => {
             let mut wt = Worktree::open(&cwd()?)?;
             let n = wt.sync().await?;
+            if let Some(r) = &wt.rewritten {
+                note_rewritten(r);
+            }
             println!(
                 "{} @ {} ({n} path(s) updated)",
                 wt.head.branch,
@@ -1429,12 +1491,11 @@ async fn run(cli: Cli) -> Result<()> {
                 .read_ref(&branch)
                 .await?
                 .with_context(|| format!("no branch {branch}"))?;
-            let (dst, _) = repo
-                .read_ref(&onto)
+            repo.read_ref(&onto)
                 .await?
                 .with_context(|| format!("no branch {onto}"))?;
             let anc = repo
-                .merge_base(src, dst)
+                .fork_point(src, &onto)
                 .await?
                 .context("branches share no history")?;
             let from = repo.root_of(Some(anc)).await?;
@@ -1489,6 +1550,40 @@ async fn run(cli: Cli) -> Result<()> {
                 )
                 .await?;
             println!("landed {branch} onto {onto} @ {}", out.commit.short());
+        }
+        Cmd::Rebase {
+            upstream,
+            branch,
+            onto,
+            interactive,
+            autosquash,
+            plan,
+            print_plan,
+            dry_run,
+            json,
+            undo,
+            rewrite_default,
+            no_verify,
+        } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            rebase(
+                &ctx,
+                RebaseArgs {
+                    upstream,
+                    branch,
+                    onto,
+                    interactive,
+                    autosquash,
+                    plan,
+                    print_plan,
+                    dry_run,
+                    json,
+                    undo,
+                    rewrite_default,
+                    no_verify,
+                },
+            )
+            .await?;
         }
         Cmd::Diff {
             from,
@@ -1952,6 +2047,499 @@ fn publish_hook<'a>(
             .run("pre-publish", &[&p.branch, mode], Some(line.as_bytes()))
             .map(|_| ())
     }
+}
+
+struct RebaseArgs {
+    upstream: Option<String>,
+    branch: Option<String>,
+    onto: Option<String>,
+    interactive: bool,
+    autosquash: bool,
+    plan: Option<String>,
+    print_plan: bool,
+    dry_run: bool,
+    json: bool,
+    undo: bool,
+    rewrite_default: bool,
+    no_verify: bool,
+}
+
+/// `pail rebase`: build a plan (defaults, `--autosquash`, `-i`, or `--plan`), carry it out in
+/// memory, then publish it as one rewrite of the branch.
+async fn rebase(ctx: &Ctx, a: RebaseArgs) -> Result<()> {
+    use pail::rebase::{self as rb, Action, Plan, Step};
+    let repo = &ctx.repo;
+    let plan_file: Option<rb::PlanFile> = match &a.plan {
+        Some(f) => {
+            let text = if f == "-" {
+                std::io::read_to_string(std::io::stdin())?
+            } else {
+                std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?
+            };
+            Some(serde_json::from_str(&text).with_context(|| format!("parsing plan {f}"))?)
+        }
+        None => None,
+    };
+    let branch = match (&a.branch, &plan_file) {
+        (Some(b), Some(p)) if *b != p.branch => {
+            bail!("the plan is for {}, not {b}", p.branch)
+        }
+        (Some(b), _) => b.clone(),
+        (None, Some(p)) => p.branch.clone(),
+        (None, None) => ctx.branch().await?.to_string(),
+    };
+    let default = ctx.default_branch().await?.to_string();
+    let publishes = !a.print_plan && !a.dry_run;
+    if branch == default && !a.rewrite_default && publishes {
+        bail!(
+            "{branch} is the default branch: everyone builds on it. Rewrite a feature branch, or pass --rewrite-default"
+        );
+    }
+    let committer = ctx.config.identity("committer")?;
+    let date = now_date();
+    let hooks = ctx_hooks(ctx).with_env("BRANCH", branch.clone());
+    let pre_publish = publish_hook(&hooks, "rebase");
+    let check: Option<pail::repo::PublishCheck> =
+        if !a.no_verify && hooks.find("pre-publish").is_some() {
+            Some(&pre_publish)
+        } else {
+            None
+        };
+    let (tip_ref, _) = repo
+        .read_ref_value(&branch)
+        .await?
+        .with_context(|| format!("no branch {branch}"))?;
+    let tip = tip_ref.commit;
+
+    if a.undo {
+        let id = tip_ref
+            .lineage
+            .rewrite
+            .clone()
+            .with_context(|| format!("{branch} has not been rewritten"))?;
+        let rec = repo.read_rewrite(&branch, &id).await?;
+        if a.dry_run || a.print_plan {
+            println!(
+                "would undo the {} of {branch}: {} -> {}",
+                if rec.op.is_empty() {
+                    "rewrite"
+                } else {
+                    &rec.op
+                },
+                rec.new.short(),
+                rec.old.short()
+            );
+            return Ok(());
+        }
+        let inverse = rec
+            .map
+            .iter()
+            .filter_map(|(old, new)| new.map(|n| (n, Some(*old))))
+            .collect();
+        let out = repo
+            .rewrite_ref(
+                pail::repo::RewriteRequest {
+                    branch: branch.clone(),
+                    expected: rec.new,
+                    new: rec.old,
+                    op: "undo".into(),
+                    committer,
+                    date,
+                    map: inverse,
+                },
+                check,
+            )
+            .await?;
+        report_rewrite(ctx, &branch, &out, 0, &[], a.json).await?;
+        hooks.notify(
+            "post-rewrite",
+            &["rebase"],
+            Some(rewrite_pairs(&out).as_bytes()),
+        );
+        if !a.json {
+            stacked_hint(ctx, &branch, &out.record).await?;
+        }
+        follow_rewrite(ctx, &branch).await;
+        return Ok(());
+    }
+
+    let mut plan: Plan = match plan_file {
+        Some(f) => {
+            let expected = ctx.resolve(&f.expect).await?;
+            let base = ctx.resolve(&f.base).await?;
+            let onto = ctx.resolve(&f.onto).await?;
+            let range = rb::range(repo, base, expected).await?;
+            let mut steps = vec![];
+            for s in &f.steps {
+                let (action, rev) = s.verb()?;
+                steps.push(Step {
+                    action,
+                    commit: resolve_in(ctx, &range, rev).await?,
+                    message: s.message.clone(),
+                });
+            }
+            Plan {
+                branch: branch.clone(),
+                expected,
+                base,
+                onto,
+                steps,
+            }
+        }
+        None => {
+            let up = a.upstream.clone().unwrap_or_else(|| default.clone());
+            let (base, up_tip) = match repo.read_ref(&up).await? {
+                Some((h, _)) if pail::objects::validate_branch(&up).is_ok() => {
+                    if up == branch {
+                        bail!(
+                            "{branch} is its own upstream: name where its commits start, e.g. `pail rebase -i HEAD~3`"
+                        );
+                    }
+                    let fp = repo
+                        .fork_point(tip, &up)
+                        .await?
+                        .with_context(|| format!("{branch} and {up} share no history"))?;
+                    (fp, h)
+                }
+                _ => {
+                    let u = ctx.resolve(&up).await?;
+                    let mb = repo
+                        .merge_base(tip, u)
+                        .await?
+                        .with_context(|| format!("{branch} and {up} share no history"))?;
+                    (mb, u)
+                }
+            };
+            let onto = match &a.onto {
+                Some(o) => ctx.resolve(o).await?,
+                None => up_tip,
+            };
+            let mut plan = rb::default_plan(repo, &branch, tip, base, onto).await?;
+            if a.autosquash {
+                rb::autosquash(repo, &mut plan).await?;
+            }
+            plan
+        }
+    };
+    if plan.steps.is_empty() && plan.onto == plan.base {
+        println!("{branch} has no commits after {}", plan.base.short());
+        return Ok(());
+    }
+    if a.interactive {
+        let text = rb::todo_text(repo, &plan).await?;
+        let edited = edit_text(ctx, true, "rebase-todo", &text)?;
+        let lines = rb::parse_todo(&edited)?;
+        if lines.is_empty() {
+            bail!("nothing to do: the todo list is empty (nothing changed)");
+        }
+        let range = rb::range(repo, plan.base, plan.expected).await?;
+        let mut steps = vec![];
+        for l in &lines {
+            let commit = resolve_in(ctx, &range, l.rev).await?;
+            let mut message = None;
+            if l.action == Action::Reword {
+                let c = repo.commit_meta(&commit).await?;
+                message = Some(if !l.text.is_empty() && l.text != c.subject() {
+                    let body = c.message.split_once('\n').map(|(_, b)| b).unwrap_or("");
+                    if body.is_empty() {
+                        format!("{}\n", l.text)
+                    } else {
+                        format!("{}\n{body}", l.text)
+                    }
+                } else {
+                    edit_message(ctx, &c.message)?
+                });
+            }
+            steps.push(Step {
+                action: l.action,
+                commit,
+                message,
+            });
+        }
+        // A squash opens the editor on the combined message, as in Git; the melded commits
+        // then add nothing more.
+        let mut i = 0;
+        while i < steps.len() {
+            let mut j = i + 1;
+            while j < steps.len() && matches!(steps[j].action, Action::Squash | Action::Fixup) {
+                j += 1;
+            }
+            if steps[i + 1..j].iter().any(|s| s.action == Action::Squash) {
+                let lead = repo.commit_meta(&steps[i].commit).await?;
+                let mut msg = steps[i]
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| lead.message.clone());
+                for s in &steps[i + 1..j] {
+                    if s.action == Action::Squash {
+                        let c = repo.commit_meta(&s.commit).await?;
+                        msg = format!("{}\n\n{}", msg.trim_end(), c.message.trim_end());
+                    }
+                }
+                steps[i].message = Some(edit_message(ctx, &msg)?);
+                for s in &mut steps[i + 1..j] {
+                    s.action = Action::Fixup;
+                }
+            }
+            i = j;
+        }
+        plan.steps = steps;
+    }
+    if a.print_plan {
+        println!("{}", serde_json::to_string_pretty(&plan.to_file())?);
+        return Ok(());
+    }
+    let built = rb::build(repo, &plan, &committer, &date).await?;
+    if built.tip == plan.expected {
+        println!("{branch} is unchanged: nothing to rebase");
+        return Ok(());
+    }
+    if a.dry_run {
+        let would = pail::repo::RewriteOutcome {
+            old: plan.expected,
+            new: built.tip,
+            lineage: pail::objects::Lineage {
+                epoch: tip_ref.lineage.epoch + 1,
+                rewrite: None,
+            },
+            record: pail::objects::Rewrite {
+                old: plan.expected,
+                new: built.tip,
+                map: built.map.clone(),
+                ..Default::default()
+            },
+            carried: vec![],
+            attempts: 0,
+        };
+        if !a.json {
+            println!("dry run: nothing published");
+        }
+        report_rewrite(ctx, &branch, &would, built.created(), &built.empty, a.json).await?;
+        return Ok(());
+    }
+    rb::store(repo, &built).await?;
+    let out = repo
+        .rewrite_ref(
+            pail::repo::RewriteRequest {
+                branch: branch.clone(),
+                expected: plan.expected,
+                new: built.tip,
+                op: "rebase".into(),
+                committer,
+                date,
+                map: built.map.clone(),
+            },
+            check,
+        )
+        .await?;
+    report_rewrite(ctx, &branch, &out, built.created(), &built.empty, a.json).await?;
+    hooks.notify(
+        "post-rewrite",
+        &["rebase"],
+        Some(rewrite_pairs(&out).as_bytes()),
+    );
+    if !a.json {
+        stacked_hint(ctx, &branch, &out.record).await?;
+    }
+    follow_rewrite(ctx, &branch).await;
+    Ok(())
+}
+
+/// A commit of a plan's range by id prefix, else any revision.
+async fn resolve_in(ctx: &Ctx, range: &[Hash], rev: &str) -> Result<Hash> {
+    let lower = rev.to_ascii_lowercase();
+    if lower.len() >= 4 && lower.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let found: Vec<&Hash> = range
+            .iter()
+            .filter(|h| h.hex().starts_with(&lower))
+            .collect();
+        match found.as_slice() {
+            [one] => return Ok(**one),
+            [] => {}
+            _ => bail!("{rev} is ambiguous among the branch's commits"),
+        }
+    }
+    ctx.resolve(rev).await
+}
+
+/// `<old> <new>` lines for post-rewrite.
+fn rewrite_pairs(out: &pail::repo::RewriteOutcome) -> String {
+    out.record
+        .map
+        .iter()
+        .filter_map(|(o, n)| n.map(|n| format!("{} {}\n", o.hex(), n.hex())))
+        .collect()
+}
+
+async fn report_rewrite(
+    ctx: &Ctx,
+    branch: &str,
+    out: &pail::repo::RewriteOutcome,
+    created: usize,
+    empty: &[Hash],
+    json: bool,
+) -> Result<()> {
+    let map = &out.record.map;
+    if json {
+        let v = serde_json::json!({
+            "branch": branch,
+            "old": out.old,
+            "new": out.new,
+            "epoch": out.lineage.epoch,
+            "rewrite": out.lineage.rewrite,
+            "op": out.record.op,
+            "map": map,
+            "empty": empty,
+            "carried": out.carried,
+        });
+        println!("{v}");
+        return Ok(());
+    }
+    let dropped = map.values().filter(|n| n.is_none()).count();
+    let op = if out.record.op.is_empty() {
+        "rebased"
+    } else if out.record.op == "undo" {
+        "undid the last rewrite of"
+    } else {
+        "rebased"
+    };
+    println!(
+        "{op} {branch}: {} -> {} ({created} new commit(s), {dropped} dropped{}; epoch {})",
+        out.old.short(),
+        out.new.short(),
+        if out.carried.is_empty() {
+            String::new()
+        } else {
+            format!(", {} carried from others", out.carried.len())
+        },
+        out.lineage.epoch
+    );
+    // In history order, oldest first (the map itself is ordered by id).
+    let mut rows = vec![];
+    for (old, new) in map {
+        rows.push((ctx.repo.commit_meta(old).await?, old, new));
+    }
+    rows.sort_by_key(|(c, _, _)| c.generation);
+    for (c, old, new) in rows {
+        let what = match new {
+            Some(n) => n.short(),
+            None if empty.contains(old) => "dropped (already applied)".into(),
+            None => "dropped".into(),
+        };
+        println!("  {} -> {what}  {}", old.short(), c.subject());
+    }
+    Ok(())
+}
+
+/// Branches built on the commits a rewrite replaced still hold the old history: name them.
+async fn stacked_hint(ctx: &Ctx, branch: &str, rec: &pail::objects::Rewrite) -> Result<()> {
+    let mut stale = vec![];
+    for (b, h) in ctx.repo.list_refs().await? {
+        if b == branch || b.starts_with('_') {
+            continue;
+        }
+        if let Some(mb) = ctx.repo.merge_base(h, rec.old).await?
+            && rec.map.contains_key(&mb)
+        {
+            stale.push(b);
+        }
+    }
+    for b in stale {
+        println!("hint: {b} is built on the old {branch}: `pail rebase {branch} --branch {b}`");
+    }
+    Ok(())
+}
+
+/// Bring this working copy along when it is on the rewritten branch.
+async fn follow_rewrite(ctx: &Ctx, branch: &str) {
+    let Some(root) = &ctx.worktree else { return };
+    let Ok(mut wt) = Worktree::open(root) else {
+        return;
+    };
+    if wt.head.branch != branch {
+        return;
+    }
+    match wt.sync().await {
+        Ok(n) => println!(
+            "working copy now at {} ({n} path(s) updated)",
+            wt.head.base.unwrap().short()
+        ),
+        Err(e) => eprintln!(
+            "warning: the working copy is still on the old history ({e:#}); commit or restore, then `pail sync`"
+        ),
+    }
+}
+
+/// Say so when a commit or sync found the branch rewritten since the working copy's base.
+fn note_rewritten(r: &pail::worktree::Rewritten) {
+    let who = if r.by.is_empty() {
+        String::new()
+    } else {
+        format!(" by {}", r.by)
+    };
+    let to = match r.successor {
+        Some(s) => format!("its place in the new history is {}", s.short()),
+        None => "none of it survived".into(),
+    };
+    eprintln!(
+        "note: {} was rewritten{who} (epoch {} -> {}); your base {} is gone from it, {to}",
+        r.branch,
+        r.from.epoch,
+        r.to.epoch,
+        r.base.map(|b| b.short()).unwrap_or_default(),
+    );
+}
+
+/// Edit `text` in the user's editor and return the result. The sequence editor (todo lists)
+/// is `PAIL_SEQUENCE_EDITOR` or `sequence.editor`, falling back to the message editor:
+/// `PAIL_EDITOR`, `core.editor`, `VISUAL`, `EDITOR`, then `vi`.
+fn edit_text(ctx: &Ctx, sequence: bool, name: &str, text: &str) -> Result<String> {
+    let from_env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let seq = if sequence {
+        from_env("PAIL_SEQUENCE_EDITOR").or_else(|| ctx.config.get("sequence.editor"))
+    } else {
+        None
+    };
+    let editor = seq
+        .or_else(|| from_env("PAIL_EDITOR"))
+        .or_else(|| ctx.config.get("core.editor"))
+        .or_else(|| from_env("VISUAL"))
+        .or_else(|| from_env("EDITOR"))
+        .unwrap_or_else(|| "vi".into());
+    let dir = match &ctx.local {
+        Some(l) => l.dir.clone(),
+        None => std::env::temp_dir(),
+    };
+    let file = dir.join(format!("{name}-{}", std::process::id()));
+    std::fs::write(&file, text)?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg(&editor)
+        .arg(&file)
+        .status()
+        .with_context(|| format!("running editor {editor}"));
+    let edited = std::fs::read_to_string(&file);
+    let _ = std::fs::remove_file(&file);
+    if !status?.success() {
+        bail!("editor {editor} failed: nothing changed");
+    }
+    Ok(edited?)
+}
+
+/// A commit message through the editor: `#` lines dropped; empty aborts.
+fn edit_message(ctx: &Ctx, msg: &str) -> Result<String> {
+    let text = format!(
+        "{}\n\n# Edit the message. Lines starting with '#' are ignored; an empty message aborts.\n",
+        msg.trim_end()
+    );
+    let out = edit_text(ctx, false, "REBASE_MSG", &text)?;
+    let kept: Vec<&str> = out.lines().filter(|l| !l.starts_with('#')).collect();
+    let m = kept.join("\n").trim().to_string();
+    if m.is_empty() {
+        bail!("empty message: nothing changed");
+    }
+    Ok(format!("{m}\n"))
 }
 
 /// A command's long help: `pail help worktree add`.

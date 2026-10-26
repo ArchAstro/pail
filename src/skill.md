@@ -43,6 +43,10 @@ pail log --oneline -10
    the same paths: run `pail sync`, re-check the files, and commit again. Do not force.
 4. **Stage is a snapshot.** `pail add` captures content at that moment; re-add after edits.
 5. **`pail sync`** is a fast-forward pull. It refuses to overwrite local changes.
+6. **`pail rebase` publishes too.** It rewrites a branch everyone can see, in one atomic step
+   (a conflict, exit 4, changes nothing). Only rebase branches you own; never the default
+   branch (`--rewrite-default`) unless the user asks. A `note: <branch> was rewritten` from
+   `sync`/`commit` means someone else did: your files already moved; check them.
 
 ## Everyday flow
 
@@ -60,6 +64,15 @@ pail switch -c fix                # new branch at the current base
 pail add -A && pail commit -m "Fix"
 pail land fix --stack             # onto the default branch; safe to re-run
 pail switch main && pail sync
+```
+
+Rewrite a branch (no editor needed: plans are JSON):
+
+```bash
+pail rebase --autosquash                       # meld `fixup! <subject>` commits
+pail rebase --print-plan > plan.json           # steps: pick/reword/squash/fixup/drop
+pail rebase --plan plan.json --dry-run --json  # check, then run without --dry-run
+pail rebase --undo                             # back to before the last rewrite
 ```
 
 Extra working copies share contents and build output copy-on-write, so they are cheap:

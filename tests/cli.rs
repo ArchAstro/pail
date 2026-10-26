@@ -2074,3 +2074,131 @@ fn anonymous_https_store() {
     );
     assert!(!sent_auth.load(std::sync::atomic::Ordering::SeqCst));
 }
+
+/// `pail rebase`: -i through a scripted sequence editor, --autosquash, a plan file, --undo;
+/// a stale working copy is told its branch was rewritten; conflicts publish nothing (exit 4);
+/// the default branch is refused; the hooks see `rebase`.
+#[test]
+fn rebase_rewrites_history_and_working_copies_follow() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "a"]);
+    let a = t.join("a");
+    write(&a.join("base.txt"), "base");
+    pail(&a, &["add", "-A"]);
+    pail(&a, &["commit", "-m", "base"]);
+    pail(&a, &["switch", "-c", "feat"]);
+    for (f, msg) in [("one", "one"), ("two", "two"), ("one", "fixup! one")] {
+        write(&a.join(f), msg);
+        pail(&a, &["add", "-A"]);
+        pail(&a, &["commit", "-m", msg]);
+    }
+    pail(&t, &["clone", &store, "stale", "-b", "feat"]);
+    let stale = t.join("stale");
+
+    // The default branch is everyone's: refused without --rewrite-default.
+    let err = pail_fails(&a, &["rebase", "-b", "main", "HEAD~1"]);
+    assert!(err.contains("default branch"), "{err}");
+
+    // --autosquash, dry run first: nothing moves.
+    let tip = pail(&a, &["rev-parse", "feat"]);
+    let out = pail(&a, &["rebase", "--autosquash", "--dry-run"]);
+    assert!(out.contains("dry run") && out.contains("epoch 1"), "{out}");
+    assert_eq!(pail(&a, &["rev-parse", "feat"]), tip);
+    let out = pail(&a, &["rebase", "--autosquash"]);
+    assert!(out.contains("epoch 1"), "{out}");
+    let log = pail(&a, &["log", "--format=%s"]);
+    assert_eq!(log, "two\none\nbase\nInitial empty commit\n");
+    assert_eq!(
+        std::fs::read_to_string(a.join("one")).unwrap(),
+        "fixup! one"
+    );
+
+    // A stale working copy commits on top: replayed, and told.
+    write(&stale.join("s.txt"), "s");
+    pail(&stale, &["add", "-A"]);
+    let out = pail(&stale, &["commit", "-m", "stale"]);
+    assert!(out.contains("note: feat was rewritten"), "{out}");
+    pail(&a, &["sync"]);
+
+    // -i: reword through the todo text, reorder, drop.
+    let editor = "sed -i.bak -e 's/^pick \\([0-9a-f]*\\) one$/reword \\1 ONE/' -e '/ two$/d'";
+    let out = cmd(&a, &["rebase", "-i", "main"])
+        .env("PAIL_SEQUENCE_EDITOR", editor)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = pail(&a, &["log", "--format=%s"]);
+    assert_eq!(log, "stale\nONE\nbase\nInitial empty commit\n");
+    assert!(!a.join("two").exists(), "the working copy followed");
+
+    // --undo puts it back, and is itself a rewrite.
+    let out = pail(&a, &["rebase", "--undo"]);
+    assert!(out.contains("epoch 3"), "{out}");
+    let log = pail(&a, &["log", "--format=%s"]);
+    assert_eq!(log, "stale\ntwo\none\nbase\nInitial empty commit\n");
+
+    // A plan file: swap two commits that edit the same file → conflict, nothing published.
+    for v in ["1", "2"] {
+        write(&a.join("one"), v);
+        pail(&a, &["commit", "-a", "-m", &format!("one={v}")]);
+    }
+    let plan = pail(&a, &["rebase", "--print-plan"]);
+    let mut p: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    let steps = p["steps"].as_array_mut().unwrap();
+    let n = steps.len();
+    steps.swap(n - 1, n - 2);
+    let file = t.join("plan.json");
+    std::fs::write(&file, p.to_string()).unwrap();
+    let before = pail(&a, &["rev-parse", "feat"]);
+    let out = cmd(&a, &["rebase", "--plan", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("one=") && err.contains("one"), "{err}");
+    assert_eq!(pail(&a, &["rev-parse", "feat"]), before);
+
+    // The same plan with a squash instead: --json reports the map; hooks see `rebase`.
+    let hooks = t.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    hook(&hooks, "pre-publish", "echo \"pre $@\" >> \"$HOOKLOG\"");
+    hook(
+        &hooks,
+        "post-rewrite",
+        "echo \"post $@\" >> \"$HOOKLOG\"; cat >> \"$HOOKLOG\"",
+    );
+    pail(&a, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let mut p: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    let last = p["steps"].as_array().unwrap().len() - 1;
+    let id = p["steps"][last]["pick"].clone();
+    p["steps"][last] = serde_json::json!({"squash": id});
+    std::fs::write(&file, p.to_string()).unwrap();
+    let log_file = t.join("hook.log");
+    let out = cmd(&a, &["rebase", "--plan", file.to_str().unwrap(), "--json"])
+        .env("HOOKLOG", &log_file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let first = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(first.lines().next().unwrap()).unwrap();
+    assert_eq!(v["epoch"], 4);
+    assert_eq!(v["map"].as_object().unwrap().len(), 2);
+    let hooklog = std::fs::read_to_string(&log_file).unwrap();
+    assert!(
+        hooklog.contains("pre feat rebase") && hooklog.contains("post rebase"),
+        "{hooklog}"
+    );
+    let msg = pail(&a, &["log", "-1", "--format=%B"]);
+    assert!(msg.contains("one=1") && msg.contains("one=2"), "{msg}");
+}

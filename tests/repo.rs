@@ -668,3 +668,342 @@ async fn combining_never_lands_a_conflicting_intent() {
         "intents left behind"
     );
 }
+
+/// A linear branch `name` from `base`: one commit per (path, content), returning their ids.
+async fn commits_on(repo: &Repo, name: &str, base: Hash, files: &[(&str, &str)]) -> Vec<Hash> {
+    if repo.read_ref(name).await.unwrap().is_none() {
+        repo.create_branch(name, base).await.unwrap();
+    }
+    let mut tip = repo.read_ref(name).await.unwrap().unwrap().0;
+    let mut out = vec![];
+    for (p, c) in files {
+        let d = put_files(repo, &[(p, c)]).await;
+        tip = repo
+            .commit(req(name, Some(tip), d, &format!("{p}={c}")))
+            .await
+            .unwrap()
+            .commit;
+        out.push(tip);
+    }
+    out
+}
+
+async fn rebase(repo: &Repo, plan: &pail::rebase::Plan) -> pail::repo::RewriteOutcome {
+    let built = pail::rebase::build(repo, plan, "R <r@x>", "2 +0000")
+        .await
+        .unwrap();
+    pail::rebase::store(repo, &built).await.unwrap();
+    repo.rewrite_ref(
+        pail::repo::RewriteRequest {
+            branch: plan.branch.clone(),
+            expected: plan.expected,
+            new: built.tip,
+            op: "rebase".into(),
+            committer: "R <r@x>".into(),
+            date: "2 +0000".into(),
+            map: built.map,
+        },
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+fn step(action: pail::rebase::Action, commit: Hash) -> pail::rebase::Step {
+    pail::rebase::Step {
+        action,
+        commit,
+        message: None,
+    }
+}
+
+/// A rebase rewrites in memory and publishes once: the epoch goes up, the record maps every
+/// old commit to its successor, rewritten commits name their originals, and fast-forwards
+/// afterwards (direct, remembered-head and combined) keep the new lineage.
+#[tokio::test]
+async fn rebase_rewrites_in_one_publish_and_records_the_map() {
+    use pail::rebase::Action::*;
+    let (_d, repo) = temp_repo();
+    let d0 = put_files(&repo, &[("base.txt", "b")]).await;
+    let c0 = repo
+        .commit(req("main", None, d0, "base"))
+        .await
+        .unwrap()
+        .commit;
+    let cs = commits_on(
+        &repo,
+        "f",
+        c0,
+        &[("a", "1"), ("b", "1"), ("c", "1"), ("a", "2")],
+    )
+    .await;
+    let tip = cs[3];
+    let plan = pail::rebase::Plan {
+        branch: "f".into(),
+        expected: tip,
+        base: c0,
+        onto: c0,
+        steps: vec![
+            step(Pick, cs[0]),
+            step(Fixup, cs[3]),
+            pail::rebase::Step {
+                action: Reword,
+                commit: cs[2],
+                message: Some("C!\n".into()),
+            },
+            step(Drop, cs[1]),
+        ],
+    };
+    let out = rebase(&repo, &plan).await;
+    assert_eq!(out.lineage.epoch, 1);
+    let m = &out.record.map;
+    assert_eq!(m[&cs[1]], None, "dropped");
+    assert_eq!(m[&cs[0]], m[&cs[3]], "fixup melds into its target");
+    let new_a = m[&cs[0]].unwrap();
+    let new_c = m[&cs[2]].unwrap();
+    assert_eq!(out.new, new_c);
+    let ca = repo.commit_obj(&new_a).await.unwrap();
+    assert_eq!(ca.parent, Some(c0));
+    assert_eq!(ca.message, "a=1");
+    assert_eq!(
+        ca.meta["rewritten.from"],
+        format!("{} {}", cs[0].hex(), cs[3].hex())
+    );
+    assert_eq!(repo.commit_obj(&new_c).await.unwrap().message, "C!\n");
+    let snap = |h| {
+        let repo = &repo;
+        async move {
+            let root = repo.root_of(Some(h)).await.unwrap();
+            let mut v: Vec<String> = repo
+                .entries(root)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|e| e.path)
+                .collect();
+            v.sort();
+            v
+        }
+    };
+    assert_eq!(snap(new_c).await, vec!["a", "base.txt", "c"]);
+
+    // Successors: every old commit finds its place, a dropped one its kept ancestor's.
+    let (r, _) = repo.read_ref_value("f").await.unwrap().unwrap();
+    let old = pail::objects::Lineage::default();
+    for (c, want) in [(cs[0], new_a), (cs[1], new_a), (cs[3], new_a), (c0, c0)] {
+        assert_eq!(
+            repo.successor("f", c, &old, &r.lineage).await.unwrap(),
+            Some(want)
+        );
+    }
+
+    // Fast-forwards keep the lineage: a commit from a remembered head, then a plain one.
+    let (_, version) = repo.read_ref("f").await.unwrap().unwrap();
+    let d = put_files(&repo, &[("d", "1")]).await;
+    let o = repo
+        .commit_opts(
+            req("f", Some(out.new), d, "d"),
+            pail::repo::CommitOptions {
+                known_head: Some(pail::repo::KnownHead {
+                    commit: out.new,
+                    version,
+                    recent: vec![],
+                    lineage: r.lineage.clone(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(o.lineage, r.lineage);
+    commits_on(&repo, "f", c0, &[("e", "1")]).await;
+    assert_eq!(
+        repo.read_ref_value("f").await.unwrap().unwrap().0.lineage,
+        r.lineage
+    );
+}
+
+/// Commits added on top of the planned tip are carried onto the new history; one that no
+/// longer applies fails the rewrite with a conflict, and a branch rewritten meanwhile fails
+/// it with `MovedError`. Either way nothing moves.
+#[tokio::test]
+async fn rewrite_carries_concurrent_commits_or_refuses() {
+    use pail::rebase::Action::*;
+    let (_d, repo) = temp_repo();
+    let d0 = put_files(&repo, &[("base.txt", "b")]).await;
+    let c0 = repo
+        .commit(req("main", None, d0, "base"))
+        .await
+        .unwrap()
+        .commit;
+    let cs = commits_on(&repo, "f", c0, &[("a", "1"), ("b", "1")]).await;
+    let plan = pail::rebase::Plan {
+        branch: "f".into(),
+        expected: cs[1],
+        base: c0,
+        onto: c0,
+        steps: vec![step(Pick, cs[1]), step(Pick, cs[0])],
+    };
+    // Someone commits after the plan was made.
+    let late = commits_on(&repo, "f", c0, &[("z", "1")]).await[0];
+    let out = rebase(&repo, &plan).await;
+    assert_eq!(out.carried.len(), 1);
+    assert_eq!(out.carried[0].0, late);
+    assert_eq!(out.new, out.carried[0].1);
+    assert_eq!(out.record.map[&late], Some(out.new));
+
+    // A late commit touching what the rewrite changed cannot be carried.
+    let (tip, _) = repo.read_ref("f").await.unwrap().unwrap();
+    let plan = pail::rebase::Plan {
+        branch: "f".into(),
+        expected: tip,
+        base: c0,
+        onto: c0,
+        steps: vec![step(Pick, out.record.map[&cs[1]].unwrap())],
+    };
+    let built = pail::rebase::build(&repo, &plan, "R <r@x>", "2 +0000")
+        .await
+        .unwrap();
+    pail::rebase::store(&repo, &built).await.unwrap();
+    // The rewrite drops `a`; a late commit edits `a`.
+    commits_on(&repo, "f", c0, &[("a", "late")]).await;
+    let (before, _) = repo.read_ref_value("f").await.unwrap().unwrap();
+    let rq = pail::repo::RewriteRequest {
+        branch: "f".into(),
+        expected: tip,
+        new: built.tip,
+        op: "rebase".into(),
+        committer: "R <r@x>".into(),
+        date: "2 +0000".into(),
+        map: built.map.clone(),
+    };
+    let err = repo.rewrite_ref(rq.clone(), None).await.unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ConflictError>().expect("conflict").paths,
+        vec!["a".to_string()]
+    );
+    let (after, _) = repo.read_ref_value("f").await.unwrap().unwrap();
+    assert_eq!(
+        (after.commit, &after.lineage),
+        (before.commit, &before.lineage)
+    );
+
+    // Reset elsewhere: the planned tip is no longer in the branch's history.
+    repo.force_ref("f", c0).await.unwrap();
+    let err = repo.rewrite_ref(rq, None).await.unwrap_err();
+    assert!(
+        err.downcast_ref::<pail::repo::MovedError>().is_some(),
+        "{err:#}"
+    );
+}
+
+/// Reordering two commits that edit the same file is a conflict at build time: nothing is
+/// stored or published. A commit whose change the new base already has is dropped as empty.
+#[tokio::test]
+async fn rebase_conflicts_publish_nothing_and_empty_commits_drop() {
+    use pail::rebase::Action::*;
+    let (_d, repo) = temp_repo();
+    let d0 = put_files(&repo, &[("f.txt", "0")]).await;
+    let c0 = repo
+        .commit(req("main", None, d0, "base"))
+        .await
+        .unwrap()
+        .commit;
+    let cs = commits_on(&repo, "f", c0, &[("f.txt", "1"), ("f.txt", "2")]).await;
+    let plan = pail::rebase::Plan {
+        branch: "f".into(),
+        expected: cs[1],
+        base: c0,
+        onto: c0,
+        steps: vec![step(Pick, cs[1]), step(Pick, cs[0])],
+    };
+    let reflog_before = repo.store.list("reflog/").await.unwrap().len();
+    let err = pail::rebase::build(&repo, &plan, "R <r@x>", "2 +0000")
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        err.downcast_ref::<ConflictError>().expect("conflict").paths,
+        vec!["f.txt".to_string()]
+    );
+    assert_eq!(repo.read_ref("f").await.unwrap().unwrap().0, cs[1]);
+    assert_eq!(
+        repo.store.list("reflog/").await.unwrap().len(),
+        reflog_before
+    );
+
+    // main gets the same change as the first commit: replaying f onto main drops it.
+    let m = commits_on(&repo, "main", c0, &[("f.txt", "1")]).await[0];
+    let plan = pail::rebase::default_plan(&repo, "f", cs[1], c0, m)
+        .await
+        .unwrap();
+    let out = rebase(&repo, &plan).await;
+    assert_eq!(out.record.map[&cs[0]], None);
+    let c = repo.commit_obj(&out.new).await.unwrap();
+    assert_eq!(c.parent, Some(m));
+    assert_eq!(c.message, "f.txt=2");
+}
+
+/// A branch built on another that was then rewritten lands only its own commits: onto the
+/// rewritten branch (fork point from its rewrite records), and onto main once the rewritten
+/// branch has landed there (copies of copies, by `rewritten.from`).
+#[tokio::test]
+async fn stacks_built_on_rewritten_history_land_only_their_own_commits() {
+    use pail::rebase::Action::*;
+    let (_d, repo) = temp_repo();
+    let d0 = put_files(&repo, &[("base.txt", "b")]).await;
+    let c0 = repo
+        .commit(req("main", None, d0, "base"))
+        .await
+        .unwrap()
+        .commit;
+    let a = commits_on(&repo, "fa", c0, &[("a1", "1"), ("a2", "1")]).await;
+    let b = commits_on(&repo, "fb", a[1], &[("b1", "1")]).await;
+    // main moves, so landing later replays rather than fast-forwards.
+    commits_on(&repo, "main", c0, &[("m", "1")]).await;
+    // fa: reword a1 (both commits get new ids).
+    let plan = pail::rebase::Plan {
+        branch: "fa".into(),
+        expected: a[1],
+        base: c0,
+        onto: c0,
+        steps: vec![
+            pail::rebase::Step {
+                action: Reword,
+                commit: a[0],
+                message: Some("A1\n".into()),
+            },
+            step(Pick, a[1]),
+        ],
+    };
+    rebase(&repo, &plan).await;
+    assert_eq!(repo.fork_point(b[0], "fa").await.unwrap(), Some(a[1]));
+
+    let out = repo
+        .land_stack("fb", "fa", "L <l@x>", "3 +0000")
+        .await
+        .unwrap();
+    assert_eq!(out.landed.len(), 1, "only b1");
+    assert_eq!(
+        repo.commit_obj(&out.landed[0]).await.unwrap().message,
+        "b1=1"
+    );
+
+    // Another child of the old fa, landed onto main after fa itself landed there.
+    let c = commits_on(&repo, "fc", a[1], &[("c1", "1")]).await;
+    let out = repo
+        .land_stack("fa", "main", "L <l@x>", "3 +0000")
+        .await
+        .unwrap();
+    assert_eq!(out.landed.len(), 3, "a1', a2', b1'");
+    let out = repo
+        .land_stack("fc", "main", "L <l@x>", "3 +0000")
+        .await
+        .unwrap();
+    assert_eq!(out.landed.len(), 1, "only c1");
+    assert_eq!(
+        repo.commit_obj(&out.landed[0]).await.unwrap().message,
+        "c1=1"
+    );
+    let _ = c;
+}

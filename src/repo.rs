@@ -16,7 +16,10 @@ use crate::manifest::{
     BuiltPage, Change, Child, ChunkRef, Entry, Kind, Loc, Page, build_leaves, build_page,
     build_upper, decode_stored_page, diff_sorted, leaf_child, split_runs,
 };
-use crate::objects::{Commit, Landed, RefValue, commit_key, page_key, ref_key, validate_branch};
+use crate::objects::{
+    Commit, Landed, Lineage, RefValue, Rewrite, commit_key, page_key, ref_key, reflog_key,
+    validate_branch,
+};
 use crate::pack::{
     CHUNK_THRESHOLD, INLINE_MAX, PACK_MAX, PackBuilder, chunk_key, chunk_spans, decode_blob,
     encode_blob, pack_key,
@@ -113,6 +116,8 @@ pub struct KnownHead {
     pub version: Version,
     /// The ref's `recent` list at that version, carried forward by the swap.
     pub recent: Vec<Landed>,
+    /// The ref's lineage at that version, carried forward by the swap.
+    pub lineage: Lineage,
 }
 
 /// Optional parts of a commit (see [`Repo::commit_opts`]).
@@ -144,6 +149,73 @@ pub struct LandOutcome {
     pub attempts: u32,
 }
 
+/// A rewrite of a branch for [`Repo::rewrite_ref`]: its new history, already stored.
+#[derive(Debug, Clone)]
+pub struct RewriteRequest {
+    pub branch: String,
+    /// The tip the new history was made from.
+    pub expected: Hash,
+    pub new: Hash,
+    /// `rebase`, `undo` or `reset`.
+    pub op: String,
+    /// Committer of carried commits, and who the record names.
+    pub committer: String,
+    pub date: String,
+    /// Each rewritten commit of the old history to its successor (None: dropped).
+    pub map: BTreeMap<Hash, Option<Hash>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RewriteOutcome {
+    /// The tip that was replaced (`expected`, or a descendant whose commits were carried).
+    pub old: Hash,
+    /// The branch's tip now.
+    pub new: Hash,
+    pub lineage: Lineage,
+    pub record: Rewrite,
+    /// Commits others added on top of `expected`, and their copies on the new history.
+    pub carried: Vec<(Hash, Hash)>,
+    pub attempts: u32,
+}
+
+/// Raised when a branch was rewritten or reset (not just advanced) after a rewrite of it was
+/// planned.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{branch} moved to {} since {} was read, and not by adding commits: plan again",
+    now.short(),
+    expected.short()
+)]
+pub struct MovedError {
+    pub branch: String,
+    pub expected: Hash,
+    pub now: Hash,
+}
+
+/// A commit's fields for its rewritten copy: authorship and message kept, the rewriter as
+/// committer, and `rewritten.from` naming the commits it replaces (several when melded).
+/// Git ids no longer describe it, so mirrored `git.*` metadata is dropped.
+pub fn rewritten_fields(c: &Commit, from: &[Hash], committer: &str, date: &str) -> CommitFields {
+    let mut meta: BTreeMap<String, String> = c
+        .meta
+        .iter()
+        .filter(|(k, _)| !k.starts_with("git."))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    meta.insert(
+        "rewritten.from".into(),
+        from.iter().map(|h| h.hex()).collect::<Vec<_>>().join(" "),
+    );
+    CommitFields {
+        author: c.author.clone(),
+        author_date: c.author_date.clone(),
+        committer: committer.to_string(),
+        committer_date: date.to_string(),
+        message: c.message.clone(),
+        meta,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitOutcome {
     pub commit: Hash,
@@ -160,6 +232,8 @@ pub struct CommitOutcome {
     /// commit landed inside a combined batch that continued past it. A [`KnownHead`] must
     /// pair `version` with this, never with `commit`.
     pub head: Hash,
+    /// The ref's lineage at `version`.
+    pub lineage: Lineage,
 }
 
 /// A ref move about to be published: `branch` from `old` to `new`, all objects written.
@@ -295,40 +369,314 @@ impl Repo {
     /// Create a branch pointing at `commit`. Fails if it already exists.
     pub async fn create_branch(&self, name: &str, commit: Hash) -> Result<Version> {
         validate_branch(name)?;
-        let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, vec![]))?);
+        let body = Bytes::from(serde_json::to_vec(&self.ref_value(
+            commit,
+            vec![],
+            Lineage::default(),
+        ))?);
         match self.store.cas(&ref_key(name), body, None).await? {
             Cas::Ok(v) => Ok(v),
             Cas::Conflict => bail!("branch {name} already exists"),
         }
     }
 
-    /// Move a branch to any commit (not necessarily a descendant). Records a reflog entry first.
+    /// Move a branch to any commit (not necessarily a descendant): a rewrite with no map, so
+    /// each dropped commit's successor is its nearest kept ancestor.
     pub async fn force_ref(&self, name: &str, commit: Hash) -> Result<()> {
-        let old = self.read_ref_value(name).await?;
-        if let Some((old, _)) = &old {
-            let ts = std::time::SystemTime::now()
+        let (old, _) = self
+            .read_ref(name)
+            .await?
+            .with_context(|| format!("no branch {name}"))?;
+        self.rewrite_ref(
+            RewriteRequest {
+                branch: name.to_string(),
+                expected: old,
+                new: commit,
+                op: "reset".into(),
+                committer: String::new(),
+                date: crate::objects::now_date(),
+                map: BTreeMap::new(),
+            },
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Publish a rewrite of `req.branch`: write its record (`reflog/<branch>/<id>`, naming the
+    /// previous one), then move the ref to the new history in one compare-and-swap that bumps
+    /// its epoch. Commits others added on top of `req.expected` meanwhile are carried onto
+    /// the new tip (each must still apply; see [`Repo::check_applies`]); any other move of the
+    /// branch fails with [`MovedError`]. `check` is asked once, before the first swap.
+    pub async fn rewrite_ref(
+        &self,
+        req: RewriteRequest,
+        check: Option<PublishCheck<'_>>,
+    ) -> Result<RewriteOutcome> {
+        validate_branch(&req.branch)?;
+        let started = std::time::Instant::now();
+        let mut checked = false;
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let (cur, version) = self
+                .read_ref_value(&req.branch)
+                .await?
+                .with_context(|| format!("no branch {}", req.branch))?;
+            let mut tip = req.new;
+            let mut map = req.map.clone();
+            let mut carried = vec![];
+            if cur.commit != req.expected {
+                if !self.is_ancestor(req.expected, cur.commit).await? {
+                    return Err(MovedError {
+                        branch: req.branch.clone(),
+                        expected: req.expected,
+                        now: cur.commit,
+                    }
+                    .into());
+                }
+                let mut extra = vec![];
+                let mut at = Some(cur.commit);
+                while let Some(h) = at.filter(|h| *h != req.expected) {
+                    extra.push(h);
+                    at = self.commit_meta(&h).await?.parent;
+                }
+                extra.reverse();
+                for h in extra {
+                    let c = self.commit_meta(&h).await?;
+                    let delta = self.delta_of(&h).await?;
+                    self.check_applies(
+                        &req.branch,
+                        self.root_of(c.parent).await?,
+                        &delta,
+                        self.root_of(Some(tip)).await?,
+                        &Delta::new(),
+                    )
+                    .await?;
+                    let fields = rewritten_fields(&c, &[h], &req.committer, &req.date);
+                    tip = self.write_commit(Some(tip), &delta, &fields).await?.commit;
+                    map.insert(h, Some(tip));
+                    carried.push((h, tip));
+                }
+            }
+            if !checked {
+                if let Some(check) = check {
+                    check(&Publish {
+                        branch: req.branch.clone(),
+                        old: Some(cur.commit),
+                        new: tip,
+                    })?;
+                }
+                checked = true;
+            }
+            let record = Rewrite {
+                old: cur.commit,
+                new: tip,
+                epoch: cur.lineage.epoch + 1,
+                prev: cur.lineage.rewrite.clone(),
+                op: req.op.clone(),
+                by: req.committer.clone(),
+                date: req.date.clone(),
+                map,
+            };
+            let id = self.write_rewrite(&req.branch, &record).await?;
+            let lineage = Lineage {
+                epoch: record.epoch,
+                rewrite: Some(id),
+            };
+            let body = Bytes::from(serde_json::to_vec(&self.ref_value(
+                tip,
+                cur.recent.clone(),
+                lineage.clone(),
+            ))?);
+            let outcome = |lineage: Lineage| RewriteOutcome {
+                old: cur.commit,
+                new: tip,
+                lineage,
+                record: record.clone(),
+                carried: carried.clone(),
+                attempts,
+            };
+            match self
+                .store
+                .cas(&ref_key(&req.branch), body, Some(&version))
+                .await
+            {
+                Ok(Cas::Ok(_)) => return Ok(outcome(lineage)),
+                Ok(Cas::Conflict) => {}
+                Err(e) => match self.read_ref_value(&req.branch).await? {
+                    Some((now, _)) if now.lineage == lineage => return Ok(outcome(lineage)),
+                    Some(_) => {}
+                    None => return Err(e),
+                },
+            }
+            if started.elapsed() >= COMMIT_DEADLINE {
+                bail!(
+                    "gave up rewriting after {attempts} attempts: {} is too contended",
+                    req.branch
+                );
+            }
+            backoff(attempts).await;
+        }
+    }
+
+    /// Store a rewrite record under a fresh id (time-ordered, so listings read oldest first).
+    async fn write_rewrite(&self, branch: &str, record: &Rewrite) -> Result<String> {
+        let data = Bytes::from(serde_json::to_vec(record)?);
+        loop {
+            let ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis();
-            let rec = serde_json::json!({"old": old.commit, "new": commit});
-            self.store
-                .put(
-                    &format!("reflog/{name}/{ts:015}"),
-                    Bytes::from(rec.to_string()),
-                )
-                .await?;
+            let id = format!("{ms:015}-{:08x}", rand::random::<u32>());
+            if self
+                .store
+                .put_new(&reflog_key(branch, &id), data.clone())
+                .await?
+            {
+                return Ok(id);
+            }
         }
-        let recent = old
-            .as_ref()
-            .map(|(r, _)| r.recent.clone())
-            .unwrap_or_default();
-        let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, recent))?);
-        match self
-            .store
-            .cas(&ref_key(name), body, old.as_ref().map(|(_, v)| v))
+    }
+
+    /// The rewrite record `reflog/<branch>/<id>`.
+    pub async fn read_rewrite(&self, branch: &str, id: &str) -> Result<Rewrite> {
+        let b = self.store.get(&reflog_key(branch, id)).await?;
+        serde_json::from_slice(&b).with_context(|| format!("corrupt rewrite record {branch}/{id}"))
+    }
+
+    /// The rewrites that took `branch` from lineage `from` to `to`, oldest first: the chain
+    /// from `to`'s record back to `from`'s (at most `REWRITE_CHAIN_MAX` records).
+    pub async fn rewrites_between(
+        &self,
+        branch: &str,
+        from: &Lineage,
+        to: &Lineage,
+    ) -> Result<Vec<Rewrite>> {
+        let mut out = vec![];
+        let mut at = to.rewrite.clone();
+        while let Some(id) = at {
+            if Some(&id) == from.rewrite.as_ref() || out.len() >= REWRITE_CHAIN_MAX {
+                break;
+            }
+            let r = self.read_rewrite(branch, &id).await?;
+            if r.epoch <= from.epoch {
+                break;
+            }
+            at = r.prev.clone();
+            out.push(r);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// Where `commit`, from `branch`'s history at lineage `from`, is in its history at `to`:
+    /// each rewrite since maps a rewritten commit to its successor, and a dropped commit to its
+    /// nearest surviving ancestor's. None when nothing of its history survived.
+    pub async fn successor(
+        &self,
+        branch: &str,
+        commit: Hash,
+        from: &Lineage,
+        to: &Lineage,
+    ) -> Result<Option<Hash>> {
+        let mut cur = Some(commit);
+        for r in self.rewrites_between(branch, from, to).await? {
+            cur = match cur {
+                Some(c) => self.map_through(&r, c).await?,
+                None => None,
+            };
+        }
+        Ok(cur)
+    }
+
+    async fn map_through(&self, r: &Rewrite, commit: Hash) -> Result<Option<Hash>> {
+        let mut at = Some(commit);
+        while let Some(h) = at {
+            match r.map.get(&h) {
+                Some(Some(next)) => return Ok(Some(*next)),
+                Some(None) => {}
+                None if self.is_ancestor(h, r.new).await? => return Ok(Some(h)),
+                None => {}
+            }
+            at = self.commit_meta(&h).await?.parent;
+        }
+        Ok(None)
+    }
+
+    /// Where `tip`'s own commits start relative to `upstream`: their merge base, or a commit
+    /// of `upstream`'s history from before one of its rewrites, when `tip` was built on that
+    /// (the old history is gone from `upstream`, so the merge base alone would count its
+    /// commits as `tip`'s own).
+    pub async fn fork_point(&self, tip: Hash, upstream: &str) -> Result<Option<Hash>> {
+        match self.read_ref_value(upstream).await? {
+            Some((up, _)) => self.fork_point_at(tip, upstream, &up).await,
+            None => Ok(None),
+        }
+    }
+
+    /// [`Repo::fork_point`] with `upstream`'s ref already read.
+    pub async fn fork_point_at(
+        &self,
+        tip: Hash,
+        upstream: &str,
+        up: &RefValue,
+    ) -> Result<Option<Hash>> {
+        let Some(mut best) = self.merge_base(tip, up.commit).await? else {
+            return Ok(None);
+        };
+        let mut best_gen = self.commit_meta(&best).await?.generation;
+        for r in self
+            .rewrites_between(upstream, &Lineage::default(), &up.lineage)
             .await?
         {
-            Cas::Ok(_) => Ok(()),
-            Cas::Conflict => bail!("branch {name} moved concurrently; retry"),
+            if let Some(mb) = self.merge_base(tip, r.old).await? {
+                let g = self.commit_meta(&mb).await?.generation;
+                if g > best_gen {
+                    (best, best_gen) = (mb, g);
+                }
+            }
+        }
+        Ok(Some(best))
+    }
+
+    /// Fail with a conflict unless `delta`, made where its paths were as in `base_root`,
+    /// applies to `target_root` with `overlay` on top: each path it touches must be there as
+    /// in `base_root`, or already as the delta leaves it.
+    pub async fn check_applies(
+        &self,
+        branch: &str,
+        base_root: Hash,
+        delta: &Delta,
+        target_root: Hash,
+        overlay: &Delta,
+    ) -> Result<()> {
+        if base_root == target_root && overlay.is_empty() {
+            return Ok(());
+        }
+        let same = |a: &Option<Entry>, b: &Option<Entry>| match (a, b) {
+            (Some(a), Some(b)) => a.same_content(b),
+            (None, None) => true,
+            _ => false,
+        };
+        let mut paths = vec![];
+        for (p, new) in delta {
+            let have = match overlay.get(p) {
+                Some(e) => e.clone(),
+                None => self.get_entry(target_root, p).await?,
+            };
+            let want = self.get_entry(base_root, p).await?;
+            if !same(&want, &have) && !same(new, &have) {
+                paths.push(p.clone());
+            }
+        }
+        if paths.is_empty() {
+            Ok(())
+        } else {
+            Err(ConflictError {
+                branch: branch.to_string(),
+                paths,
+            }
+            .into())
         }
     }
 
@@ -1041,26 +1389,31 @@ impl Repo {
 
     /// Move `branch` from `expected` (None: create) to `commit` in one compare-and-swap.
     /// Conflict means someone else moved it first.
-    /// `recent` is carried forward from the value being replaced (see [`RefValue::recent`]).
+    /// `recent` and `lineage` are carried forward from the value being replaced (see
+    /// [`RefValue`]): a fast-forward never changes the lineage.
     pub async fn advance_ref(
         &self,
         branch: &str,
         expected: Option<&Version>,
         commit: Hash,
         recent: Vec<Landed>,
+        lineage: Lineage,
     ) -> Result<Cas> {
-        let body = Bytes::from(serde_json::to_vec(&self.ref_value(commit, recent))?);
+        let body = Bytes::from(serde_json::to_vec(
+            &self.ref_value(commit, recent, lineage),
+        )?);
         self.store.cas(&ref_key(branch), body, expected).await
     }
 
     /// A ref value for `commit`, with its root and generation when this client knows them.
-    fn ref_value(&self, commit: Hash, recent: Vec<Landed>) -> RefValue {
+    fn ref_value(&self, commit: Hash, recent: Vec<Landed>, lineage: Lineage) -> RefValue {
         let known = self.heads.lock().unwrap().get(&commit).copied();
         RefValue {
             commit,
             root: known.map(|k| k.0),
             generation: known.map(|k| k.1),
             recent,
+            lineage,
         }
     }
 
@@ -1117,8 +1470,10 @@ impl Repo {
                 .await?
                 .with_context(|| format!("no branch {onto}"))?;
             let onto_tip = onto_ref.commit;
+            // A stack built on `onto` before `onto` was rewritten starts where it left the old
+            // history, not at the merge base (which would count the old commits as its own).
             let base = self
-                .merge_base(tip, onto_tip)
+                .fork_point_at(tip, onto, &onto_ref)
                 .await?
                 .context("branches share no history")?;
             let mut stack = vec![];
@@ -1129,13 +1484,25 @@ impl Repo {
             }
             stack.reverse();
             // Stack commits `onto` already has as replayed copies: a prefix of the stack, since
-            // landing keeps order. The rest goes on top of the last copy.
+            // landing keeps order. The rest goes on top of the last copy. A copy may be of a
+            // copy (a stack rebased, then landed) or of several commits (squashed), so follow
+            // `rewritten.from` back through every rewrite.
             let mut copies: HashMap<String, Hash> = HashMap::new();
             let mut cur = Some(onto_tip);
             while let Some(h) = cur.filter(|h| *h != base) {
                 let c = self.commit_meta(&h).await?;
-                if let Some(orig) = c.meta.get("rewritten.from") {
+                let mut from: Vec<String> = rewritten_from(&c);
+                let mut seen = HashSet::new();
+                while let Some(orig) = from.pop() {
+                    if !seen.insert(orig.clone()) {
+                        continue;
+                    }
                     copies.entry(orig.clone()).or_insert(h);
+                    if let Ok(o) = Hash::from_hex(&orig)
+                        && let Ok(oc) = self.commit_meta(&o).await
+                    {
+                        from.extend(rewritten_from(&oc));
+                    }
                 }
                 cur = c.parent;
             }
@@ -1217,7 +1584,13 @@ impl Repo {
             }
             // The one write that publishes the stack.
             match self
-                .advance_ref(onto, Some(&version), new_tip, onto_ref.recent.clone())
+                .advance_ref(
+                    onto,
+                    Some(&version),
+                    new_tip,
+                    onto_ref.recent.clone(),
+                    onto_ref.lineage.clone(),
+                )
                 .await
             {
                 Ok(Cas::Ok(_)) => {
@@ -1317,6 +1690,7 @@ impl Repo {
                     RefValue {
                         commit: k.commit,
                         recent: k.recent.clone(),
+                        lineage: k.lineage.clone(),
                         ..Default::default()
                     },
                     k.version.clone(),
@@ -1373,8 +1747,12 @@ impl Repo {
                 .as_ref()
                 .map(|(r, _)| r.recent.clone())
                 .unwrap_or_default();
+            let lineage = head
+                .as_ref()
+                .map(|(r, _)| r.lineage.clone())
+                .unwrap_or_default();
             let expected = head.as_ref().map(|(_, v)| v.clone());
-            let outcome = |version: Version, recent: Vec<Landed>| CommitOutcome {
+            let outcome = |version: Version, recent: Vec<Landed>, lineage: Lineage| CommitOutcome {
                 commit: ch,
                 version,
                 attempts: attempt,
@@ -1384,17 +1762,26 @@ impl Repo {
                 replayed_from: checked.filter(|c| *c != ch),
                 recent,
                 head: ch,
+                lineage,
             };
             match self
-                .advance_ref(&req.branch, expected.as_ref(), ch, recent.clone())
+                .advance_ref(
+                    &req.branch,
+                    expected.as_ref(),
+                    ch,
+                    recent.clone(),
+                    lineage.clone(),
+                )
                 .await
             {
-                Ok(Cas::Ok(version)) => return Ok(outcome(version, recent)),
+                Ok(Cas::Ok(version)) => return Ok(outcome(version, recent, lineage)),
                 Ok(Cas::Conflict) => {}
                 Err(e) => {
                     // Unknown outcome (e.g. timeout): the ref tells us whether we won.
                     match self.read_ref_value(&req.branch).await? {
-                        Some((now, v)) if now.commit == ch => return Ok(outcome(v, now.recent)),
+                        Some((now, v)) if now.commit == ch => {
+                            return Ok(outcome(v, now.recent, now.lineage));
+                        }
                         _ if attempt == direct_attempts => return Err(e),
                         _ => {}
                     }
@@ -1474,6 +1861,7 @@ impl Repo {
                         head.commit,
                         version,
                         head.recent.clone(),
+                        head.lineage.clone(),
                         attempts,
                         pages_written,
                         checked,
@@ -1530,7 +1918,7 @@ impl Repo {
                 .combine(&req.branch, head, &version, listed, &mine)
                 .await?
             {
-                Some((tip, version, recent)) => {
+                Some((tip, version, recent, lineage)) => {
                     let commit = recent.iter().find(|l| l.intent == id).map(|l| l.commit);
                     if let Some(commit) = commit {
                         return self
@@ -1539,6 +1927,7 @@ impl Repo {
                                 tip,
                                 version,
                                 recent,
+                                lineage,
                                 attempts,
                                 pages_written,
                                 checked,
@@ -1561,6 +1950,7 @@ impl Repo {
         head: Hash,
         version: Version,
         recent: Vec<Landed>,
+        lineage: Lineage,
         attempts: u32,
         pages_written: usize,
         checked: Option<Hash>,
@@ -1576,11 +1966,13 @@ impl Repo {
             replayed_from: checked.filter(|c| *c != commit),
             recent,
             head,
+            lineage,
         })
     }
 
-    /// One combining round: land every pending intent on `head`. Some(the new tip, its version
-    /// and recent list) when this swap won, None when another writer moved the ref first.
+    /// One combining round: land every pending intent on `head`. Some(the new tip, its version,
+    /// recent list and lineage) when this swap won, None when another writer moved the ref
+    /// first.
     async fn combine(
         &self,
         branch: &str,
@@ -1588,7 +1980,7 @@ impl Repo {
         version: &Version,
         listed: Vec<(String, u64)>,
         mine: &Intent,
-    ) -> Result<Option<(Hash, Version, Vec<Landed>)>> {
+    ) -> Result<Option<(Hash, Version, Vec<Landed>, Lineage)>> {
         let mut pending = pending_intents(&head.recent, listed);
         if !pending.contains(&mine.id) {
             pending.push(mine.id.clone());
@@ -1667,13 +2059,20 @@ impl Repo {
         }
         futures::future::try_join_all(prepared.iter().map(|p| self.store_commit(p, vec![])))
             .await?;
+        let lineage = head.lineage;
         let mut recent = head.recent;
         recent.extend(batch.iter().cloned());
         if recent.len() > RECENT_MAX {
             recent.drain(..recent.len() - RECENT_MAX);
         }
         match self
-            .advance_ref(branch, Some(version), parent, recent.clone())
+            .advance_ref(
+                branch,
+                Some(version),
+                parent,
+                recent.clone(),
+                lineage.clone(),
+            )
             .await
         {
             Ok(Cas::Ok(v)) => {
@@ -1683,19 +2082,29 @@ impl Repo {
                     .map(|l| intent_key(branch, &l.intent))
                     .collect();
                 let _ = futures::future::join_all(keys.iter().map(|k| self.store.delete(k))).await;
-                Ok(Some((parent, v, recent)))
+                Ok(Some((parent, v, recent, lineage)))
             }
             Ok(Cas::Conflict) => {
                 combine_trace(|| "lost the swap".into());
                 Ok(None)
             }
             Err(e) => match self.read_ref_value(branch).await? {
-                Some((now, v)) if now.commit == parent => Ok(Some((parent, v, now.recent))),
+                Some((now, v)) if now.commit == parent => {
+                    Ok(Some((parent, v, now.recent, now.lineage)))
+                }
                 Some(_) => Ok(None),
                 None => Err(e),
             },
         }
     }
+}
+
+/// The commits a rewritten commit replaces (its `rewritten.from`, space-separated).
+pub fn rewritten_from(c: &Commit) -> Vec<String> {
+    c.meta
+        .get("rewritten.from")
+        .map(|v| v.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 fn combine_trace(msg: impl FnOnce() -> String) {
@@ -1713,6 +2122,8 @@ const COMBINER_TAKEOVER: Duration = Duration::from_millis(1500);
 const DIRECT_ATTEMPTS: u32 = 2;
 /// How many landed intents a ref remembers.
 const RECENT_MAX: usize = 512;
+/// How many rewrites back a client follows a branch's history.
+const REWRITE_CHAIN_MAX: usize = 256;
 /// Intents older than this are ignored: their writers have given up (`COMMIT_DEADLINE`).
 const INTENT_MAX_AGE: Duration = Duration::from_secs(600);
 

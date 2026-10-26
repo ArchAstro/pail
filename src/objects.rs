@@ -209,6 +209,56 @@ pub struct RefValue {
     /// intents never land one twice. Every writer of the ref carries it forward.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent: Vec<Landed>,
+    #[serde(flatten)]
+    pub lineage: Lineage,
+}
+
+/// Which version of a branch's history a ref holds. Fast-forwards carry it unchanged; a
+/// rewrite (any move to a commit that does not descend from the old tip) bumps `epoch` and
+/// names the reflog record that maps the old history to the new ([`Rewrite`]). A client
+/// whose base is from an older epoch knows its branch was rewritten under it, and the chain
+/// of records tells it where each of its commits went.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lineage {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub epoch: u64,
+    /// The latest rewrite: `reflog/<branch>/<rewrite>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// A rewrite of a branch, kept as its reflog entry (`reflog/<branch>/<id>`). Entries written
+/// before epochs have only `old` and `new`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Rewrite {
+    pub old: Hash,
+    pub new: Hash,
+    /// The epoch the branch entered with this rewrite.
+    #[serde(default)]
+    pub epoch: u64,
+    /// The previous rewrite's record, so the chain can be walked back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev: Option<String>,
+    /// What rewrote it: `rebase`, `undo` or `reset`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub op: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub date: String,
+    /// Commits of the old history that were rewritten, each to its successor (None:
+    /// dropped). Commits the new history still contains are not listed; neither are
+    /// commits dropped by a plain reset (their successor is their nearest kept ancestor).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub map: BTreeMap<Hash, Option<Hash>>,
+}
+
+pub fn reflog_key(branch: &str, id: &str) -> String {
+    format!("reflog/{branch}/{id}")
 }
 
 /// An intent and the commit it landed as.
