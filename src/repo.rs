@@ -1777,13 +1777,21 @@ impl Repo {
                 Ok(Cas::Ok(version)) => return Ok(outcome(version, recent, lineage)),
                 Ok(Cas::Conflict) => {}
                 Err(e) => {
-                    // Unknown outcome (e.g. timeout): the ref tells us whether we won.
-                    match self.read_ref_value(&req.branch).await? {
-                        Some((now, v)) if now.commit == ch => {
-                            return Ok(outcome(v, now.recent, now.lineage));
-                        }
-                        _ if attempt == direct_attempts => return Err(e),
-                        _ => {}
+                    // Unknown outcome (e.g. timeout): the ref tells us whether we won. Others
+                    // may have landed on top of the commit since, so it can be under the head;
+                    // retrying then would find our own change in the way and report a
+                    // conflict for a commit that was published (verify/scenarios.qnt,
+                    // timeoutLandedUnderRun).
+                    if let Some((now, v)) = self.read_ref_value(&req.branch).await?
+                        && (now.commit == ch || self.is_ancestor(ch, now.commit).await?)
+                    {
+                        return Ok(CommitOutcome {
+                            head: now.commit,
+                            ..outcome(v, now.recent, now.lineage)
+                        });
+                    }
+                    if attempt == direct_attempts {
+                        return Err(e);
                     }
                 }
             }
