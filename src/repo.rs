@@ -268,6 +268,10 @@ pub struct Repo {
     /// Commit → (manifest root, generation), learned from refs read and commits prepared.
     heads: Mutex<HashMap<Hash, (Hash, u64)>>,
     graph: std::sync::OnceLock<Option<crate::graph::Graph>>,
+    /// The shared lease this client's writes hold (`lease`).
+    leases: Arc<crate::lease::WriteLeases>,
+    /// How long a write waits for a running gc before giving up.
+    pub lease_wait: Duration,
 }
 
 impl Repo {
@@ -300,7 +304,26 @@ impl Repo {
             metas: Mutex::default(),
             heads: Mutex::default(),
             graph: std::sync::OnceLock::new(),
+            leases: Arc::default(),
+            lease_wait: Duration::from_secs(600),
         }
+    }
+
+    /// Hold this client's shared write lease until [`crate::lease::Writing::done`]: around
+    /// steps that rely on objects staying stored between calls (upload files, then commit
+    /// them). Each write takes it too, so a lone call needs no guard.
+    pub async fn writing(&self) -> Result<crate::lease::Writing> {
+        self.leases.enter(&self.store, self.lease_wait).await?;
+        Ok(crate::lease::Writing::new(self.leases.clone()))
+    }
+
+    /// Run `op` holding the write lease.
+    async fn with_lease<T>(&self, op: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        self.leases.enter(&self.store, self.lease_wait).await?;
+        let out = op.await;
+        // A lease left behind only expires: the outcome stands.
+        let _ = self.leases.leave().await;
+        out
     }
 
     fn cache_path(&self, kind: &str, h: &Hash) -> Option<PathBuf> {
@@ -368,12 +391,18 @@ impl Repo {
 
     /// Create a branch pointing at `commit`. Fails if it already exists.
     pub async fn create_branch(&self, name: &str, commit: Hash) -> Result<Version> {
+        self.with_lease(self.create_branch_leased(name, commit))
+            .await
+    }
+
+    async fn create_branch_leased(&self, name: &str, commit: Hash) -> Result<Version> {
         validate_branch(name)?;
         let body = Bytes::from(serde_json::to_vec(&self.ref_value(
             commit,
             vec![],
             Lineage::default(),
         ))?);
+        self.leases.check()?;
         match self.store.cas(&ref_key(name), body, None).await? {
             Cas::Ok(v) => Ok(v),
             Cas::Conflict => bail!("branch {name} already exists"),
@@ -409,6 +438,14 @@ impl Repo {
     /// the new tip (each must still apply; see [`Repo::check_applies`]); any other move of the
     /// branch fails with [`MovedError`]. `check` is asked once, before the first swap.
     pub async fn rewrite_ref(
+        &self,
+        req: RewriteRequest,
+        check: Option<PublishCheck<'_>>,
+    ) -> Result<RewriteOutcome> {
+        self.with_lease(self.rewrite_ref_leased(req, check)).await
+    }
+
+    async fn rewrite_ref_leased(
         &self,
         req: RewriteRequest,
         check: Option<PublishCheck<'_>>,
@@ -497,6 +534,7 @@ impl Repo {
                 carried: carried.clone(),
                 attempts,
             };
+            self.leases.check()?;
             match self
                 .store
                 .cas(&ref_key(&req.branch), body, Some(&version))
@@ -1027,6 +1065,15 @@ impl Repo {
         inputs: &[FileInput],
         reuse: &HashMap<Hash, Loc>,
     ) -> Result<Vec<Entry>> {
+        self.with_lease(self.write_files_leased(inputs, reuse))
+            .await
+    }
+
+    async fn write_files_leased(
+        &self,
+        inputs: &[FileInput],
+        reuse: &HashMap<Hash, Loc>,
+    ) -> Result<Vec<Entry>> {
         let (entries, uploads) = self.prepare_files(inputs, reuse);
         self.upload(uploads).await?;
         Ok(entries)
@@ -1130,6 +1177,10 @@ impl Repo {
 
     /// Store immutable objects, all at once.
     pub async fn upload(&self, uploads: Vec<Upload>) -> Result<()> {
+        self.with_lease(self.upload_leased(uploads)).await
+    }
+
+    async fn upload_leased(&self, uploads: Vec<Upload>) -> Result<()> {
         run_unordered(
             uploads.into_iter().map(|u| self.upload_one(u)).collect(),
             PARALLELISM,
@@ -1270,6 +1321,10 @@ impl Repo {
     /// Store a prepared commit's pages and commit object, with `extra` objects (its files), in
     /// one concurrent wave: every hash is known up front, so nothing waits on another upload.
     pub async fn store_commit(&self, p: &PreparedCommit, extra: Vec<Upload>) -> Result<Written> {
+        self.with_lease(self.store_commit_leased(p, extra)).await
+    }
+
+    async fn store_commit_leased(&self, p: &PreparedCommit, extra: Vec<Upload>) -> Result<Written> {
         let empty = build_page(Page::Leaf(vec![])).hash;
         let pages: Vec<&BuiltPage> = p.pages.iter().filter(|pg| pg.hash != empty).collect();
         let n = pages.len();
@@ -1399,9 +1454,22 @@ impl Repo {
         recent: Vec<Landed>,
         lineage: Lineage,
     ) -> Result<Cas> {
+        self.with_lease(self.advance_ref_leased(branch, expected, commit, recent, lineage))
+            .await
+    }
+
+    async fn advance_ref_leased(
+        &self,
+        branch: &str,
+        expected: Option<&Version>,
+        commit: Hash,
+        recent: Vec<Landed>,
+        lineage: Lineage,
+    ) -> Result<Cas> {
         let body = Bytes::from(serde_json::to_vec(
             &self.ref_value(commit, recent, lineage),
         )?);
+        self.leases.check()?;
         self.store.cas(&ref_key(branch), body, expected).await
     }
 
@@ -1448,6 +1516,18 @@ impl Repo {
 
     /// [`Repo::land_stack`], asking `check` before the first publish attempt.
     pub async fn land_stack_with(
+        &self,
+        branch: &str,
+        onto: &str,
+        committer: &str,
+        date: &str,
+        check: Option<PublishCheck<'_>>,
+    ) -> Result<LandOutcome> {
+        self.with_lease(self.land_stack_with_leased(branch, onto, committer, date, check))
+            .await
+    }
+
+    async fn land_stack_with_leased(
         &self,
         branch: &str,
         onto: &str,
@@ -1650,6 +1730,14 @@ impl Repo {
     ///    when the head is known.
     /// 2. Lost twice: publish an intent and combine (see [`Repo::commit_combining`]).
     pub async fn commit_opts(
+        &self,
+        req: CommitRequest,
+        opts: CommitOptions<'_>,
+    ) -> Result<CommitOutcome> {
+        self.with_lease(self.commit_opts_leased(req, opts)).await
+    }
+
+    async fn commit_opts_leased(
         &self,
         req: CommitRequest,
         opts: CommitOptions<'_>,

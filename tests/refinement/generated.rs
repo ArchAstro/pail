@@ -15,7 +15,117 @@ quint_ownership! {
         primitive: "scenarios.begin",
         refines: ["begin"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.commit.gen", "path:get.seen.version", "path:get.version", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.refs", "path:state.clients", "path:state.history"],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const CHECK_LEASES = {
+        primitive: "scenarios.checkLeases",
+        refines: ["checkLeases"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_CHECK_LEASES = {
+        primitive: "scenarios.gcCheckLeases",
+        refines: ["gcCheckLeases"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_DELETE_COMMIT = {
+        primitive: "scenarios.gcDeleteCommit",
+        refines: ["gcDeleteCommit"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_DELETE_PAGE = {
+        primitive: "scenarios.gcDeletePage",
+        refines: ["gcDeletePage"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_DONE = {
+        primitive: "scenarios.gcDone",
+        refines: ["gcDone"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_LEASE = {
+        primitive: "scenarios.gcLease",
+        refines: ["gcLease"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_LIST_COMMITS = {
+        primitive: "scenarios.gcListCommits",
+        refines: ["gcListCommits"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_LIST_PAGES = {
+        primitive: "scenarios.gcListPages",
+        refines: ["gcListPages"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GC_MARK = {
+        primitive: "scenarios.gcMark",
+        refines: ["gcMark"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GRACE_ELAPSES = {
+        primitive: "scenarios.graceElapses",
+        refines: ["graceElapses"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const LEASE = {
+        primitive: "scenarios.lease",
+        refines: ["lease"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
         retrieve: ["name:state"],
     };
 }
@@ -25,7 +135,7 @@ quint_ownership! {
         primitive: "scenarios.readRef",
         refines: ["readRef"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.commit.gen", "path:get.seen.version", "path:get.version", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.refs", "path:state.clients", "path:state.history"],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
         retrieve: ["name:state"],
     };
 }
@@ -35,7 +145,7 @@ quint_ownership! {
         primitive: "scenarios.recheck",
         refines: ["recheck"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.commit.gen", "path:get.seen.version", "path:get.version", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.refs", "path:state.clients", "path:state.history"],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
         retrieve: ["name:state"],
     };
 }
@@ -45,7 +155,7 @@ quint_ownership! {
         primitive: "scenarios.swap",
         refines: ["swap"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.commit.gen", "path:get.seen.version", "path:get.version", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.refs", "path:state.clients", "path:state.history"],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
         retrieve: ["name:state"],
     };
 }
@@ -55,7 +165,7 @@ quint_ownership! {
         primitive: "scenarios.upload",
         refines: ["upload"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.commit.gen", "path:get.seen.version", "path:get.version", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.refs", "path:state.clients", "path:state.history"],
+        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
         retrieve: ["name:state"],
     };
 }
@@ -63,7 +173,24 @@ quint_ownership! {
 /// Which implementation command owns each Quint action.
 pub const OWNERSHIP: OwnershipTable = OwnershipTable {
     owner: "scenarios-generated-refinement",
-    descriptors: &[BEGIN, READ_REF, RECHECK, SWAP, UPLOAD],
+    descriptors: &[
+        BEGIN,
+        CHECK_LEASES,
+        GC_CHECK_LEASES,
+        GC_DELETE_COMMIT,
+        GC_DELETE_PAGE,
+        GC_DONE,
+        GC_LEASE,
+        GC_LIST_COMMITS,
+        GC_LIST_PAGES,
+        GC_MARK,
+        GRACE_ELAPSES,
+        LEASE,
+        READ_REF,
+        RECHECK,
+        SWAP,
+        UPLOAD,
+    ],
 };
 
 /// Everything the generated obligations may read from a snapshot.
@@ -77,9 +204,16 @@ pub const RETRIEVE: &[&str] = &[
     "name:BRANCH",
     "name:Conflicted",
     "name:DIRECT_ATTEMPTS",
+    "name:GC",
+    "name:GC_IDLE",
+    "name:GcDraining",
     "name:IDLE",
+    "name:Leasing",
     "name:Published",
     "name:ROOT",
+    "name:ROOT_TREE",
+    "name:Unknown",
+    "name:branchIsComplete",
     "name:state",
     "operator:Map",
     "operator:Rec",
@@ -91,6 +225,7 @@ pub const RETRIEVE: &[&str] = &[
     "operator:assign",
     "operator:contains",
     "operator:eq",
+    "operator:exclude",
     "operator:exists",
     "operator:field",
     "operator:filter",
@@ -100,6 +235,7 @@ pub const RETRIEVE: &[&str] = &[
     "operator:ilt",
     "operator:ite",
     "operator:keys",
+    "operator:map",
     "operator:neq",
     "operator:not",
     "operator:or",
@@ -120,14 +256,32 @@ pub const RETRIEVE: &[&str] = &[
     "path:get.phase",
     "path:get.seen",
     "path:get.seen.commit",
-    "path:get.seen.commit.gen",
     "path:get.seen.version",
     "path:get.version",
+    "path:ite.outcome",
+    "path:ite.phase",
     "path:state.bucket",
     "path:state.bucket.commits",
+    "path:state.bucket.locks",
+    "path:state.bucket.pages",
     "path:state.bucket.refs",
+    "path:state.bucket.young",
+    "path:state.bucket.young.commits",
+    "path:state.bucket.young.pages",
     "path:state.clients",
+    "path:state.collector",
+    "path:state.collector.doomedCommits",
+    "path:state.collector.doomedPages",
+    "path:state.collector.liveCommits",
+    "path:state.collector.livePages",
+    "path:state.collector.phase",
+    "path:state.collector.spared",
+    "path:state.collector.spared.commits",
+    "path:state.collector.spared.pages",
     "path:state.history",
+    "path:with.bucket",
+    "path:with.bucket.locks",
+    "path:with.clients",
 ];
 
 /// Domain implementation connected to the generated Quint scenarios.
@@ -152,6 +306,39 @@ pub trait Implementation: Sized {
 
     /// Execute Quint action `begin` with its generated arguments.
     fn begin(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `checkLeases` with its generated arguments.
+    fn check_leases(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcCheckLeases` with its generated arguments.
+    fn gc_check_leases(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcDeleteCommit` with its generated arguments.
+    fn gc_delete_commit(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcDeletePage` with its generated arguments.
+    fn gc_delete_page(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcDone` with its generated arguments.
+    fn gc_done(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcLease` with its generated arguments.
+    fn gc_lease(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcListCommits` with its generated arguments.
+    fn gc_list_commits(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcListPages` with its generated arguments.
+    fn gc_list_pages(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gcMark` with its generated arguments.
+    fn gc_mark(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `graceElapses` with its generated arguments.
+    fn grace_elapses(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `lease` with its generated arguments.
+    fn lease(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 
     /// Execute Quint action `readRef` with its generated arguments.
     fn read_ref(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
@@ -199,6 +386,151 @@ impl<I: Implementation> PrimitiveDriver for Driver<I> {
                     return Err(format!("begin primitive cannot refine {}", action.name));
                 }
                 self.implementation.begin(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.checkLeases" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "checkLeases expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "checkLeases" {
+                    return Err(format!(
+                        "checkLeases primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.check_leases(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcCheckLeases" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "gcCheckLeases expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "gcCheckLeases" {
+                    return Err(format!(
+                        "gcCheckLeases primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.gc_check_leases(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcDeleteCommit" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "gcDeleteCommit expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "gcDeleteCommit" {
+                    return Err(format!(
+                        "gcDeleteCommit primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.gc_delete_commit(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcDeletePage" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "gcDeletePage expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "gcDeletePage" {
+                    return Err(format!(
+                        "gcDeletePage primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.gc_delete_page(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcDone" => {
+                let [action] = actions else {
+                    return Err(format!("gcDone expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "gcDone" {
+                    return Err(format!("gcDone primitive cannot refine {}", action.name));
+                }
+                self.implementation.gc_done(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcLease" => {
+                let [action] = actions else {
+                    return Err(format!("gcLease expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "gcLease" {
+                    return Err(format!("gcLease primitive cannot refine {}", action.name));
+                }
+                self.implementation.gc_lease(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcListCommits" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "gcListCommits expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "gcListCommits" {
+                    return Err(format!(
+                        "gcListCommits primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.gc_list_commits(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcListPages" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "gcListPages expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "gcListPages" {
+                    return Err(format!(
+                        "gcListPages primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.gc_list_pages(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gcMark" => {
+                let [action] = actions else {
+                    return Err(format!("gcMark expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "gcMark" {
+                    return Err(format!("gcMark primitive cannot refine {}", action.name));
+                }
+                self.implementation.gc_mark(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.graceElapses" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "graceElapses expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "graceElapses" {
+                    return Err(format!(
+                        "graceElapses primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.grace_elapses(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.lease" => {
+                let [action] = actions else {
+                    return Err(format!("lease expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "lease" {
+                    return Err(format!("lease primitive cannot refine {}", action.name));
+                }
+                self.implementation.lease(&action.arguments)?;
                 Ok(vec![self.implementation.snapshot()])
             }
             "scenarios.readRef" => {

@@ -246,10 +246,12 @@ Examples:
   pail config -l --show-scope";
 
 pub const GC: &str = "\
-Deletes objects no branch reaches, only once they are older than the grace period, so a
-commit in flight is never collected.
+Deletes objects no branch reaches that are older than the grace period. gc first takes
+the bucket's exclusive lease: it waits for running commits to finish (--wait-secs), and
+new commits wait for it, so it never deletes what a commit in flight is about to use.
+--dry-run takes no lease and deletes nothing.
   pail gc --dry-run
-  pail gc --grace-hours 24";
+  pail gc --grace-hours 24 --wait-secs 300";
 
 pub const INSPECT: &str = "\
 Opens an object graph of the repository: branches, commits, manifest pages, packs and chunks,

@@ -308,6 +308,9 @@ enum Cmd {
         /// Report what would be deleted.
         #[arg(long)]
         dry_run: bool,
+        /// How long to wait for running commits to finish (new ones wait for gc).
+        #[arg(long, default_value_t = 600)]
+        wait_secs: u64,
     },
     /// Browse the physical data model in a browser: commits, pages, packs, chunks.
     #[command(after_long_help = cli_help::INSPECT)]
@@ -911,6 +914,8 @@ async fn run(cli: Cli) -> Result<()> {
                     .into());
                 }
             }
+            // The files must stay stored until the commit naming them lands.
+            let writing = repo.writing().await?;
             let mut delta: Delta = BTreeMap::new();
             for e in repo
                 .write_files(&inputs, &std::collections::HashMap::new())
@@ -936,6 +941,7 @@ async fn run(cli: Cli) -> Result<()> {
                     meta: BTreeMap::new(),
                 })
                 .await?;
+            writing.done().await?;
             println!(
                 "[{branch} {}] {}",
                 out.commit.short(),
@@ -1734,12 +1740,22 @@ async fn run(cli: Cli) -> Result<()> {
             store,
             grace_hours,
             dry_run,
+            wait_secs,
         } => {
             let repo = match store {
                 Some(s) => Repo::remote(&pail::rev::store_url(&s)?)?,
                 None => Ctx::open(None, cli.repo, ids).await?.repo,
             };
-            let r = pail::gc::gc(&repo, (grace_hours * 3600.0) as i64, dry_run).await?;
+            let r = pail::gc::gc_with(
+                &repo,
+                &pail::gc::GcOptions {
+                    grace_secs: (grace_hours * 3600.0) as i64,
+                    dry_run,
+                    wait: std::time::Duration::from_secs(wait_secs),
+                    now: None,
+                },
+            )
+            .await?;
             println!(
                 "live: {} commits, {} pages, {} packs, {} chunks; {} {} object(s), {}; kept {} young unreferenced",
                 r.live_commits,
@@ -2317,6 +2333,8 @@ async fn rebase(ctx: &Ctx, a: RebaseArgs) -> Result<()> {
         report_rewrite(ctx, &branch, &would, built.created(), &built.empty, a.json).await?;
         return Ok(());
     }
+    // The new commits must stay stored until the branch names them.
+    let writing = repo.writing().await?;
     rb::store(repo, &built).await?;
     let out = repo
         .rewrite_ref(
@@ -2332,6 +2350,7 @@ async fn rebase(ctx: &Ctx, a: RebaseArgs) -> Result<()> {
             check,
         )
         .await?;
+    writing.done().await?;
     report_rewrite(ctx, &branch, &out, built.created(), &built.empty, a.json).await?;
     hooks.notify(
         "post-rewrite",
@@ -2752,6 +2771,7 @@ async fn policy_cmd(
             let data =
                 std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
             Policy::parse(&data)?;
+            let writing = ctx.repo.writing().await?;
             let es = ctx
                 .repo
                 .write_files(
@@ -2783,6 +2803,7 @@ async fn policy_cmd(
                     meta: BTreeMap::new(),
                 })
                 .await?;
+            writing.done().await?;
             println!(
                 "[{} {}] policy updated",
                 pail::policy::BRANCH,

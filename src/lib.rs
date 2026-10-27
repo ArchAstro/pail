@@ -19,6 +19,7 @@ pub mod hash;
 pub mod hooks;
 pub mod httpstore;
 pub mod inspect;
+pub mod lease;
 pub mod local;
 pub mod manifest;
 pub mod objects;

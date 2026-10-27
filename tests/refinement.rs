@@ -1,11 +1,12 @@
-//! `Repo::commit` checked against the Quint model of publishing (`verify/publish.qnt`).
+//! `Repo::commit` and `gc` checked against the Quint model of pail (`verify/pail.qnt`).
 //!
-//! A model action is one request a client makes to the bucket. Each client is a real `Repo`
-//! over a shared in-memory bucket, behind a gate that holds its ref reads, commit uploads
-//! and ref swaps until the scenario releases them, so the clients interleave exactly as the
-//! scenario says. A swap can be released with its reply lost (applied, or never received).
-//! After every action the bucket, and each client's progress as read off the requests it
-//! made, must equal the model's state. `verify/README.md` has the mapping.
+//! A model action is one request an actor (a writer, or the collector) makes to the bucket.
+//! Each actor is a real `Repo` over a shared in-memory bucket, behind a gate that holds the
+//! requests the model counts as steps until the scenario releases them, so the actors
+//! interleave exactly as the scenario says. A swap can be released with its reply lost
+//! (applied, or never received). After every action the bucket, each writer's progress and
+//! the collector's, as read off the requests they made, must equal the model's state.
+//! `verify/README.md` has the mapping.
 
 #[path = "refinement/generated.rs"]
 mod generated;
@@ -17,6 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -34,11 +36,15 @@ use tokio::sync::oneshot;
 
 const BRANCH: &str = "main";
 const DATE: &str = "1700000000 +0000";
-/// How long a released client may take to reach its next request.
+/// The collector's actor name: `GC` in `world.qnt`.
+const GC: &str = "gc";
+/// gc's grace period. `graceElapses` ages every object by more than this.
+const GRACE: i64 = 1000;
+/// How long a released actor may take to reach its next request.
 const SETTLE: Duration = Duration::from_secs(20);
 
 #[test]
-fn commit_refines_the_publish_model() {
+fn pail_refines_the_model() {
     let results = generated::refine_all::<Harness>().unwrap_or_else(|e| panic!("{e}"));
     for r in &results {
         eprintln!(
@@ -48,7 +54,7 @@ fn commit_refines_the_publish_model() {
     }
     assert_eq!(
         results.len(),
-        5,
+        8,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -58,11 +64,19 @@ fn commit_refines_the_publish_model() {
 /// A request the model sees as one step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Request {
+    PutLease,
+    ListLeases,
     ReadRef,
     PutCommit,
     Swap,
-    /// The first write of the combining path: the client gave up swapping directly.
+    /// The first write of the combining path: the writer gave up swapping directly.
     PutIntent,
+    ListCommits,
+    DeleteCommit,
+    ListPages,
+    DeletePage,
+    /// gc releasing its lease: its last request.
+    DeleteLease,
 }
 
 /// How the gate lets a held request through: `Delivery` in `store.qnt`.
@@ -93,39 +107,62 @@ impl Delivery {
 
 enum Event {
     Held {
-        client: String,
+        actor: String,
         request: Request,
+        key: String,
         go: oneshot::Sender<Delivery>,
     },
     Answered {
-        client: String,
+        actor: String,
         request: Request,
         key: String,
         etag: Option<String>,
     },
     Finished {
-        client: String,
+        actor: String,
         outcome: &'static str,
     },
 }
 
-/// One client's view of the bucket: every request passes through, and the ones the model
+/// What every gate records about writes, for the refinement map: each object's version
+/// (one per create, overwrite or delete), the grace epoch it was last written in, and
+/// which actor wrote each lease.
+#[derive(Default)]
+struct Book {
+    epoch: i64,
+    versions: HashMap<String, i64>,
+    written: HashMap<String, i64>,
+    holders: HashMap<String, String>,
+}
+
+/// A writer's page puts wait for its commit upload to be released: the model uploads a
+/// commit and its page in one step.
+#[derive(Default)]
+struct Uploads {
+    open: bool,
+    parked: Vec<oneshot::Sender<()>>,
+}
+
+/// One actor's view of the bucket: every request passes through, and the ones the model
 /// counts as steps wait for the scenario to release them.
+#[derive(Clone)]
 struct Gate {
     inner: Arc<InMemory>,
-    client: String,
+    actor: String,
     events: mpsc::Sender<Event>,
+    book: Arc<Mutex<Book>>,
+    uploads: Arc<Mutex<Uploads>>,
 }
 
 impl fmt::Debug for Gate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Gate({})", self.client)
+        write!(f, "Gate({})", self.actor)
     }
 }
 
 impl fmt::Display for Gate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "gate for {}", self.client)
+        write!(f, "gate for {}", self.actor)
     }
 }
 
@@ -137,37 +174,111 @@ fn lost_reply() -> object_store::Error {
 }
 
 impl Gate {
-    fn write_request(location: &Path) -> Option<Request> {
-        let key = location.as_ref();
+    fn write_request(key: &str) -> Option<Request> {
         if key == format!("refs/{BRANCH}") {
             Some(Request::Swap)
         } else if key.starts_with("commits/") {
             Some(Request::PutCommit)
         } else if key.starts_with("intents/") {
             Some(Request::PutIntent)
+        } else if key.starts_with("locks/") {
+            Some(Request::PutLease)
         } else {
             None
         }
     }
 
-    async fn hold(&self, request: Request) -> Delivery {
+    fn list_request(prefix: &str) -> Option<Request> {
+        match prefix {
+            "locks" => Some(Request::ListLeases),
+            "commits" => Some(Request::ListCommits),
+            "pages" => Some(Request::ListPages),
+            _ => None,
+        }
+    }
+
+    fn delete_request(&self, key: &str) -> Option<Request> {
+        if key.starts_with("commits/") {
+            Some(Request::DeleteCommit)
+        } else if key.starts_with("pages/") {
+            Some(Request::DeletePage)
+        } else if key.starts_with("locks/") && self.actor == GC {
+            Some(Request::DeleteLease)
+        } else {
+            None
+        }
+    }
+
+    async fn hold(&self, request: Request, key: &str) -> Delivery {
         let (go, released) = oneshot::channel();
         let _ = self.events.send(Event::Held {
-            client: self.client.clone(),
+            actor: self.actor.clone(),
             request,
+            key: key.to_owned(),
             go,
         });
         // A harness that went away fails the request rather than performing it.
-        released.await.unwrap_or(Delivery::Dropped)
+        let how = released.await.unwrap_or(Delivery::Dropped);
+        if request == Request::PutCommit {
+            let mut u = self.uploads.lock().unwrap();
+            u.open = true;
+            for p in u.parked.drain(..) {
+                let _ = p.send(());
+            }
+        }
+        how
     }
 
-    fn answered(&self, request: Request, location: &Path, etag: Option<String>) {
+    fn answered(&self, request: Request, key: &str, etag: Option<String>) {
         let _ = self.events.send(Event::Answered {
-            client: self.client.clone(),
+            actor: self.actor.clone(),
             request,
-            key: location.to_string(),
+            key: key.to_owned(),
             etag,
         });
+    }
+
+    fn wrote(&self, key: &str) {
+        let mut b = self.book.lock().unwrap();
+        *b.versions.entry(key.to_owned()).or_default() += 1;
+        let epoch = b.epoch;
+        b.written.insert(key.to_owned(), epoch);
+        if key.starts_with("locks/") {
+            b.holders.insert(key.to_owned(), self.actor.clone());
+        }
+    }
+
+    fn removed(&self, key: &str) {
+        *self
+            .book
+            .lock()
+            .unwrap()
+            .versions
+            .entry(key.to_owned())
+            .or_default() += 1;
+    }
+
+    /// Objects as old as the grace epochs since they were written make them: each epoch
+    /// ages an object by more than gc's grace period.
+    fn aged(&self, mut meta: ObjectMeta) -> ObjectMeta {
+        let b = self.book.lock().unwrap();
+        let written = b.written.get(meta.location.as_ref()).copied().unwrap_or(0);
+        let age = (b.epoch - written) * (GRACE + 1);
+        meta.last_modified -= chrono::Duration::seconds(age);
+        meta
+    }
+
+    async fn put(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> StoreResult<PutResult> {
+        let r = self.inner.put_opts(location, payload, opts).await;
+        if r.is_ok() {
+            self.wrote(location.as_ref());
+        }
+        r
     }
 }
 
@@ -179,18 +290,37 @@ impl ObjectStore for Gate {
         payload: PutPayload,
         opts: PutOptions,
     ) -> StoreResult<PutResult> {
-        let Some(request) = Gate::write_request(location) else {
-            return self.inner.put_opts(location, payload, opts).await;
+        let key = location.as_ref();
+        if key.starts_with("pages/") {
+            let wait = {
+                let mut u = self.uploads.lock().unwrap();
+                if u.open {
+                    None
+                } else {
+                    let (go, wait) = oneshot::channel();
+                    u.parked.push(go);
+                    Some(wait)
+                }
+            };
+            if let Some(wait) = wait {
+                let _ = wait.await;
+            }
+        }
+        let Some(request) = Gate::write_request(key) else {
+            return self.put(location, payload, opts).await;
         };
-        let result = match self.hold(request).await {
-            Delivery::Answered => self.inner.put_opts(location, payload, opts).await,
+        let result = match self.hold(request, key).await {
+            Delivery::Answered => self.put(location, payload, opts).await,
             Delivery::Lost => {
-                let _ = self.inner.put_opts(location, payload, opts).await;
+                let _ = self.put(location, payload, opts).await;
                 Err(lost_reply())
             }
             Delivery::Dropped => Err(lost_reply()),
         };
-        self.answered(request, location, None);
+        if request == Request::PutCommit {
+            self.uploads.lock().unwrap().open = false;
+        }
+        self.answered(request, key, None);
         result
     }
 
@@ -206,13 +336,13 @@ impl ObjectStore for Gate {
         if location.as_ref() != format!("refs/{BRANCH}") {
             return self.inner.get_opts(location, options).await;
         }
-        let release = self.hold(Request::ReadRef).await;
+        let release = self.hold(Request::ReadRef, location.as_ref()).await;
         let result = match release {
             Delivery::Answered => self.inner.get_opts(location, options).await,
             Delivery::Lost | Delivery::Dropped => Err(lost_reply()),
         };
         let etag = result.as_ref().ok().and_then(|r| r.meta.e_tag.clone());
-        self.answered(Request::ReadRef, location, etag);
+        self.answered(Request::ReadRef, location.as_ref(), etag);
         result
     }
 
@@ -220,11 +350,61 @@ impl ObjectStore for Gate {
         &self,
         locations: BoxStream<'static, StoreResult<Path>>,
     ) -> BoxStream<'static, StoreResult<Path>> {
-        self.inner.delete_stream(locations)
+        let gate = self.clone();
+        locations
+            .then(move |location| {
+                let gate = gate.clone();
+                async move {
+                    let location = location?;
+                    let key = location.to_string();
+                    let request = gate.delete_request(&key);
+                    if let Some(request) = request {
+                        match gate.hold(request, &key).await {
+                            Delivery::Answered => {}
+                            _ => return Err(lost_reply()),
+                        }
+                    }
+                    let one = futures::stream::once(async { Ok(location) }).boxed();
+                    let out = gate.inner.delete_stream(one).next().await.unwrap();
+                    if out.is_ok() {
+                        gate.removed(&key);
+                    }
+                    if let Some(request) = request {
+                        gate.answered(request, &key, None);
+                    }
+                    out
+                }
+            })
+            .boxed()
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
-        self.inner.list(prefix)
+        let request = prefix.and_then(|p| Gate::list_request(p.as_ref()));
+        let ages = matches!(
+            request,
+            Some(Request::ListCommits) | Some(Request::ListPages)
+        );
+        let gate = self.clone();
+        let prefix = prefix.cloned();
+        futures::stream::once(async move {
+            let key = prefix.as_ref().map(|p| p.to_string()).unwrap_or_default();
+            if let Some(request) = request
+                && !matches!(gate.hold(request, &key).await, Delivery::Answered)
+            {
+                return futures::stream::iter(vec![Err(lost_reply())]);
+            }
+            let items: Vec<_> = gate.inner.list(prefix.as_ref()).collect().await;
+            if let Some(request) = request {
+                gate.answered(request, &key, None);
+            }
+            let items = items
+                .into_iter()
+                .map(|m| m.map(|m| if ages { gate.aged(m) } else { m }))
+                .collect::<Vec<_>>();
+            futures::stream::iter(items)
+        })
+        .flatten()
+        .boxed()
     }
 
     fn list_with_offset(
@@ -244,16 +424,15 @@ impl ObjectStore for Gate {
     }
 }
 
-// ---------- the implementation the model is checked against ----------
+// ---------- model values ----------
 
-/// A commit as the model names it: its writer and generation.
-type Id = (String, i64);
+/// A commit as the model names it: the writers of every commit from the root to it.
+type Id = Vec<String>;
+/// A tree: path to content.
+type Tree = BTreeMap<String, String>;
 
-fn id_value((by, generation): &Id) -> RuntimeValue {
-    RuntimeValue::Record(BTreeMap::from([
-        ("by".to_owned(), RuntimeValue::Text(by.clone())),
-        ("gen".to_owned(), RuntimeValue::Int(*generation)),
-    ]))
+fn id_value(id: &Id) -> RuntimeValue {
+    RuntimeValue::List(id.iter().map(|a| RuntimeValue::Text(a.clone())).collect())
 }
 
 fn text(v: &RuntimeValue) -> Result<&str, String> {
@@ -273,13 +452,13 @@ fn field<'a>(v: &'a RuntimeValue, name: &str) -> Result<&'a RuntimeValue, String
 }
 
 fn id_of(v: &RuntimeValue) -> Result<Id, String> {
-    let RuntimeValue::Int(generation) = field(v, "gen")? else {
-        return Err(format!("expected an integer generation: {v:?}"));
+    let RuntimeValue::List(items) = v else {
+        return Err(format!("expected a commit id (a list of writers): {v:?}"));
     };
-    Ok((text(field(v, "by")?)?.to_owned(), *generation))
+    items.iter().map(|a| Ok(text(a)?.to_owned())).collect()
 }
 
-fn tree_of(v: &RuntimeValue) -> Result<BTreeMap<String, String>, String> {
+fn tree_of(v: &RuntimeValue) -> Result<Tree, String> {
     let RuntimeValue::Map(m) = v else {
         return Err(format!("expected a map of paths: {v:?}"));
     };
@@ -288,7 +467,7 @@ fn tree_of(v: &RuntimeValue) -> Result<BTreeMap<String, String>, String> {
         .collect()
 }
 
-fn tree_value(t: &BTreeMap<String, String>) -> RuntimeValue {
+fn tree_value(t: &Tree) -> RuntimeValue {
     RuntimeValue::Map(
         t.iter()
             .map(|(k, v)| (RuntimeValue::Text(k.clone()), RuntimeValue::Text(v.clone())))
@@ -296,40 +475,83 @@ fn tree_value(t: &BTreeMap<String, String>) -> RuntimeValue {
     )
 }
 
+fn record<const N: usize>(fields: [(&str, RuntimeValue); N]) -> RuntimeValue {
+    RuntimeValue::Record(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
+}
+
+fn set<I: IntoIterator<Item = RuntimeValue>>(items: I) -> RuntimeValue {
+    RuntimeValue::Set(items.into_iter().collect())
+}
+
+/// A `Versioned` object of `store.qnt`.
+fn versioned(body: RuntimeValue, version: i64, live: bool) -> RuntimeValue {
+    record([
+        ("body", body),
+        ("version", RuntimeValue::Int(version)),
+        ("live", RuntimeValue::Bool(live)),
+    ])
+}
+
+// ---------- the actors ----------
+
+/// What an actor is doing, as read off its requests.
 #[derive(Default)]
-struct Client {
-    base: Option<Id>,
-    delta: BTreeMap<String, String>,
+struct Progress {
     /// The request it is waiting at, if any.
-    held: Option<(Request, oneshot::Sender<Delivery>)>,
+    held: Option<(Request, String, oneshot::Sender<Delivery>)>,
+    outcome: Option<&'static str>,
+}
+
+#[derive(Default)]
+struct Writer {
+    base: Option<Id>,
+    delta: Tree,
+    progress: Progress,
     /// Its last swap went unanswered, so its next ref read is a recheck.
     rechecking: bool,
     /// Ref reads that began an attempt.
     attempts: i64,
     /// The ref as its last attempt read it: commit and version.
     seen: Option<(Id, i64)>,
-    outcome: Option<&'static str>,
 }
 
-/// Real clients over one bucket, and what the scenario has seen of them.
+/// The collector's run, as read off its requests.
+#[derive(Default)]
+struct Collector {
+    running: bool,
+    progress: Progress,
+    marked: Option<(BTreeSet<Id>, BTreeSet<Tree>)>,
+    doomed_commits: BTreeSet<String>,
+    doomed_pages: BTreeSet<String>,
+    spared: Option<(BTreeSet<Tree>, BTreeSet<Id>)>,
+}
+
+/// Real actors over one bucket, and what the scenario has seen of them.
 struct Harness {
     rt: Option<tokio::runtime::Runtime>,
     bucket: Arc<InMemory>,
+    book: Arc<Mutex<Book>>,
     /// Reads the bucket directly, past every gate.
     observer: Repo,
     events: mpsc::Receiver<Event>,
     sender: mpsc::Sender<Event>,
-    clients: BTreeMap<String, Client>,
+    writers: BTreeMap<String, Writer>,
+    collector: Collector,
     names: HashMap<Hash, Id>,
     hashes: HashMap<Id, Hash>,
-    versions: Mutex<Versions>,
+    /// Each object's body as last seen, so a deleted one keeps it (`store.qnt` tombstones).
+    bodies: Mutex<HashMap<String, RuntimeValue>>,
+    /// Pages by key: the tree each holds.
+    trees: Mutex<HashMap<String, Tree>>,
+    /// The ref's ETags in order: version n is the n-th.
+    ref_etags: Mutex<Vec<String>>,
     /// The commit each version of the ref named, oldest first.
     ref_commits: Mutex<Vec<Hash>>,
 }
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        // Clients still held (one that went on to combine) are abandoned, not released.
+        // Actors still held (a writer that went on to combine) are abandoned, not released.
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
@@ -341,7 +563,18 @@ impl Harness {
         self.rt.as_ref().expect("runtime")
     }
 
-    fn files(&self, tree: &BTreeMap<String, String>) -> Result<Delta, String> {
+    fn gate(&self, actor: &str) -> Store {
+        let gate = Gate {
+            inner: self.bucket.clone(),
+            actor: actor.to_owned(),
+            events: self.sender.clone(),
+            book: self.book.clone(),
+            uploads: Arc::default(),
+        };
+        Store::from_object_store("memory://bucket", Arc::new(gate))
+    }
+
+    fn files(&self, tree: &Tree) -> Result<Delta, String> {
         let inputs: Vec<FileInput> = tree
             .iter()
             .map(|(path, data)| FileInput {
@@ -350,10 +583,11 @@ impl Harness {
                 data: Bytes::from(data.clone().into_bytes()),
             })
             .collect();
-        let entries = self
-            .rt()
-            .block_on(self.observer.write_files(&inputs, &HashMap::new()))
-            .map_err(|e| e.to_string())?;
+        // Small files are stored inline: nothing to upload, so no lease to take.
+        let (entries, uploads) = self.observer.prepare_files(&inputs, &HashMap::new());
+        if !uploads.is_empty() {
+            return Err("the model's files must be small enough to inline".into());
+        }
         Ok(entries
             .into_iter()
             .map(|e| (e.path.clone(), Some(e)))
@@ -374,10 +608,18 @@ impl Harness {
         }
     }
 
-    fn client(&mut self, name: &str) -> Result<&mut Client, String> {
-        self.clients
+    fn writer(&mut self, name: &str) -> Result<&mut Writer, String> {
+        self.writers
             .get_mut(name)
-            .ok_or_else(|| format!("no client {name}"))
+            .ok_or_else(|| format!("no writer {name}"))
+    }
+
+    fn progress(&mut self, actor: &str) -> Result<&mut Progress, String> {
+        if actor == GC {
+            Ok(&mut self.collector.progress)
+        } else {
+            Ok(&mut self.writer(actor)?.progress)
+        }
     }
 
     /// The ref's commit and version, recording a version not seen before.
@@ -385,11 +627,19 @@ impl Harness {
         let key = format!("refs/{BRANCH}");
         let (data, etag) = self.object(&key)?.ok_or("the branch ref is gone")?;
         let value: RefValue = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-        let (version, new) = self.versions.lock().unwrap().of(&key, &etag);
-        if new {
-            self.ref_commits.lock().unwrap().push(value.commit);
+        Ok((value.commit, self.ref_version(&etag, Some(value.commit))))
+    }
+
+    fn ref_version(&self, etag: &str, commit: Option<Hash>) -> i64 {
+        let mut etags = self.ref_etags.lock().unwrap();
+        if let Some(i) = etags.iter().position(|e| e == etag) {
+            return i as i64 + 1;
         }
-        Ok((value.commit, version))
+        etags.push(etag.to_owned());
+        if let Some(c) = commit {
+            self.ref_commits.lock().unwrap().push(c);
+        }
+        etags.len() as i64
     }
 
     fn name(&self, h: &Hash) -> Result<Id, String> {
@@ -399,115 +649,206 @@ impl Harness {
             .ok_or_else(|| format!("commit {} has no writer the scenario knows", h.short()))
     }
 
+    /// Every commit the branch reached at `head`, and their trees.
+    fn reach(&self, head: Hash) -> Result<(BTreeSet<Id>, BTreeSet<Tree>), String> {
+        let (mut ids, mut trees) = (BTreeSet::new(), BTreeSet::new());
+        let mut cur = Some(head);
+        while let Some(h) = cur {
+            ids.insert(self.name(&h)?);
+            let c = self
+                .rt()
+                .block_on(self.observer.commit_obj(&h))
+                .map_err(|e| e.to_string())?;
+            trees.insert(self.tree(&format!("pages/{}", c.root.hex()))?);
+            cur = c.parent;
+        }
+        Ok((ids, trees))
+    }
+
     fn handle(&mut self, event: Event) -> Result<(), String> {
         match event {
             Event::Held {
-                client,
+                actor,
                 request,
+                key,
                 go,
             } => {
-                let c = self.client(&client)?;
-                if let Some((was, _)) = &c.held {
+                if actor != GC {
+                    let w = self.writer(&actor)?;
+                    if request == Request::ReadRef && !w.rechecking {
+                        w.attempts += 1;
+                    }
+                }
+                let p = self.progress(&actor)?;
+                if let Some((was, _, _)) = &p.held {
                     return Err(format!(
-                        "{client} made a {request:?} request while one {was:?} was held"
+                        "{actor} made a {request:?} request while one {was:?} was held"
                     ));
                 }
-                if request == Request::ReadRef && !c.rechecking {
-                    c.attempts += 1;
-                }
-                c.held = Some((request, go));
+                p.held = Some((request, key, go));
             }
             Event::Answered {
-                client,
+                actor,
                 request,
                 key,
                 etag,
-            } => match request {
-                Request::ReadRef => {
-                    let seen = match etag {
-                        Some(etag) => {
-                            self.read_ref()?;
-                            let version = self
-                                .versions
-                                .lock()
-                                .unwrap()
-                                .known(&key, &etag)
-                                .ok_or("a client read a ref version never stored")?;
-                            let commit = self.ref_commits.lock().unwrap()[version as usize - 1];
-                            Some((self.name(&commit)?, version))
-                        }
-                        None => None,
-                    };
-                    let c = self.client(&client)?;
-                    if c.rechecking {
-                        c.rechecking = false;
-                    } else {
-                        c.seen = seen;
-                    }
+            } => self.answered(&actor, request, &key, etag)?,
+            Event::Finished { actor, outcome } => {
+                if actor == GC {
+                    self.collector = Collector::default();
+                } else {
+                    self.writer(&actor)?.progress.outcome = Some(outcome);
                 }
-                Request::PutCommit => {
-                    let h = Hash::from_hex(key.trim_start_matches("commits/"))
-                        .map_err(|e| e.to_string())?;
-                    if !self.names.contains_key(&h) {
-                        let generation = self
-                            .rt()
-                            .block_on(self.observer.commit_obj(&h))
-                            .map_err(|e| e.to_string())?
-                            .generation as i64;
-                        self.names.insert(h, (client.clone(), generation));
-                        self.hashes.insert((client, generation), h);
-                    }
-                }
-                Request::Swap | Request::PutIntent => {}
-            },
-            Event::Finished { client, outcome } => {
-                self.client(&client)?.outcome = Some(outcome);
             }
         }
         Ok(())
     }
 
-    /// Process requests until `client` waits at its next one or has returned.
-    fn settle(&mut self, client: &str) -> Result<(), String> {
+    fn answered(
+        &mut self,
+        actor: &str,
+        request: Request,
+        key: &str,
+        etag: Option<String>,
+    ) -> Result<(), String> {
+        match request {
+            Request::ReadRef => {
+                let seen = match etag {
+                    Some(etag) => {
+                        self.read_ref()?;
+                        let version = self.ref_version(&etag, None);
+                        let commit = self.ref_commits.lock().unwrap()[version as usize - 1];
+                        Some((commit, version))
+                    }
+                    None => None,
+                };
+                if actor == GC {
+                    let (commit, _) = seen.ok_or("gc's ref read failed")?;
+                    self.collector.marked = Some(self.reach(commit)?);
+                    return Ok(());
+                }
+                let seen = match seen {
+                    Some((c, v)) => Some((self.name(&c)?, v)),
+                    None => None,
+                };
+                let w = self.writer(actor)?;
+                if w.rechecking {
+                    w.rechecking = false;
+                } else {
+                    w.seen = seen;
+                }
+            }
+            Request::PutCommit => {
+                let h = Hash::from_hex(key.trim_start_matches("commits/"))
+                    .map_err(|e| e.to_string())?;
+                if !self.names.contains_key(&h) {
+                    let parent = self
+                        .rt()
+                        .block_on(self.observer.commit_obj(&h))
+                        .map_err(|e| e.to_string())?
+                        .parent
+                        .ok_or("a writer's commit has no parent")?;
+                    let mut id = self.name(&parent)?;
+                    id.push(actor.to_owned());
+                    self.names.insert(h, id.clone());
+                    self.hashes.insert(id, h);
+                }
+            }
+            Request::ListCommits => {
+                let (marked, _) = self.collector.marked.clone().ok_or("gc listed unmarked")?;
+                let young = self.young()?;
+                let mut doomed = BTreeSet::new();
+                for (hex, _) in self.live("commits/")? {
+                    let h = Hash::from_hex(&hex).map_err(|e| e.to_string())?;
+                    let id = self.name(&h)?;
+                    if !marked.contains(&id) && !young.1.contains(&id) {
+                        doomed.insert(format!("commits/{hex}"));
+                    }
+                }
+                self.collector.doomed_commits = doomed;
+                self.collector.spared = Some(young);
+            }
+            Request::ListPages => {
+                let (_, marked) = self.collector.marked.clone().ok_or("gc listed unmarked")?;
+                let young = self.young()?;
+                let spared = self.collector.spared.clone().unwrap_or_default();
+                let mut doomed = BTreeSet::new();
+                for (hex, _) in self.live("pages/")? {
+                    let key = format!("pages/{hex}");
+                    let t = self.tree(&key)?;
+                    if !marked.contains(&t) && !young.0.contains(&t) && !spared.0.contains(&t) {
+                        doomed.insert(key);
+                    }
+                }
+                self.collector.doomed_pages = doomed;
+            }
+            Request::DeleteCommit => {
+                self.collector.doomed_commits.remove(key);
+            }
+            Request::DeletePage => {
+                self.collector.doomed_pages.remove(key);
+            }
+            Request::Swap
+            | Request::PutIntent
+            | Request::PutLease
+            | Request::ListLeases
+            | Request::DeleteLease => {}
+        }
+        Ok(())
+    }
+
+    /// Process requests until `actor` waits at its next one or has returned.
+    fn settle(&mut self, actor: &str) -> Result<(), String> {
         loop {
-            let c = self.client(client)?;
-            if c.held.is_some() || c.outcome.is_some() {
+            let done = if actor == GC {
+                !self.collector.running
+            } else {
+                self.writer(actor)?.progress.outcome.is_some()
+            };
+            if self.progress(actor)?.held.is_some() || done {
                 return Ok(());
             }
             let event = self
                 .events
                 .recv_timeout(SETTLE)
-                .map_err(|_| format!("{client} made no request within {SETTLE:?}"))?;
+                .map_err(|_| format!("{actor} made no request within {SETTLE:?}"))?;
             self.handle(event)?;
         }
     }
 
-    /// Let `client`'s held request through, which the model says is `expected`.
-    fn release(&mut self, client: &str, expected: Request, how: Delivery) -> Result<(), String> {
-        let c = self.client(client)?;
-        let Some((request, go)) = c.held.take() else {
+    /// Let `actor`'s held request through, which the model says is `expected` (and, if
+    /// given, on `key`).
+    fn release(
+        &mut self,
+        actor: &str,
+        expected: Request,
+        key: Option<&str>,
+        how: Delivery,
+    ) -> Result<(), String> {
+        let p = self.progress(actor)?;
+        let Some((request, held_key, go)) = p.held.take() else {
             return Err(format!(
-                "the model's next step for {client} is {expected:?}, but it is making no request \
+                "the model's next step for {actor} is {expected:?}, but it is making no request \
                  (outcome {:?})",
-                c.outcome
+                p.outcome
             ));
         };
-        if request != expected {
+        if request != expected || key.is_some_and(|k| k != held_key) {
             return Err(format!(
-                "the model's next step for {client} is {expected:?}, but its next request is \
-                 {request:?}"
+                "the model's next step for {actor} is {expected:?} {key:?}, but its next request \
+                 is {request:?} {held_key}"
             ));
         }
-        if !matches!(how, Delivery::Answered) {
-            c.rechecking = true;
+        if actor != GC && !matches!(how, Delivery::Answered) {
+            self.writer(actor)?.rechecking = true;
         }
         go.send(how)
-            .map_err(|_| format!("{client} stopped waiting"))?;
-        self.settle(client)
+            .map_err(|_| format!("{actor} stopped waiting"))?;
+        self.settle(actor)
     }
 
-    fn client_arg(arguments: &[RuntimeValue]) -> Result<String, String> {
-        Ok(text(arguments.first().ok_or("missing client argument")?)?.to_owned())
+    fn actor_arg(arguments: &[RuntimeValue]) -> Result<String, String> {
+        Ok(text(arguments.first().ok_or("missing actor argument")?)?.to_owned())
     }
 }
 
@@ -533,41 +874,6 @@ impl NormalizedRuntimeEvidence for Snapshot {
 
 // ---------- the refinement map: real state to model state ----------
 
-/// The store layer: each object's version as `store.qnt` numbers them (1 for its first
-/// write, one more per write), from the ETags the bucket issued.
-#[derive(Default)]
-struct Versions {
-    etags: HashMap<String, Vec<String>>,
-}
-
-impl Versions {
-    /// The version `etag` is of `key`, and whether it is one not seen before.
-    fn of(&mut self, key: &str, etag: &str) -> (i64, bool) {
-        let seen = self.etags.entry(key.to_owned()).or_default();
-        match seen.iter().position(|e| e == etag) {
-            Some(i) => (i as i64 + 1, false),
-            None => {
-                seen.push(etag.to_owned());
-                (seen.len() as i64, true)
-            }
-        }
-    }
-
-    fn known(&self, key: &str, etag: &str) -> Option<i64> {
-        let i = self.etags.get(key)?.iter().position(|e| e == etag)?;
-        Some(i as i64 + 1)
-    }
-}
-
-/// A `Versioned` object of `store.qnt`.
-fn versioned(body: RuntimeValue, version: i64) -> RuntimeValue {
-    RuntimeValue::Record(BTreeMap::from([
-        ("body".to_owned(), body),
-        ("version".to_owned(), RuntimeValue::Int(version)),
-        ("live".to_owned(), RuntimeValue::Bool(true)),
-    ]))
-}
-
 impl Harness {
     /// One object, read past every gate: its bytes and ETag.
     fn object(&self, key: &str) -> Result<Option<(Bytes, String)>, String> {
@@ -579,50 +885,83 @@ impl Harness {
             .transpose()
     }
 
-    /// Store layer: every object under `prefix` with its key (prefix removed), bytes and
-    /// version. pail deletes nothing in these scenarios, so an object seen before must
-    /// still be there.
-    fn space(&self, prefix: &str) -> Result<Vec<(String, Bytes, i64)>, String> {
+    /// The live objects under `prefix`: key (prefix removed) and bytes.
+    fn live(&self, prefix: &str) -> Result<Vec<(String, Bytes)>, String> {
         let listed = self
             .rt()
             .block_on(self.observer.store.list(prefix))
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
-        for (key, _) in &listed {
-            let (data, etag) = self.object(key)?.ok_or(format!("{key} vanished"))?;
-            let (version, _) = self.versions.lock().unwrap().of(key, &etag);
-            out.push((key.trim_start_matches(prefix).to_owned(), data, version));
-        }
-        let versions = self.versions.lock().unwrap();
-        if let Some(gone) = versions
-            .etags
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .find(|k| !listed.iter().any(|(l, _)| l == *k))
-        {
-            return Err(format!("{gone} was deleted; the model has no deletes yet"));
+        for (key, _) in listed {
+            let (data, _) = self.object(&key)?.ok_or(format!("{key} vanished"))?;
+            out.push((key.trim_start_matches(prefix).to_owned(), data));
         }
         Ok(out)
     }
 
-    /// Pail layer: a commit object as the model's `Commit` (its tree read back in full,
-    /// its ancestors named).
+    /// Store layer: every object ever written under `prefix`, live or deleted, with its
+    /// version from the book, mapped to the model's key and body.
+    fn space(
+        &self,
+        prefix: &str,
+        mut model: impl FnMut(&str, &Bytes) -> Result<(RuntimeValue, RuntimeValue), String>,
+    ) -> Result<BTreeMap<RuntimeValue, RuntimeValue>, String> {
+        let live: HashMap<String, Bytes> = self.live(prefix)?.into_iter().collect();
+        let book = self.book.lock().unwrap();
+        let mut out = BTreeMap::new();
+        for (key, version) in book.versions.iter().filter(|(k, _)| k.starts_with(prefix)) {
+            let name = key.trim_start_matches(prefix);
+            let mut bodies = self.bodies.lock().unwrap();
+            let (k, body) = match live.get(name) {
+                Some(data) => {
+                    let (k, body) = model(name, data)?;
+                    bodies.insert(key.clone(), record([("k", k.clone()), ("b", body.clone())]));
+                    (k, body)
+                }
+                None => {
+                    let kept = bodies
+                        .get(key)
+                        .ok_or(format!("{key} was never seen live"))?;
+                    (field(kept, "k")?.clone(), field(kept, "b")?.clone())
+                }
+            };
+            out.insert(k, versioned(body, *version, live.contains_key(name)));
+        }
+        Ok(out)
+    }
+
+    /// The tree a page holds.
+    fn tree(&self, key: &str) -> Result<Tree, String> {
+        if let Some(t) = self.trees.lock().unwrap().get(key) {
+            return Ok(t.clone());
+        }
+        let rt = self.rt();
+        let h = Hash::from_hex(key.trim_start_matches("pages/")).map_err(|e| e.to_string())?;
+        let entries = rt
+            .block_on(self.observer.entries(h))
+            .map_err(|e| e.to_string())?;
+        let data = rt
+            .block_on(self.observer.read_files(&entries))
+            .map_err(|e| e.to_string())?;
+        let tree: Tree = entries
+            .iter()
+            .zip(data)
+            .map(|(e, d)| (e.path.clone(), String::from_utf8_lossy(&d).into_owned()))
+            .collect();
+        self.trees
+            .lock()
+            .unwrap()
+            .insert(key.to_owned(), tree.clone());
+        Ok(tree)
+    }
+
+    /// Pail layer: a commit object as the model's `Commit`.
     fn commit_value(&self, h: &Hash) -> Result<RuntimeValue, String> {
         let rt = self.rt();
         let c = rt
             .block_on(self.observer.commit_obj(h))
             .map_err(|e| e.to_string())?;
-        let entries = rt
-            .block_on(self.observer.entries(c.root))
-            .map_err(|e| e.to_string())?;
-        let data = rt
-            .block_on(self.observer.read_files(&entries))
-            .map_err(|e| e.to_string())?;
-        let tree: BTreeMap<String, String> = entries
-            .iter()
-            .zip(data)
-            .map(|(e, d)| (e.path.clone(), String::from_utf8_lossy(&d).into_owned()))
-            .collect();
+        let tree = self.tree(&format!("pages/{}", c.root.hex()))?;
         let mut ancestors = BTreeSet::new();
         let mut parent = c.parent;
         while let Some(p) = parent {
@@ -632,40 +971,198 @@ impl Harness {
                 .map_err(|e| e.to_string())?
                 .parent;
         }
-        Ok(RuntimeValue::Record(BTreeMap::from([
-            ("tree".to_owned(), tree_value(&tree)),
-            ("ancestors".to_owned(), RuntimeValue::Set(ancestors)),
-        ])))
+        Ok(record([
+            ("tree", tree_value(&tree)),
+            ("ancestors", RuntimeValue::Set(ancestors)),
+        ]))
+    }
+
+    /// Commits and pages written in this grace epoch: `Young` (trees, ids).
+    fn young(&self) -> Result<(BTreeSet<Tree>, BTreeSet<Id>), String> {
+        let young: Vec<String> = {
+            let book = self.book.lock().unwrap();
+            book.written
+                .iter()
+                .filter(|(_, e)| **e == book.epoch)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        let (mut pages, mut commits) = (BTreeSet::new(), BTreeSet::new());
+        for key in young {
+            if key.starts_with("pages/") {
+                pages.insert(self.tree(&key)?);
+            } else if let Some(hex) = key.strip_prefix("commits/") {
+                let h = Hash::from_hex(hex).map_err(|e| e.to_string())?;
+                commits.insert(self.name(&h)?);
+            }
+        }
+        Ok((pages, commits))
+    }
+
+    /// Leases by holder: each holder's lease is one model object, written once per lease
+    /// taken and once per release.
+    fn locks_value(&self) -> Result<RuntimeValue, String> {
+        let live: BTreeSet<String> = self
+            .live("locks/")?
+            .into_iter()
+            .map(|(k, _)| format!("locks/{k}"))
+            .collect();
+        let book = self.book.lock().unwrap();
+        let mut holders: BTreeMap<String, (i64, Option<&'static str>, &'static str)> =
+            BTreeMap::new();
+        for (key, holder) in &book.holders {
+            let kind = if key.starts_with("locks/exclusive-") {
+                "Exclusive"
+            } else {
+                "Shared"
+            };
+            let h = holders.entry(holder.clone()).or_insert((0, None, kind));
+            h.0 += book.versions.get(key).copied().unwrap_or(0);
+            h.2 = kind;
+            if live.contains(key) {
+                h.1 = Some(kind);
+            }
+        }
+        Ok(RuntimeValue::Map(
+            holders
+                .into_iter()
+                .map(|(holder, (version, live, kind))| {
+                    (
+                        RuntimeValue::Text(holder),
+                        versioned(
+                            RuntimeValue::Text(live.unwrap_or(kind).to_owned()),
+                            version,
+                            live.is_some(),
+                        ),
+                    )
+                })
+                .collect(),
+        ))
     }
 
     /// Pail layer: the bucket as `bucket.qnt` lays it out.
     fn bucket_value(&self) -> Result<RuntimeValue, String> {
-        let mut commits = BTreeMap::new();
-        for (hex, _, version) in self.space("commits/")? {
-            let h = Hash::from_hex(&hex).map_err(|e| e.to_string())?;
-            commits.insert(
-                id_value(&self.name(&h)?),
-                versioned(self.commit_value(&h)?, version),
-            );
-        }
+        let commits = self.space("commits/", |hex, _| {
+            let h = Hash::from_hex(hex).map_err(|e| e.to_string())?;
+            Ok((id_value(&self.name(&h)?), self.commit_value(&h)?))
+        })?;
+        let pages = self.space("pages/", |hex, _| {
+            Ok((
+                tree_value(&self.tree(&format!("pages/{hex}"))?),
+                RuntimeValue::Bool(true),
+            ))
+        })?;
         self.read_ref()?;
         let mut refs = BTreeMap::new();
-        for (branch, data, version) in self.space("refs/")? {
+        for (branch, data) in self.live("refs/")? {
             let value: RefValue = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-            let body = RuntimeValue::Record(BTreeMap::from([(
-                "commit".to_owned(),
-                id_value(&self.name(&value.commit)?),
-            )]));
-            refs.insert(RuntimeValue::Text(branch), versioned(body, version));
+            let (_, etag) = self
+                .object(&format!("refs/{branch}"))?
+                .ok_or("the ref vanished")?;
+            let body = record([("commit", id_value(&self.name(&value.commit)?))]);
+            refs.insert(
+                RuntimeValue::Text(branch),
+                versioned(body, self.ref_version(&etag, None), true),
+            );
         }
-        Ok(RuntimeValue::Record(BTreeMap::from([
-            ("commits".to_owned(), RuntimeValue::Map(commits)),
-            ("refs".to_owned(), RuntimeValue::Map(refs)),
-        ])))
+        let (young_pages, young_commits) = self.young()?;
+        Ok(record([
+            ("pages", RuntimeValue::Map(pages)),
+            ("commits", RuntimeValue::Map(commits)),
+            ("refs", RuntimeValue::Map(refs)),
+            ("locks", self.locks_value()?),
+            (
+                "young",
+                record([
+                    ("pages", set(young_pages.iter().map(tree_value))),
+                    ("commits", set(young_commits.iter().map(id_value))),
+                ]),
+            ),
+        ]))
     }
 
-    /// The whole model state: the bucket, each client's progress as read off its
-    /// requests, and the ref's history.
+    fn writer_value(&self, name: &str, w: &Writer) -> Result<RuntimeValue, String> {
+        let root: Id = vec!["root".to_owned()];
+        let held = w.progress.held.as_ref().map(|(r, _, _)| *r);
+        let phase = match (&w.progress.outcome, held, w.base.is_some()) {
+            (_, _, false) => "Idle",
+            (_, Some(Request::PutIntent), _) | (Some(_), _, _) => "Done",
+            (None, Some(Request::PutLease), _) => "Leasing",
+            (None, Some(Request::ListLeases), _) => "CheckingLeases",
+            (None, Some(Request::ReadRef), _) if w.rechecking => "Rechecking",
+            (None, Some(Request::ReadRef), _) => "Reading",
+            (None, Some(Request::PutCommit), _) => "Uploading",
+            (None, Some(Request::Swap), _) => "Swapping",
+            (None, other, true) => return Err(format!("{name} is between requests ({other:?})")),
+        };
+        let outcome = match (&w.progress.outcome, held) {
+            (Some(o), _) => *o,
+            (None, Some(Request::PutIntent)) => "Combining",
+            (None, _) => "Pending",
+        };
+        let base = w.base.clone().unwrap_or_else(|| root.clone());
+        let (seen, seen_version) = w.seen.clone().unwrap_or((base.clone(), 0));
+        Ok(record([
+            ("base", id_value(&base)),
+            ("delta", tree_value(&w.delta)),
+            ("phase", RuntimeValue::Text(phase.to_owned())),
+            (
+                "seen",
+                record([
+                    ("commit", id_value(&seen)),
+                    ("version", RuntimeValue::Int(seen_version)),
+                ]),
+            ),
+            ("attempt", RuntimeValue::Int(w.attempts.max(1))),
+            ("outcome", RuntimeValue::Text(outcome.to_owned())),
+        ]))
+    }
+
+    fn collector_value(&self) -> Result<RuntimeValue, String> {
+        let c = &self.collector;
+        let held = c.progress.held.as_ref().map(|(r, _, _)| *r);
+        let phase = match (c.running, held) {
+            (false, _) | (true, Some(Request::PutLease)) => "GcIdle",
+            (true, Some(Request::ListLeases)) => "GcDraining",
+            (true, Some(Request::ReadRef)) => "GcLocked",
+            (true, Some(Request::ListCommits)) => "GcMarked",
+            (true, Some(Request::DeleteCommit | Request::ListPages)) => "GcSweepingCommits",
+            (true, Some(Request::DeletePage | Request::DeleteLease)) => "GcSweepingPages",
+            (true, other) => return Err(format!("gc is between requests ({other:?})")),
+        };
+        let (live_commits, live_pages) = c.marked.clone().unwrap_or_default();
+        let (spared_pages, spared_commits) = c.spared.clone().unwrap_or_default();
+        let doomed_commits = c
+            .doomed_commits
+            .iter()
+            .map(|k| {
+                let h =
+                    Hash::from_hex(k.trim_start_matches("commits/")).map_err(|e| e.to_string())?;
+                Ok(id_value(&self.name(&h)?))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let doomed_pages = c
+            .doomed_pages
+            .iter()
+            .map(|k| self.tree(k).map(|t| tree_value(&t)))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(record([
+            ("phase", RuntimeValue::Text(phase.to_owned())),
+            ("liveCommits", set(live_commits.iter().map(id_value))),
+            ("livePages", set(live_pages.iter().map(tree_value))),
+            ("doomedCommits", set(doomed_commits)),
+            ("doomedPages", set(doomed_pages)),
+            (
+                "spared",
+                record([
+                    ("pages", set(spared_pages.iter().map(tree_value))),
+                    ("commits", set(spared_commits.iter().map(id_value))),
+                ]),
+            ),
+        ]))
+    }
+
+    /// The whole model state.
     fn state(&self) -> Result<RuntimeValue, String> {
         let bucket = self.bucket_value()?;
         let history = self
@@ -675,56 +1172,26 @@ impl Harness {
             .iter()
             .map(|h| self.name(h).map(|id| id_value(&id)))
             .collect::<Result<Vec<_>, _>>()?;
-
-        let root: Id = ("root".to_owned(), 0);
         let mut clients = BTreeMap::new();
-        for (name, c) in &self.clients {
-            let phase = match (&c.outcome, &c.held, c.base.is_some()) {
-                (_, _, false) => "Idle",
-                (_, Some((Request::PutIntent, _)), _) | (Some(_), _, _) => "Done",
-                (None, Some((Request::ReadRef, _)), _) if c.rechecking => "Rechecking",
-                (None, Some((Request::ReadRef, _)), _) => "Reading",
-                (None, Some((Request::PutCommit, _)), _) => "Uploading",
-                (None, Some((Request::Swap, _)), _) => "Swapping",
-                (None, None, true) => return Err(format!("{name} is between requests")),
-            };
-            let outcome = match (&c.outcome, &c.held) {
-                (Some(o), _) => *o,
-                (None, Some((Request::PutIntent, _))) => "Combining",
-                (None, _) => "Pending",
-            };
-            let base = c.base.clone().unwrap_or_else(|| root.clone());
-            let (seen, seen_version) = c.seen.clone().unwrap_or((base.clone(), 0));
+        for (name, w) in &self.writers {
             clients.insert(
                 RuntimeValue::Text(name.clone()),
-                RuntimeValue::Record(BTreeMap::from([
-                    ("base".to_owned(), id_value(&base)),
-                    ("delta".to_owned(), tree_value(&c.delta)),
-                    ("phase".to_owned(), RuntimeValue::Text(phase.to_owned())),
-                    (
-                        "seen".to_owned(),
-                        RuntimeValue::Record(BTreeMap::from([
-                            ("commit".to_owned(), id_value(&seen)),
-                            ("version".to_owned(), RuntimeValue::Int(seen_version)),
-                        ])),
-                    ),
-                    ("attempt".to_owned(), RuntimeValue::Int(c.attempts.max(1))),
-                    ("outcome".to_owned(), RuntimeValue::Text(outcome.to_owned())),
-                ])),
+                self.writer_value(name, w)?,
             );
         }
-        Ok(RuntimeValue::Record(BTreeMap::from([
-            ("bucket".to_owned(), bucket),
-            ("clients".to_owned(), RuntimeValue::Map(clients)),
-            ("history".to_owned(), RuntimeValue::List(history)),
-        ])))
+        Ok(record([
+            ("bucket", bucket),
+            ("clients", RuntimeValue::Map(clients)),
+            ("collector", self.collector_value()?),
+            ("history", RuntimeValue::List(history)),
+        ]))
     }
 }
 
 impl generated::Implementation for Harness {
     type Evidence = Snapshot;
 
-    /// A bucket holding the model's root commit, and an idle client per model client.
+    /// A bucket holding the model's root commit, old, and an idle writer per model client.
     fn from_initial_state(initial: &RuntimeValue) -> Result<Self, String> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -740,21 +1207,25 @@ impl generated::Implementation for Harness {
         let RuntimeValue::Map(clients) = field(initial, "clients")? else {
             return Err("expected a map of clients".into());
         };
-        let clients = clients
+        let writers = clients
             .keys()
-            .map(|k| Ok((text(k)?.to_owned(), Client::default())))
+            .map(|k| Ok((text(k)?.to_owned(), Writer::default())))
             .collect::<Result<_, String>>()?;
         let mut h = Harness {
             rt: Some(rt),
             bucket,
+            book: Arc::default(),
             observer,
             events,
             sender,
-            clients,
+            writers,
+            collector: Collector::default(),
             names: HashMap::new(),
             hashes: HashMap::new(),
-            versions: Mutex::new(Versions::default()),
-            ref_commits: Mutex::new(Vec::new()),
+            bodies: Mutex::default(),
+            trees: Mutex::default(),
+            ref_etags: Mutex::default(),
+            ref_commits: Mutex::default(),
         };
         let bucket = field(initial, "bucket")?;
         let RuntimeValue::Map(refs) = field(bucket, "refs")? else {
@@ -771,7 +1242,7 @@ impl generated::Implementation for Harness {
             .get(&id_value(&root))
             .ok_or("the model's head is not among its commits")?;
         let delta = h.files(&tree_of(field(field(root_commit, "body")?, "tree")?)?)?;
-        let req = h.request(&root.0, None, delta);
+        let req = h.request(&root[0], None, delta);
         let made = h
             .rt()
             .block_on(h.observer.commit(req))
@@ -779,6 +1250,23 @@ impl generated::Implementation for Harness {
         h.names.insert(made.commit, root.clone());
         h.hashes.insert(root, made.commit);
         h.read_ref()?;
+        // The root's objects were written past the gates: one version each, and old.
+        let keys: Vec<String> = ["commits/", "pages/"]
+            .iter()
+            .map(|p| h.rt().block_on(h.observer.store.list(p)))
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .flatten()
+            .map(|(k, _)| k)
+            .collect();
+        let mut book = h.book.lock().unwrap();
+        for k in keys {
+            book.versions.insert(k.clone(), 1);
+            book.written.insert(k, 0);
+        }
+        book.epoch = 1;
+        drop(book);
         Ok(h)
     }
 
@@ -798,52 +1286,128 @@ impl generated::Implementation for Harness {
             .get(&base)
             .ok_or_else(|| format!("no commit {base:?}"))?;
         let req = self.request(&name, Some(base_hash), self.files(&delta)?);
-        let gate = Gate {
-            inner: self.bucket.clone(),
-            client: name.clone(),
-            events: self.sender.clone(),
-        };
-        let repo = Repo::with_store(
-            Store::from_object_store("memory://bucket", Arc::new(gate)),
-            None,
-        );
+        let repo = Repo::with_store(self.gate(&name), None);
         let events = self.sender.clone();
-        let client = name.clone();
+        let actor = name.clone();
         self.rt().spawn(async move {
             let outcome = match repo.commit(req).await {
                 Ok(_) => "Published",
                 Err(e) if e.downcast_ref::<ConflictError>().is_some() => "Conflicted",
                 Err(_) => "Unknown",
             };
-            let _ = events.send(Event::Finished { client, outcome });
+            let _ = events.send(Event::Finished { actor, outcome });
         });
-        let c = self.client(&name)?;
-        c.base = Some(base);
-        c.delta = delta;
+        let w = self.writer(&name)?;
+        w.base = Some(base);
+        w.delta = delta;
         self.settle(&name)
     }
 
+    fn lease(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::PutLease, None, Delivery::Answered)
+    }
+
+    fn check_leases(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::ListLeases, None, Delivery::Answered)
+    }
+
     fn read_ref(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
-        let c = Harness::client_arg(arguments)?;
-        self.release(&c, Request::ReadRef, Delivery::Answered)
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)
     }
 
     fn recheck(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
-        let c = Harness::client_arg(arguments)?;
-        if !self.client(&c)?.rechecking {
+        let c = Harness::actor_arg(arguments)?;
+        if !self.writer(&c)?.rechecking {
             return Err(format!("{c} has no unanswered swap to recheck"));
         }
-        self.release(&c, Request::ReadRef, Delivery::Answered)
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)
     }
 
     fn swap(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
-        let c = Harness::client_arg(arguments)?;
+        let c = Harness::actor_arg(arguments)?;
         let how = Delivery::of(arguments.get(1).ok_or("swap takes a Delivery")?)?;
-        self.release(&c, Request::Swap, how)
+        self.release(&c, Request::Swap, None, how)
     }
 
     fn upload(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
-        let c = Harness::client_arg(arguments)?;
-        self.release(&c, Request::PutCommit, Delivery::Answered)
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::PutCommit, None, Delivery::Answered)
+    }
+
+    fn gc_lease(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        if !self.collector.running {
+            let repo = Repo::with_store(self.gate(GC), None);
+            let events = self.sender.clone();
+            self.rt().spawn(async move {
+                let opts = pail::gc::GcOptions {
+                    grace_secs: GRACE,
+                    dry_run: false,
+                    wait: Duration::from_secs(60),
+                    now: None,
+                };
+                let outcome = match pail::gc::gc_with(&repo, &opts).await {
+                    Ok(_) => "Done",
+                    Err(_) => "Failed",
+                };
+                let _ = events.send(Event::Finished {
+                    actor: GC.to_owned(),
+                    outcome,
+                });
+            });
+            self.collector.running = true;
+            self.settle(GC)?;
+        }
+        self.release(GC, Request::PutLease, None, Delivery::Answered)
+    }
+
+    fn gc_check_leases(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.release(GC, Request::ListLeases, None, Delivery::Answered)
+    }
+
+    fn gc_mark(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.release(GC, Request::ReadRef, None, Delivery::Answered)
+    }
+
+    fn gc_list_commits(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.release(GC, Request::ListCommits, None, Delivery::Answered)
+    }
+
+    fn gc_delete_commit(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let id = id_of(arguments.first().ok_or("gcDeleteCommit takes a commit")?)?;
+        let h = self
+            .hashes
+            .get(&id)
+            .ok_or_else(|| format!("no commit {id:?}"))?;
+        let key = format!("commits/{}", h.hex());
+        self.release(GC, Request::DeleteCommit, Some(&key), Delivery::Answered)
+    }
+
+    fn gc_list_pages(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.release(GC, Request::ListPages, None, Delivery::Answered)
+    }
+
+    fn gc_delete_page(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let t = tree_of(arguments.first().ok_or("gcDeletePage takes a tree")?)?;
+        let key = {
+            let trees = self.trees.lock().unwrap();
+            trees
+                .iter()
+                .find(|(_, v)| **v == t)
+                .map(|(k, _)| k.clone())
+                .ok_or_else(|| format!("no page holds {t:?}"))?
+        };
+        self.release(GC, Request::DeletePage, Some(&key), Delivery::Answered)
+    }
+
+    fn gc_done(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.release(GC, Request::DeleteLease, None, Delivery::Answered)
+    }
+
+    fn grace_elapses(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.book.lock().unwrap().epoch += 1;
+        Ok(())
     }
 }

@@ -1428,6 +1428,87 @@
    "key": "refs/main",
    "allow": false,
    "note": "Writers is ignored: the rule has no writers"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "locks/shared-00000000000000000001-0000abcd",
+   "allow": true,
+   "note": "a writer takes a shared lease"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "delete",
+   "key": "locks/shared-00000000000000000001-0000abcd",
+   "allow": true,
+   "note": "and releases it"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "locks/exclusive-00000000000000000001-0000abcd",
+   "allow": false,
+   "note": "only gc takes the exclusive lease"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "write",
+   "key": "locks/exclusive-00000000000000000001-0000abcd",
+   "allow": true,
+   "note": "gc takes the exclusive lease"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "svc",
+    "groups": [
+     "role:gc"
+    ]
+   },
+   "op": "delete",
+   "key": "locks/exclusive-00000000000000000001-0000abcd",
+   "allow": true,
+   "note": "and releases it"
+  },
+  {
+   "policy": "strict",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "locks/shared-00000000000000000001-0000abcd",
+   "allow": false,
+   "note": "a non-writer takes no lease"
+  },
+  {
+   "policy": "std",
+   "identity": {
+    "principal": "user:alice",
+    "groups": []
+   },
+   "op": "write",
+   "key": "locks/other",
+   "allow": false,
+   "note": "lease names are shared- or exclusive-"
   }
  ],
  "invalid_policies": [

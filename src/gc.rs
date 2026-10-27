@@ -1,6 +1,9 @@
-//! Garbage collection: mark everything reachable from refs (and reflog entries), then
-//! delete unreferenced immutable objects older than a grace period. The grace period
-//! protects objects uploaded by commits that have not reached their CAS yet.
+//! Garbage collection: take the exclusive lease (waiting for writers to finish; see
+//! `lease`), mark everything reachable from refs (and reflog entries), then delete
+//! unreferenced immutable objects older than a grace period. The lease keeps commits from
+//! running meanwhile: one can reuse an old stored object without rewriting it, so no age
+//! tells gc that an in-flight commit needs it (`verify/gc.qnt`). The grace period spares
+//! objects written outside any lease.
 //! Packs are deleted only when no live entry points into them (no repacking: entry
 //! locations are part of page hashes).
 
@@ -9,6 +12,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use crate::hash::Hash;
+use crate::lease::Lease;
 use crate::manifest::{Loc, Page};
 use crate::repo::Repo;
 
@@ -23,7 +27,43 @@ pub struct GcReport {
     pub kept_young: usize,
 }
 
+pub struct GcOptions {
+    pub grace_secs: i64,
+    /// Report what would go, deleting nothing (and taking no lease).
+    pub dry_run: bool,
+    /// How long to wait for writers to finish.
+    pub wait: std::time::Duration,
+    /// The time, in unix seconds, that object ages are measured from (default: now).
+    pub now: Option<i64>,
+}
+
 pub async fn gc(repo: &Repo, grace_secs: i64, dry_run: bool) -> Result<GcReport> {
+    gc_with(
+        repo,
+        &GcOptions {
+            grace_secs,
+            dry_run,
+            wait: std::time::Duration::from_secs(600),
+            now: None,
+        },
+    )
+    .await
+}
+
+pub async fn gc_with(repo: &Repo, opts: &GcOptions) -> Result<GcReport> {
+    if opts.dry_run {
+        return sweep(repo, opts).await;
+    }
+    let lease = Lease::exclusive(&repo.store, opts.wait).await?;
+    let report = sweep(repo, opts).await;
+    let released = lease.release().await;
+    let report = report?;
+    released?;
+    Ok(report)
+}
+
+async fn sweep(repo: &Repo, opts: &GcOptions) -> Result<GcReport> {
+    let (grace_secs, dry_run) = (opts.grace_secs, opts.dry_run);
     let mut roots: Vec<Hash> = repo
         .list_refs()
         .await?
@@ -83,9 +123,12 @@ pub async fn gc(repo: &Repo, grace_secs: i64, dry_run: bool) -> Result<GcReport>
     let commit_hex: HashSet<String> = commits.iter().map(|h| h.hex()).collect();
     let page_hex: HashSet<String> = pages.iter().map(|h| h.hex()).collect();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
+    let now = match opts.now {
+        Some(now) => now,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64,
+    };
     let mut report = GcReport {
         live_commits: commits.len(),
         live_pages: pages.len(),

@@ -28,6 +28,8 @@
 //! ```text
 //! refs/<b>, intents/<b>/…, reflog/<b>/…   a writer of <b> (combining stays among <b>'s writers)
 //! commits/ pages/ packs/ chunks/          create: a writer of any branch; delete/overwrite: gc
+//! locks/shared-…                          a writer of any branch (its lease while it writes)
+//! locks/exclusive-…                       gc (its lease while it deletes)
 //! HEAD                                    an admin
 //! anything, read                          a reader
 //! ```
@@ -225,6 +227,19 @@ impl Policy {
                 None => deny(format!("no rule lets anyone write {branch}")),
             };
         }
+        if let Some(name) = key.strip_prefix("locks/") {
+            return if name.starts_with("shared-") {
+                if self.writes_anything(id) {
+                    allow("a writer's lease")
+                } else {
+                    deny("not a writer of any branch")
+                }
+            } else if name.starts_with("exclusive-") && id.is_any(&self.gc) {
+                allow("gc's lease")
+            } else {
+                deny("only gc takes the exclusive lease")
+            };
+        }
         if CONTENT.iter().any(|p| key.starts_with(p)) {
             return match op {
                 Op::Delete if id.is_any(&self.gc) => allow("gc"),
@@ -314,6 +329,8 @@ impl Policy {
                     grants.push(format!("({cond})"));
                 }
             }
+            // A writer's lease: written, refreshed and deleted while it writes.
+            grants.push(format!("(resource.name.startsWith('{base}locks/shared-'))"));
             // STS rejects long conditions (measured 2026-10: 664 characters accepted, 856 not),
             // so pack the grants into as few rules as fit a conservative budget.
             let mut chunk = String::new();
@@ -340,6 +357,7 @@ impl Policy {
         if id.is_any(&self.gc) {
             let content: Vec<String> = CONTENT
                 .iter()
+                .chain(&["locks/exclusive-"])
                 .map(|c| format!("resource.name.startsWith('{base}{c}')"))
                 .collect();
             rules.push(rule("objectAdmin", content.join(" || ")));

@@ -1007,3 +1007,53 @@ async fn stacks_built_on_rewritten_history_land_only_their_own_commits() {
     );
     let _ = c;
 }
+
+/// A commit that reuses a page an abandoned commit stored long ago must not lose it to gc:
+/// `put_new` of an existing page writes nothing, so the page looks old and unreferenced
+/// until the commit lands (`verify/gc.qnt`). gc waits for the writer's lease instead.
+#[tokio::test]
+async fn gc_waits_for_a_commit_reusing_an_old_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", dir.path().join("bucket").display());
+    let repo = Repo::with_store(Store::open(&url).unwrap(), None);
+    let fields = |message: &str| pail::repo::CommitFields {
+        author: "a".into(),
+        author_date: "2026-01-01T00:00:00Z".into(),
+        committer: "a".into(),
+        committer_date: "2026-01-01T00:00:00Z".into(),
+        message: message.into(),
+        meta: Default::default(),
+    };
+    let delta: Delta = [("src/f.rs".to_string(), Some(fake_entry("src/f.rs", 1)))].into();
+    // An abandoned commit: stored, never landed.
+    repo.write_commit(None, &delta, &fields("abandoned"))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+
+    // A new commit with the same tree, between its upload and its ref swap when gc starts.
+    let writing = repo.writing().await.unwrap();
+    let fresh = repo
+        .write_commit(None, &delta, &fields("fresh"))
+        .await
+        .unwrap();
+    let collector = Repo::with_store(Store::open(&url).unwrap(), None);
+    let gc = tokio::spawn(async move { pail::gc::gc(&collector, 1, false).await });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!gc.is_finished(), "gc ran while a commit was in flight");
+    repo.create_branch("main", fresh.commit).await.unwrap();
+    writing.done().await.unwrap();
+    let report = gc.await.unwrap().unwrap();
+    assert!(
+        report.deleted.iter().any(|k| k.starts_with("commits/")),
+        "gc still collects the abandoned commit: {:?}",
+        report.deleted
+    );
+
+    let reader = Repo::with_store(Store::open(&url).unwrap(), None);
+    let root = reader.commit_obj(&fresh.commit).await.unwrap().root;
+    reader
+        .entries(root)
+        .await
+        .expect("the landed commit's tree is still stored");
+}
