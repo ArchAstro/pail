@@ -3,9 +3,11 @@
   "private": true,
   "description": "Quint model of pail's publish protocol and the tools that check it",
   "scripts": {
-    "compile": "quint-refinements compile scenarios.qnt --module scenarios --artifact quint-refinements.json --rust ../tests/refinement/generated.rs",
-    "check": "npm run compile -- --check",
-    "test": "quint test store_test.qnt --main=storeTest --match='Run$' && quint test scenarios.qnt --main=scenarios --match='Run$'",
+    "compile": "npm run compile:publish && npm run compile:store",
+    "compile:publish": "quint-refinements compile scenarios.qnt --module scenarios --artifact quint-refinements.json --rust ../tests/refinement/generated.rs",
+    "compile:store": "quint-refinements compile store_scenarios.qnt --module storeScenarios --artifact store-refinements.json --rust ../tests/store_refinement/generated.rs",
+    "check": "npm run compile:publish -- --check && npm run compile:store -- --check",
+    "test": "quint test store_scenarios.qnt --main=storeScenarios --match='Run$' && quint test scenarios.qnt --main=scenarios --match='Run$'",
     "simulate": "quint run publish.qnt --main=publish --invariant=safety --max-steps=20 --max-samples=20000"
   },
   "devDependencies": {

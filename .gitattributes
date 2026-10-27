@@ -1,2 +1,4 @@
 verify/quint-refinements.json linguist-generated=true
 tests/refinement/generated.rs linguist-generated=true
+verify/store-refinements.json linguist-generated=true
+tests/store_refinement/generated.rs linguist-generated=true

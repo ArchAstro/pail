@@ -2,9 +2,16 @@
 /// An object store as pail uses one (S3, GCS, a local directory), independent of pail.
 ///
 /// A store is a set of named objects. Each write gives an object a new version (an ETag or
-/// GCS generation) that is never reused, even after a delete, so a conditional write that
-/// matched a version matched exactly that write. Every operation is linearizable: S3 and
-/// GCS are strongly consistent for reads, writes and lists.
+/// GCS generation), and a conditional write applies only against the current one. Every
+/// operation is linearizable: S3 and GCS are strongly consistent for reads, writes and
+/// lists.
+///
+/// Versions here count writes, so they are never reused. Real stores reuse one only when an
+/// object gets back bytes it had before: an S3 ETag and pail's local version are hashes
+/// of the bytes, while a GCS generation and an in-memory ETag are new on every write.
+/// Pail does not depend on which: a ref's body is the ref's whole state (commit, landed
+/// intents, lineage), so a swap matching identical bytes swaps from exactly the state the
+/// writer read, and with fresh versions the writer would re-read and write the same thing.
 ///
 /// The store does not know what objects mean. A model of a client lays out its objects in
 /// one or more spaces, each a typed map from key to versioned object (pail's are in
