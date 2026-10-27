@@ -59,7 +59,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        18,
+        19,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -951,14 +951,17 @@ impl Harness {
                         .map_err(|e| e.to_string())?;
                     let parent = c.parent.ok_or("a writer's commit has no parent")?;
                     let mut id = self.name(&parent)?;
-                    // A combining round's commit is its intent writer's, not the uploader's;
-                    // a rewrite's carries its original's name and the rewriter's mark.
-                    match (c.meta.get("pail.intent"), c.meta.get("rewritten.from")) {
-                        (Some(intent), _) => id.push(format!("{}+", self.intent_writer(intent)?)),
-                        (None, Some(from)) => {
+                    // A rewrite's commit carries its original's name and the rewriter's mark
+                    // (and keeps the original's `pail.intent`); a combining round's commit is
+                    // its intent writer's, not the uploader's.
+                    match (c.meta.get("rewritten.from"), c.meta.get("pail.intent")) {
+                        (Some(from), _) => {
                             let from = Hash::from_hex(from).map_err(|e| e.to_string())?;
                             id.push(tag(&self.name(&from)?));
                             id.push(format!("~{actor}"));
+                        }
+                        (None, Some(intent)) => {
+                            id.push(format!("{}+", self.intent_writer(intent)?))
                         }
                         (None, None) => id.push(actor.to_owned()),
                     }

@@ -41,4 +41,4 @@ zstd = "0.13"
 
 [dev-dependencies]
 # Checks `Repo::commit` against the Quint model in verify/ (tests/refinement.rs).
-quint-refinements = { git = "https://github.com/ArchAstro/quint-refinements", rev = "4ef8e7ab1e1c62aa0b0e232b6729fa1f8a786325" }
+quint-refinements = { git = "https://github.com/ArchAstro/quint-refinements", rev = "cbdf1070eb444322b130cdc54fbc2c6a500acc2f" }

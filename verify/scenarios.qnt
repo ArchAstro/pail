@@ -671,4 +671,52 @@ module scenarios {
       }),
       state' = state,
     })
+
+  /// Alice's intent lands in a round of her own (as in `combineAloneRun`), then dave
+  /// rewords her commit. The rewrite keeps the ref's `recent` as it was: alice's intent
+  /// still counts as landed (a retry finds it there), naming the commit it landed as.
+  /// @conformance
+  run rewordKeepsRecentRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(begin("bob", ROOT, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(readRef("alice"))
+    .then(begin("carol", BOB_1, CAROL_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(intend("alice", 1))
+    .then(pollRef("alice"))
+    .then(pollList("alice"))
+    .then(gather("alice", Set()))
+    .then(batchSwap("alice", Answered))
+    .then(cleanup("alice"))
+    .then(beginRewrite("dave"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwStore("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ALICE_C.append("~dave"),
+        recentOf(state.bucket) == Map("alice" -> ALICE_C),
+        lineageOf(state.bucket) == { epoch: 1, rewrite: 1 },
+        client(state, "dave").outcome == Rewritten,
+      }),
+      state' = state,
+    })
 }
