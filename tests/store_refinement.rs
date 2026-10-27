@@ -26,6 +26,8 @@ enum Backend {
     Memory,
     File,
     Url(String),
+    /// `gs://` against the in-process emulator at this base URL.
+    GcsEmulator(String),
 }
 
 thread_local! {
@@ -59,6 +61,13 @@ fn memory_store_refines_the_store_model() {
 #[test]
 fn file_store_refines_the_store_model() {
     refine(Backend::File);
+}
+
+/// The real `Store` GCS backend (`object_store`'s client) against `pail::gcs_emulator`.
+#[test]
+fn gcs_store_refines_the_store_model() {
+    let emu = pail::gcs_emulator::GcsEmulator::start("127.0.0.1:0").unwrap();
+    refine(Backend::GcsEmulator(emu.url()));
 }
 
 #[test]
@@ -167,6 +176,11 @@ impl StoreUnderTest {
                 let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
                 let url = format!("file://{}", dir.path().join("bucket").display());
                 (Store::open(&url).map_err(|e| e.to_string())?, Some(dir))
+            }
+            Backend::GcsEmulator(base) => {
+                let url = format!("gs://pail-test/refine-{:016x}", rand::random::<u64>());
+                let store = Store::open_with_gcs_base(&url, None, Some(base.clone()));
+                (store.map_err(|e| e.to_string())?, None)
             }
             Backend::Url(url) => {
                 let run = format!("{url}/refine-{:016x}", rand::random::<u64>());

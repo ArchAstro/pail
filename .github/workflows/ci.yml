@@ -61,3 +61,19 @@ jobs:
           AWS_ACCESS_KEY_ID: x
           AWS_SECRET_ACCESS_KEY: x
           AWS_REGION: us-east-1
+  gcs:
+    # The same tests against our GCS emulator run as a process (cargo test also runs it in-process).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin pail-gcs-emulator
+      - name: Start emulator
+        run: |
+          target/release/pail-gcs-emulator 127.0.0.1:19002 > emulator.log 2>&1 &
+          sleep 1
+      - run: cargo test --release --test backends --test store_refinement --test gcs_emulator
+        env:
+          PAIL_TEST_STORES: gs://pail/ci
+          PAIL_GCS_BASE_URL: http://127.0.0.1:19002
