@@ -3,7 +3,8 @@
 A [Quint](https://quint-lang.org) model of how `Repo::commit` publishes over a bucket and
 how `gc` collects it, the properties they must keep, and scenarios the real code is checked
 against request by request with
-[quint-refinements](https://github.com/ArchAstro/quint-refinements).
+[quint-refinements](https://github.com/ArchAstro/quint-refinements). Beside it: the store
+contract every backend follows, and the branch policy every enforcement point decides.
 
 Layers, each importing those below. A feature is a set of pure steps (`xCan(s, ...)`:
 may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new protocol
@@ -28,6 +29,10 @@ pail.qnt ──quint run──▶ properties hold in every simulated interleavin
 scenarios.qnt ──compile──▶ quint-refinements.json + tests/refinement/generated.rs
                                    │
 tests/refinement.rs ── real Repo::commit and gc, gated store ──▶ same state after every step
+
+policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
+                                    ├─▶ tests/policy_refinement/generated.rs  (pail)
+                                    └─▶ policy/pailpolicy_refinement_gen_test.go (gateway)
 ```
 
 ## Files
@@ -43,10 +48,13 @@ tests/refinement.rs ── real Repo::commit and gc, gated store ──▶ same 
 | `gc.qnt` | The collector running `gc::gc_with`, one store request per step |
 | `pail.qnt` | Actions, `step`, and the properties (`safety`) |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
-| `quint-refinements.json`, `store-refinements.json` | Generated scenario artifacts (do not edit) |
-| `../tests/refinement/generated.rs`, `../tests/store_refinement/generated.rs` | Generated Rust traits (do not edit) |
+| `policy.qnt` | Branch policy: parsing `policy.json`, `decide`, `request_op` |
+| `policy_scenarios.qnt` | `@conformance` runs: documents to parse and requests to decide |
+| `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json` | Generated scenario artifacts (do not edit) |
+| `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
 | `../tests/refinement.rs` | `Repo::commit` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
 | `../tests/store_refinement.rs` | Each `Store` backend against `store_spec.qnt` |
+| `../tests/policy_refinement.rs` | `Policy::parse`, `Policy::decide`, `policy::request_op` against `policy.qnt` |
 
 ## Run
 
@@ -55,7 +63,7 @@ cd verify && npm ci
 npm test            # scenarios pass in Quint
 npm run simulate    # random interleavings against `safety`
 npm run compile     # after editing any .qnt file
-cd .. && cargo test --release --test refinement --test store_refinement
+cd .. && cargo test --release --test refinement --test store_refinement --test policy_refinement
 # GCS runs in `cargo test` against the in-process emulator (src/gcs_emulator.rs); as a process:
 #   cargo run --release --bin pail-gcs-emulator 127.0.0.1:4443
 #   PAIL_TEST_STORES=gs://bucket/prefix PAIL_GCS_BASE_URL=http://127.0.0.1:4443 cargo test ...
@@ -104,6 +112,28 @@ before: an S3 ETag and pail's local version hash the bytes, so the version comes
 a GCS generation and an in-memory ETag do not. A first version of the scenarios asserted
 "never reused" and failed on `file://` and S3. Pail does not need it (a ref's body is its
 whole state), so `store.qnt` says so and no scenario rewrites old bytes.
+
+## Branch policy (`policy.qnt`)
+
+Every enforcement point (`pail serve`; the ArchDev gateway's Go port) runs the same
+scenarios through a generated adapter, so none keeps a hand-written copy of the rules.
+
+| Action | Real call | Compared after |
+|---|---|---|
+| `load(doc)` | the doc as JSON → `Policy::parse` | the parsed policy (defaults filled), or `Invalid` |
+| `decide(caller, op, key)` | `Policy::decide` | `Allowed` / `Denied` |
+| `requestOp(method, key, inm)` | `policy::request_op` (`""` = no `If-None-Match`) | the op |
+
+- Quint strings cannot be sliced, so keys and globs are `Text` (lists of characters) and a
+  branch is a span of its key.
+- A `Doc` is JSON as far as parsing cares: each field null, an int, a string, strings, strings
+  then a null, or branch rules. Unknown fields are ignored.
+- The obligations inline every helper, so `policy.qnt` binds values used twice with
+  `Set(v).exists(x => ...)`, and the artifacts are written `--compact`.
+- Mutating `src/policy.rs` (prefix order, branch of an intent, the exclusive lease, `PUT`
+  of content, version, globs, `HEAD`, default readers): every mutant fails a scenario.
+- The gateway copies `policy/` (artifact and Go interface) into
+  `internal/gateway/`; refresh that copy when the model changes.
 
 ## How the harness maps to the model
 

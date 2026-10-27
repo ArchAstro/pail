@@ -591,7 +591,9 @@ Scenario tests (`tests/scenarios/*.t`) are shell transcripts of common Git workf
 
 Publishing is also modelled in Quint ([verify/](verify/README.md)): the model's properties are
 checked over random interleavings of writers and lost CAS replies, and `tests/refinement.rs`
-runs real clients through the model's scenarios one store request at a time.
+runs real clients through the model's scenarios one store request at a time. Store backends
+and branch policy are checked against their models the same way (`tests/store_refinement.rs`,
+`tests/policy_refinement.rs`).
 
 ## License
 
