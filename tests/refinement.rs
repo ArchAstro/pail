@@ -1,4 +1,5 @@
-//! `Repo::commit` and `gc` checked against the Quint model of pail (`verify/pail.qnt`).
+//! `Repo::commit`, `Repo::rewrite_ref` and `gc` checked against the Quint model of pail
+//! (`verify/pail.qnt`).
 //!
 //! A model action is one request an actor (a writer, or the collector) makes to the bucket.
 //! Each actor is a real `Repo` over a shared in-memory bucket, behind a gate that holds the
@@ -16,6 +17,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -28,8 +30,11 @@ use object_store::{
 };
 use pail::hash::Hash;
 use pail::manifest::{Kind, Page, decode_page};
-use pail::objects::RefValue;
-use pail::repo::{CommitRequest, ConflictError, Delta, FileInput, Repo};
+use pail::objects::{Lineage, RefValue, Rewrite};
+use pail::repo::{
+    CommitRequest, ConflictError, Delta, FileInput, MovedError, Repo, RewriteRequest,
+    rewritten_fields,
+};
 use pail::store::Store;
 use quint_refinements::{NormalizedRuntimeEvidence, RuntimeValue};
 use tokio::sync::oneshot;
@@ -54,7 +59,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        12,
+        18,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -71,6 +76,8 @@ enum Request {
     Swap,
     /// The first write of the combining path: the writer gave up swapping directly.
     PutIntent,
+    /// A rewrite's record.
+    PutRewrite,
     ListIntents,
     GetIntent,
     DeleteIntent,
@@ -187,6 +194,8 @@ impl Gate {
             Some(Request::PutCommit)
         } else if key.starts_with("intents/") {
             Some(Request::PutIntent)
+        } else if key.starts_with("reflog/") {
+            Some(Request::PutRewrite)
         } else if key.starts_with("locks/") {
             Some(Request::PutLease)
         } else {
@@ -475,6 +484,16 @@ fn id_value(id: &Id) -> RuntimeValue {
     RuntimeValue::List(id.iter().map(|a| RuntimeValue::Text(a.clone())).collect())
 }
 
+/// The writer or intent whose change a commit makes: its name's last part, before any
+/// rewriter's mark (`tagOf`).
+fn tag(id: &Id) -> String {
+    match id.as_slice() {
+        [.., t, mark] if mark.starts_with('~') => t.clone(),
+        [.., t] => t.clone(),
+        [] => String::new(),
+    }
+}
+
 fn text(v: &RuntimeValue) -> Result<&str, String> {
     match v {
         RuntimeValue::Text(t) => Ok(t),
@@ -568,6 +587,20 @@ struct Round {
     batch: Vec<Hash>,
 }
 
+/// A client rewriting the branch: `Rw` in `world.qnt`.
+#[derive(Clone, Default)]
+struct Rewriter {
+    /// The tip it rewords, and the commit replacing it (empty until its first read).
+    expected: Id,
+    new: Id,
+    /// The version its last attempt read; `version` once that attempt wrote its record.
+    read: i64,
+    version: i64,
+    /// What that attempt's swap moves the ref to, and its record.
+    tip: Option<Id>,
+    id: i64,
+}
+
 #[derive(Default)]
 struct Writer {
     base: Option<Id>,
@@ -579,6 +612,10 @@ struct Writer {
     attempts: i64,
     /// The ref as its last attempt read it: commit, version, landed intents.
     seen: Option<(Id, i64, Recent)>,
+    /// The lineage in that read.
+    seen_lineage: Lineage,
+    /// Set once it begins a rewrite instead of a commit.
+    rw: Option<Rewriter>,
     /// Where it is on the combining path (`Intending` ..), once it has written its intent.
     combining: Option<&'static str>,
     /// Its intent's id and the time the scenario gave it.
@@ -612,6 +649,8 @@ struct Harness {
     hashes: HashMap<Id, Hash>,
     /// Intent ids by writer, and writers by intent id.
     intent_writers: HashMap<String, String>,
+    /// Rewrite record ids, numbered in the order they were made (`nextRecord`).
+    record_ids: HashMap<String, i64>,
     /// Each object's body as last seen, so a deleted one keeps it (`store.qnt` tombstones).
     bodies: Mutex<HashMap<String, RuntimeValue>>,
     /// Pages by key: the tree each holds.
@@ -773,7 +812,11 @@ impl Harness {
             } => {
                 if actor != GC {
                     let w = self.writer(&actor)?;
-                    if request == Request::ReadRef && !w.rechecking && w.combining.is_none() {
+                    if request == Request::ReadRef
+                        && !w.rechecking
+                        && w.combining.is_none()
+                        && w.rw.is_none()
+                    {
                         w.attempts += 1;
                     }
                     if request == Request::PutIntent {
@@ -834,8 +877,22 @@ impl Harness {
                 };
                 if actor == GC {
                     let (commit, _) = seen.ok_or("gc's ref read failed")?;
-                    self.collector.marked = Some(self.reach(commit)?);
+                    // Then the reflog: every record's old and new tips are roots too.
+                    let (mut ids, mut trees) = self.reach(commit)?;
+                    for (_, data) in self.live("reflog/")? {
+                        let r: Rewrite =
+                            serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                        for h in [r.old, r.new] {
+                            let (i, t) = self.reach(h)?;
+                            ids.extend(i);
+                            trees.extend(t);
+                        }
+                    }
+                    self.collector.marked = Some((ids, trees));
                     return Ok(());
+                }
+                if self.writer(actor)?.rw.is_some() {
+                    return self.rewriter_read(actor, seen);
                 }
                 // The ref as read: the version names the body, which only that version had.
                 let seen = match seen {
@@ -845,6 +902,12 @@ impl Harness {
                     }
                     None => None,
                 };
+                let lineage = match &seen {
+                    Some((_, v, _)) => self.ref_values.lock().unwrap()[*v as usize - 1]
+                        .lineage
+                        .clone(),
+                    None => Lineage::default(),
+                };
                 let w = self.writer(actor)?;
                 if w.rechecking {
                     w.rechecking = false;
@@ -852,6 +915,7 @@ impl Harness {
                     w.round.head = seen;
                 } else {
                     w.seen = seen;
+                    w.seen_lineage = lineage;
                 }
             }
             Request::ListIntents => {
@@ -887,10 +951,16 @@ impl Harness {
                         .map_err(|e| e.to_string())?;
                     let parent = c.parent.ok_or("a writer's commit has no parent")?;
                     let mut id = self.name(&parent)?;
-                    // A combining round's commit is its intent writer's, not the uploader's.
-                    match c.meta.get("pail.intent") {
-                        Some(intent) => id.push(format!("{}+", self.intent_writer(intent)?)),
-                        None => id.push(actor.to_owned()),
+                    // A combining round's commit is its intent writer's, not the uploader's;
+                    // a rewrite's carries its original's name and the rewriter's mark.
+                    match (c.meta.get("pail.intent"), c.meta.get("rewritten.from")) {
+                        (Some(intent), _) => id.push(format!("{}+", self.intent_writer(intent)?)),
+                        (None, Some(from)) => {
+                            let from = Hash::from_hex(from).map_err(|e| e.to_string())?;
+                            id.push(tag(&self.name(&from)?));
+                            id.push(format!("~{actor}"));
+                        }
+                        (None, None) => id.push(actor.to_owned()),
                     }
                     self.names.insert(h, id.clone());
                     self.hashes.insert(id, h);
@@ -899,6 +969,20 @@ impl Harness {
                 if w.combining.is_some() && !w.round.batch.contains(&h) {
                     w.round.batch.push(h);
                 }
+            }
+            Request::PutRewrite => {
+                let id = key.rsplit('/').next().unwrap_or(key).to_owned();
+                let n = self.record_ids.len() as i64 + 1;
+                self.record_ids.insert(id, n);
+                let (data, _) = self.object(key)?.ok_or("the record vanished")?;
+                let r: Rewrite = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                let tip = self.name(&r.new)?;
+                let rw = self
+                    .writer(actor)?
+                    .rw
+                    .as_mut()
+                    .ok_or("a record from no rewriter")?;
+                (rw.version, rw.tip, rw.id) = (rw.read, Some(tip), n);
             }
             Request::ListCommits => {
                 let (marked, _) = self.collector.marked.clone().ok_or("gc listed unmarked")?;
@@ -941,6 +1025,33 @@ impl Harness {
             | Request::ListLeases
             | Request::DeleteLease => {}
         }
+        Ok(())
+    }
+
+    /// A rewriter's ref read: its first is `beginRewrite`'s, fixing the tip to reword;
+    /// a recheck learns nothing the model keeps; any other begins an attempt.
+    fn rewriter_read(&mut self, actor: &str, seen: Option<(Hash, i64)>) -> Result<(), String> {
+        let (commit, version) = seen.ok_or(format!("{actor}'s ref read failed"))?;
+        let w = self.writer(actor)?;
+        if w.rechecking {
+            w.rechecking = false;
+            return Ok(());
+        }
+        if !w.rw.as_ref().is_some_and(|rw| rw.expected.is_empty()) {
+            w.rw.as_mut().unwrap().read = version;
+            return Ok(());
+        }
+        let expected = self.name(&commit)?;
+        let parent = self
+            .rt()
+            .block_on(self.observer.commit_obj(&commit))
+            .map_err(|e| e.to_string())?
+            .parent
+            .ok_or("rewording the root")?;
+        let mut new = self.name(&parent)?;
+        new.extend([tag(&expected), format!("~{actor}")]);
+        let rw = self.writer(actor)?.rw.as_mut().unwrap();
+        (rw.expected, rw.new) = (expected, new);
         Ok(())
     }
 
@@ -1309,6 +1420,7 @@ impl Harness {
             let body = record([
                 ("commit", id_value(&self.name(&value.commit)?)),
                 ("recent", self.recent_value(&self.recent(&value)?)),
+                ("lineage", self.lineage_value(&value.lineage)?),
             ]);
             refs.insert(
                 RuntimeValue::Text(branch),
@@ -1322,6 +1434,14 @@ impl Harness {
                 self.intent_value(&writer, data)?,
             ))
         })?;
+        let reflog = self.space(&format!("reflog/{BRANCH}/"), |id, data| {
+            let r: Rewrite = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+            let n = *self
+                .record_ids
+                .get(id)
+                .ok_or(format!("record {id} was never seen written"))?;
+            Ok((RuntimeValue::Int(n), self.rewrite_value(&r)?))
+        })?;
         let (young_pages, young_commits) = self.young()?;
         Ok(record([
             ("pages", RuntimeValue::Map(pages)),
@@ -1329,6 +1449,7 @@ impl Harness {
             ("refs", RuntimeValue::Map(refs)),
             ("locks", self.locks_value()?),
             ("intents", RuntimeValue::Map(intents)),
+            ("reflog", RuntimeValue::Map(reflog)),
             (
                 "young",
                 record([
@@ -1336,6 +1457,45 @@ impl Harness {
                     ("commits", set(young_commits.iter().map(id_value))),
                 ]),
             ),
+        ]))
+    }
+
+    fn lineage_value(&self, l: &Lineage) -> Result<RuntimeValue, String> {
+        let rewrite = match &l.rewrite {
+            Some(id) => *self
+                .record_ids
+                .get(id)
+                .ok_or(format!("record {id} was never seen written"))?,
+            None => 0,
+        };
+        Ok(record([
+            ("epoch", RuntimeValue::Int(l.epoch as i64)),
+            ("rewrite", RuntimeValue::Int(rewrite)),
+        ]))
+    }
+
+    /// A reflog record as the model's `Rewrite`.
+    fn rewrite_value(&self, r: &Rewrite) -> Result<RuntimeValue, String> {
+        let prev = self.lineage_value(&Lineage {
+            epoch: 0,
+            rewrite: r.prev.clone(),
+        })?;
+        let by = r.by.split(" <").next().unwrap_or_default().to_owned();
+        let map = r
+            .map
+            .iter()
+            .map(|(old, new)| {
+                let new = new.ok_or("the model's rewrites drop nothing")?;
+                Ok((id_value(&self.name(old)?), id_value(&self.name(&new)?)))
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(record([
+            ("old", id_value(&self.name(&r.old)?)),
+            ("new", id_value(&self.name(&r.new)?)),
+            ("epoch", RuntimeValue::Int(r.epoch as i64)),
+            ("prev", field(&prev, "rewrite")?.clone()),
+            ("by", RuntimeValue::Text(by)),
+            ("successors", RuntimeValue::Map(map)),
         ]))
     }
 
@@ -1459,12 +1619,34 @@ impl Harness {
         ]))
     }
 
+    fn rw_value(&self, w: &Writer) -> RuntimeValue {
+        let root: Id = vec!["root".to_owned()];
+        let rw = w.rw.clone().unwrap_or_default();
+        let or_root = |id: Id| if id.is_empty() { root.clone() } else { id };
+        record([
+            ("expected", id_value(&or_root(rw.expected))),
+            ("new", id_value(&or_root(rw.new))),
+            ("version", RuntimeValue::Int(rw.version)),
+            ("tip", id_value(&rw.tip.unwrap_or(root.clone()))),
+            ("id", RuntimeValue::Int(rw.id)),
+        ])
+    }
+
     fn writer_value(&self, name: &str, w: &Writer) -> Result<RuntimeValue, String> {
         let root: Id = vec!["root".to_owned()];
         let p = &w.progress;
         let phase = match (&p.outcome, w.combining, w.base.is_some()) {
             (_, _, false) => "Idle",
             (Some(_), _, _) => "Done",
+            (None, _, true) if w.rw.is_some() => match p.held.first().map(|(r, _, _)| *r) {
+                Some(Request::PutLease) => "Leasing",
+                Some(Request::ListLeases) => "CheckingLeases",
+                Some(Request::PutCommit) => "RwStoring",
+                Some(Request::ReadRef) if w.rechecking => "RwRechecking",
+                Some(Request::ReadRef) => "RwReading",
+                Some(Request::Swap) => "RwSwapping",
+                other => return Err(format!("{name} is between rewrite requests ({other:?})")),
+            },
             (None, Some(phase), _) => phase,
             (None, None, true) if p.holds(Request::PutLease) => "Leasing",
             (None, None, true) if p.holds(Request::ListLeases) => "CheckingLeases",
@@ -1492,8 +1674,10 @@ impl Harness {
             ("phase", RuntimeValue::Text(phase.to_owned())),
             ("seen", self.ref_seen_value(&w.seen, &base)),
             ("seenRecent", self.recent_value(&seen_recent)),
+            ("seenLineage", self.lineage_value(&w.seen_lineage)?),
             ("attempt", RuntimeValue::Int(w.attempts.max(1))),
             ("comb", self.comb_value(name, w)?),
+            ("rw", self.rw_value(w)),
             ("outcome", RuntimeValue::Text(outcome.to_owned())),
         ]))
     }
@@ -1603,6 +1787,7 @@ impl generated::Implementation for Harness {
             names: HashMap::new(),
             hashes: HashMap::new(),
             intent_writers: HashMap::new(),
+            record_ids: HashMap::new(),
             bodies: Mutex::default(),
             trees: Mutex::default(),
             ref_etags: Mutex::default(),
@@ -1798,6 +1983,80 @@ impl generated::Implementation for Harness {
     fn withdraw(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
         let c = Harness::actor_arg(arguments)?;
         self.release(&c, Request::DeleteIntent, None, Delivery::Answered)
+    }
+
+    /// Read the ref and make the reworded tip (unleased, as `pail rebase` builds its
+    /// commits), then lease to store it and publish it with `rewrite_ref`.
+    fn begin_rewrite(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = Harness::actor_arg(arguments)?;
+        let repo = Repo::with_store(self.gate(&name), None);
+        let events = self.sender.clone();
+        let actor = name.clone();
+        let committer = format!("{name} <{name}@example.com>");
+        self.rt().spawn(async move {
+            let result: anyhow::Result<()> = async {
+                let (cur, _) = repo.read_ref_value(BRANCH).await?.context("no branch")?;
+                let x = cur.commit;
+                let c = repo.commit_obj(&x).await?;
+                let delta = repo.delta_of(&x).await?;
+                let fields = rewritten_fields(&c, &[x], &committer, DATE);
+                let p = repo.prepare_commit(c.parent, &delta, &fields).await?;
+                let writing = repo.writing().await?;
+                let out = async {
+                    let new = repo.store_commit(&p, vec![]).await?.commit;
+                    let req = RewriteRequest {
+                        branch: BRANCH.to_owned(),
+                        expected: x,
+                        new,
+                        op: "rebase".into(),
+                        committer: committer.clone(),
+                        date: DATE.to_owned(),
+                        map: BTreeMap::from([(x, Some(new))]),
+                    };
+                    repo.rewrite_ref(req, None).await
+                }
+                .await;
+                writing.done().await?;
+                out.map(|_| ())
+            }
+            .await;
+            let outcome = match result {
+                Ok(()) => "Rewritten",
+                Err(e) if e.downcast_ref::<MovedError>().is_some() => "Moved",
+                Err(_) => "Unknown",
+            };
+            let _ = events.send(Event::Finished { actor, outcome });
+        });
+        let w = self.writer(&name)?;
+        w.base = Some(vec!["root".to_owned()]);
+        w.rw = Some(Rewriter::default());
+        self.release(&name, Request::ReadRef, None, Delivery::Answered)
+    }
+
+    fn rw_store(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::PutCommit, None, Delivery::Answered)
+    }
+
+    /// The ref read, then every commit it carries and its record, until it swaps or fails.
+    fn rw_read(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)?;
+        self.drain(&c, &[Request::PutCommit, Request::PutRewrite])
+    }
+
+    fn rw_swap(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        let how = Delivery::of(arguments.get(1).ok_or("rwSwap takes a Delivery")?)?;
+        self.release(&c, Request::Swap, None, how)
+    }
+
+    fn rw_recheck(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        if !self.writer(&c)?.rechecking {
+            return Err(format!("{c} has no unanswered rewrite swap to recheck"));
+        }
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)
     }
 
     fn gc_lease(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {

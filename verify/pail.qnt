@@ -1,5 +1,6 @@
 // -*- mode: Bluespec; -*-
-/// Pail as a whole: every feature's steps (`publish.qnt`, `gc.qnt`) as actions on one
+/// Pail as a whole: every feature's steps (`publish.qnt`, `combine.qnt`, `rewrite.qnt`,
+/// `gc.qnt`) as actions on one
 /// state, a `step` that interleaves them freely, and the properties that must hold in
 /// every reachable state. `npm run simulate` checks them; `scenarios.qnt` holds runs the
 /// real code is checked against.
@@ -9,6 +10,7 @@ module pail {
   import world.* from "./world"
   import publish.* from "./publish"
   import combine.* from "./combine"
+  import rewrite.* from "./rewrite"
   import gc.* from "./gc"
 
   var state: State
@@ -87,6 +89,27 @@ module pail {
 
   action withdraw(c: str): bool = all { withdrawCan(state, c), state' = withdrawNext(state, c) }
 
+  // ---------- rewriting ----------
+
+  action beginRewrite(c: str): bool = all {
+    beginRewriteCan(state, c),
+    state' = beginRewriteNext(state, c),
+  }
+
+  action rwStore(c: str): bool = all { rwStoreCan(state, c), state' = rwStoreNext(state, c) }
+
+  action rwRead(c: str): bool = all { rwReadCan(state, c), state' = rwReadNext(state, c) }
+
+  action rwSwap(c: str, d: Delivery): bool = all {
+    rwSwapCan(state, c),
+    state' = rwSwapNext(state, c, d),
+  }
+
+  action rwRecheck(c: str): bool = all {
+    rwRecheckCan(state, c),
+    state' = rwRecheckNext(state, c),
+  }
+
   // ---------- the collector ----------
 
   action gcLease: bool = all { gcLeaseCan(state), state' = gcLeaseNext(state) }
@@ -157,6 +180,11 @@ module pail {
       cleanup(c),
       batchRecheck(c),
       withdraw(c),
+      beginRewrite(c),
+      rwStore(c),
+      rwRead(c),
+      rwSwap(c, d),
+      rwRecheck(c),
       gcLease,
       gcCheckLeases,
       gcMark,
@@ -172,8 +200,9 @@ module pail {
     }
   }
 
-  /// Writers only, nothing crashing or giving up: random runs of `step` rarely get a
-  /// writer through two lost races into combining, so `npm run simulate` runs this too.
+  /// Writers and rewriters only, nothing crashing or giving up: random runs of `step`
+  /// rarely get a writer through two lost races into combining, so `npm run simulate`
+  /// runs this too.
   action contendStep = {
     nondet c = CLIENTS.oneOf()
     nondet base = liveKeys(state.bucket.commits).oneOf()
@@ -198,6 +227,11 @@ module pail {
       cleanup(c),
       batchRecheck(c),
       withdraw(c),
+      beginRewrite(c),
+      rwStore(c),
+      rwRead(c),
+      rwSwap(c, d),
+      rwRecheck(c),
     }
   }
 
@@ -206,11 +240,17 @@ module pail {
   /// Every commit the branch reaches, and its page, is stored: no ref dangles.
   val branchIsComplete: bool = branchIsStored(state.bucket)
 
-  /// Every move of the ref keeps what it named before: nothing published is overwritten.
+  /// Every move of the ref keeps what it named before, unless a rewrite's record names
+  /// the move: nothing published is overwritten unaccounted for.
   val refOnlyMovesForward: bool =
-    state.history.indices().forall(i =>
-      i == 0 or ancestorsOf(state.bucket, state.history[i]).contains(state.history[i - 1])
-    )
+    state.history.indices().forall(i => or {
+      i == 0,
+      ancestorsOf(state.bucket, state.history[i]).contains(state.history[i - 1]),
+      state.bucket.reflog.keys().exists(id => and {
+        recordOf(state.bucket, id).old == state.history[i - 1],
+        recordOf(state.bucket, id).new == state.history[i],
+      }),
+    })
 
   /// A client told its commit was published finds it on the branch, now and later: its
   /// own commit, or the one a combining round made of its intent.
@@ -220,11 +260,12 @@ module pail {
         implies branch(state.bucket).exists(id => author(id) == c)
     )
 
-  /// The ref's `recent` names, for each landed intent, a commit on the branch made of it.
+  /// The ref's `recent` names, for each landed intent, a commit made of it, and the
+  /// branch has it (that commit, or what a rewrite made of it).
   val recentIsTruthful: bool =
     recentOf(state.bucket).keys().forall(w => and {
-      onBranch(state.bucket, recentOf(state.bucket).get(w)),
       author(recentOf(state.bucket).get(w)) == w,
+      branch(state.bucket).exists(id => author(id) == w),
     })
 
   /// A client told it conflicted has nothing on the branch: it can retry without
@@ -239,6 +280,39 @@ module pail {
   val landsAtMostOnce: bool =
     CLIENTS.forall(c => branch(state.bucket).filter(id => author(id) == c).size() <= 1)
 
+  /// The ref's lineage names the last rewrite: its record, of the same epoch, whose new
+  /// tip the branch still has. No rewrite yet: epoch 0.
+  val lineageNamesItsRecord: bool = {
+    val l = lineageOf(state.bucket)
+    if (l.rewrite == 0) l.epoch == 0
+    else and {
+      isLive(state.bucket.reflog, l.rewrite),
+      recordOf(state.bucket, l.rewrite).epoch == l.epoch,
+      onBranch(state.bucket, recordOf(state.bucket, l.rewrite).new),
+    }
+  }
+
+  /// Each record's epoch is one past the record it names: epochs count rewrites.
+  val recordsAreChained: bool =
+    state.bucket.reflog.keys().forall(id =>
+      if (recordOf(state.bucket, id).prev == 0) recordOf(state.bucket, id).epoch == 1
+      else recordOf(state.bucket, recordOf(state.bucket, id).prev).epoch + 1 == recordOf(state.bucket, id).epoch
+    )
+
+  /// Every commit a record reaches stays stored, with its page: gc keeps rewritten
+  /// history, so successors can be walked and a rewrite undone.
+  val reflogIsStored: bool = allStored(state.bucket, reflogReaches(state.bucket))
+
+  /// A client told its rewrite landed finds its record in the ref's chain; one told the
+  /// branch moved, so nothing was rewritten, finds none.
+  val rewriteOutcomeIsTruthful: bool =
+    CLIENTS.forall(c => and {
+      client(state, c).outcome == Rewritten
+        implies chain(state.bucket).exists(id => recordOf(state.bucket, id).by == c),
+      client(state, c).outcome == Moved
+        implies chain(state.bucket).forall(id => recordOf(state.bucket, id).by != c),
+    })
+
   /// While gc marks and deletes, no writer is between its first read and its return.
   val gcRunsAlone: bool =
     Set(GcLocked, GcMarked, GcSweepingCommits, GcSweepingPages).contains(state.collector.phase)
@@ -252,5 +326,9 @@ module pail {
     recentIsTruthful,
     conflictedHasNothingOnBranch,
     landsAtMostOnce,
+    lineageNamesItsRecord,
+    recordsAreChained,
+    reflogIsStored,
+    rewriteOutcomeIsTruthful,
   }
 }

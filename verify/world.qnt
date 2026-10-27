@@ -1,6 +1,7 @@
 // -*- mode: Bluespec; -*-
 /// The state every feature acts on: the bucket, each actor's progress, and ghosts that
-/// only the properties read. Features (`publish.qnt`, `gc.qnt`) are pure steps over it;
+/// only the properties read. Features (`publish.qnt`, `combine.qnt`, `rewrite.qnt`,
+/// `gc.qnt`) are pure steps over it;
 /// `pail.qnt` makes them actions.
 module world {
   import store.* from "./store"
@@ -9,7 +10,9 @@ module world {
   // ---------- writers (`Repo::commit`) ----------
 
   /// Where a writer is: the direct path (`Leasing` .. `Rechecking`), then, having lost it,
-  /// combining (`Intending` .. `Withdrawing`, `Repo::commit_combining`).
+  /// combining (`Intending` .. `Withdrawing`, `Repo::commit_combining`). A client
+  /// rewriting the branch instead (`rewrite.qnt`) leases as a writer does, then goes
+  /// `RwStoring` .. `RwRechecking`.
   type Phase =
     | Idle
     | Leasing
@@ -25,11 +28,21 @@ module world {
     | BatchRechecking
     | Cleaning
     | Withdrawing
+    | RwStoring
+    | RwReading
+    | RwSwapping
+    | RwRechecking
     | Done
 
   /// What `commit` returned: nothing yet, Ok, a ConflictError, or another error (its
-  /// outcome unknown to the caller).
-  type Outcome = Pending | Published | Conflicted | Unknown
+  /// outcome unknown to the caller). What `rewrite_ref` returned: Ok (`Rewritten`), a
+  /// MovedError (`Moved`), or another error (`Unknown`).
+  type Outcome = Pending | Published | Conflicted | Unknown | Rewritten | Moved
+
+  /// A rewrite in progress: the tip it was made from and the commit replacing it; then,
+  /// as its last attempt read the ref, the version its swap expects, the tip it moves to
+  /// (with any commits landed since carried onto it) and the record it wrote.
+  type Rw = { expected: CommitId, new: CommitId, version: int, tip: CommitId, id: int }
 
   /// A combining writer's round: what its poll read (the ref and the intents listed, in
   /// either order), the batch it built, and what it returns once its intent is withdrawn.
@@ -53,9 +66,12 @@ module world {
     seen: Ref,
     // The landed intents in that read, which a direct swap writes back unchanged.
     seenRecent: Recent,
+    // The lineage in that read.
+    seenLineage: Lineage,
     // Which direct attempt (`1..=DIRECT_ATTEMPTS`) the client is on.
     attempt: int,
     comb: Comb,
+    rw: Rw,
     outcome: Outcome,
   }
 
@@ -103,6 +119,13 @@ module world {
   pure val INTENT_NAME: str -> str =
     Map("alice" -> "alice+", "bob" -> "bob+", "carol" -> "carol+", "dave" -> "dave+")
 
+  /// Marks a commit a client's rewrite made (rewording one, or carrying one onto the new
+  /// tip): it follows the name of the commit's writer or intent, so `author` still finds it.
+  pure val MARK: str -> str =
+    Map("alice" -> "~alice", "bob" -> "~bob", "carol" -> "~carol", "dave" -> "~dave")
+
+  pure val NO_RW: Rw = { expected: ROOT, new: ROOT, version: 0, tip: ROOT, id: 0 }
+
   pure val NO_COMB: Comb = {
     polledRef: false,
     head: { commit: ROOT, version: 0 },
@@ -120,8 +143,10 @@ module world {
     phase: Idle,
     seen: { commit: ROOT, version: 0 },
     seenRecent: Map(),
+    seenLineage: NO_LINEAGE,
     attempt: 1,
     comb: NO_COMB,
+    rw: NO_RW,
     outcome: Pending,
   }
 
@@ -157,9 +182,20 @@ module world {
       clients: s.clients.set(c, cl),
     }
 
-  /// Who wrote commit `id`'s last step: its writer, directly or through its intent.
+  /// The name of the writer or intent whose change commit `id` makes (a rewrite's mark
+  /// after it skipped).
+  pure def tagOf(id: CommitId): str =
+    if (MARK.keys().exists(c => MARK.get(c) == id[length(id) - 1])) id[length(id) - 2]
+    else id[length(id) - 1]
+
+  /// The commit a rewrite by `c` makes of `id`'s change on top of `onto`.
+  pure def remade(c: str, id: CommitId, onto: CommitId): CommitId =
+    onto.append(tagOf(id)).append(MARK.get(c))
+
+  /// Who wrote commit `id`'s change: its writer, directly or through its intent, however
+  /// often it was rewritten since.
   pure def author(id: CommitId): str = {
-    val last = id[length(id) - 1]
+    val last = tagOf(id)
     CLIENTS.fold(last, (a, c) => if (INTENT_NAME.get(c) == last) c else a)
   }
 }

@@ -453,4 +453,222 @@ module scenarios {
       }),
       state' = state,
     })
+
+  // ---------- rewrites ----------
+
+  /// Alice's commit, reworded by carol: on the root, with alice's change.
+  pure val ALICE_RW: CommitId = ["root", "alice", "~carol"]
+  /// Bob's commit on alice's, carried by carol onto ALICE_RW.
+  pure val BOB_ON_ALICE: CommitId = ["root", "alice", "bob"]
+  pure val BOB_CARRIED: CommitId = ["root", "alice", "~carol", "bob", "~carol"]
+
+  /// Carol rewords alice's commit while bob lands on top of it: carol's attempt finds the
+  /// ref past her tip, carries bob's commit onto her new one, records the rewrite (epoch
+  /// 1, mapping both) and swaps.
+  /// @conformance
+  run rewordCarriesRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: BOB_CARRIED, version: 4 },
+        lineageOf(state.bucket) == { epoch: 1, rewrite: 1 },
+        recordOf(state.bucket, 1) == {
+          old: BOB_ON_ALICE,
+          new: BOB_CARRIED,
+          epoch: 1,
+          prev: 0,
+          by: "carol",
+          successors: Map(ALICE_1 -> ALICE_RW, BOB_ON_ALICE -> BOB_CARRIED),
+        },
+        treeOf(state.bucket, BOB_CARRIED) == Map("a" -> "1", "b" -> "1"),
+        client(state, "carol").outcome == Rewritten,
+        client(state, "bob").outcome == Published,
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// Alice's swap lands unanswered, and carol rewords alice's commit before alice looks.
+  /// Alice's commit is gone from the branch, but the rewrite's record replaced a tip that
+  /// had it: alice published. (Looking at the branch alone, alice retried, found her own
+  /// change in the way and reported a conflict.)
+  /// @conformance
+  run rewordAfterLostSwapRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Lost))
+    .then(beginRewrite("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(recheck("alice"))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ALICE_RW, version: 3 },
+        not(onBranch(state.bucket, ALICE_1)),
+        client(state, "alice").outcome == Published,
+      }),
+      state' = state,
+    })
+
+  /// Carol and dave both set out to reword alice's commit; carol lands first. Dave's
+  /// attempt finds alice's commit gone from the branch: it moved, and dave publishes
+  /// nothing (his new commit stays unreferenced).
+  /// @conformance
+  run rewriteMovedRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(beginRewrite("dave"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwStore("dave"))
+    .then(rwRead("dave"))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ALICE_RW, version: 3 },
+        client(state, "dave").outcome == Moved,
+        state.bucket.reflog.keys() == Set(1),
+        isLive(state.bucket.commits, ["root", "alice", "~dave"]),
+      }),
+      state' = state,
+    })
+
+  /// Carol's rewrite swap lands unanswered, and dave rewrites the branch again before carol
+  /// looks. The ref names dave's record, not carol's, but dave's leads back to it: carol
+  /// rewrote. (Comparing the ref's lineage with her own alone, carol retried, found her
+  /// tip gone from the branch and reported that it moved.)
+  /// @conformance
+  run rewriteLostThenRewrittenRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Lost))
+    .then(beginRewrite("dave"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwStore("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(rwRecheck("carol"))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ["root", "alice", "~dave"], version: 4 },
+        lineageOf(state.bucket) == { epoch: 2, rewrite: 2 },
+        recordOf(state.bucket, 2).prev == 1,
+        client(state, "carol").outcome == Rewritten,
+        client(state, "dave").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+  /// Carol's rewrite swap never reaches the store. Her recheck finds the ref without her
+  /// record, so she tries again: a second record (the first stays, naming nothing the
+  /// ref does), and this swap lands.
+  /// @conformance
+  run rewriteSwapDroppedRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Dropped))
+    .then(rwRecheck("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ALICE_RW, version: 3 },
+        lineageOf(state.bucket) == { epoch: 1, rewrite: 2 },
+        state.bucket.reflog.keys() == Set(1, 2),
+        client(state, "carol").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+  /// After carol rewords alice's commit, bob lands on the new history, keeping its lineage.
+  /// Alice's commit is unreachable from the branch and old, but the rewrite's record names
+  /// it: gc keeps it and its page.
+  /// @conformance
+  run gcKeepsRewrittenHistoryRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(begin("bob", ALICE_RW, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ALICE_RW.append("bob"),
+        lineageOf(state.bucket) == { epoch: 1, rewrite: 1 },
+        not(onBranch(state.bucket, ALICE_1)),
+        liveKeys(state.bucket.commits) == Set(ROOT, ALICE_1, ALICE_RW, ALICE_RW.append("bob")),
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
 }

@@ -519,7 +519,7 @@ impl Repo {
             let id = self.write_rewrite(&req.branch, &record).await?;
             let lineage = Lineage {
                 epoch: record.epoch,
-                rewrite: Some(id),
+                rewrite: Some(id.clone()),
             };
             let body = Bytes::from(serde_json::to_vec(&self.ref_value(
                 tip,
@@ -542,8 +542,18 @@ impl Repo {
             {
                 Ok(Cas::Ok(_)) => return Ok(outcome(lineage)),
                 Ok(Cas::Conflict) => {}
+                // Unknown outcome: it won if the ref's chain has its record (the ref names
+                // it, or a later rewrite leads back to it; verify/scenarios.qnt,
+                // rewriteLostThenRewrittenRun). Retrying then would find the tip gone.
                 Err(e) => match self.read_ref_value(&req.branch).await? {
-                    Some((now, _)) if now.lineage == lineage => return Ok(outcome(lineage)),
+                    Some((now, _))
+                        if now.lineage == lineage
+                            || self
+                                .in_chain(&req.branch, &id, &cur.lineage, &now.lineage)
+                                .await? =>
+                    {
+                        return Ok(outcome(lineage));
+                    }
                     Some(_) => {}
                     None => return Err(e),
                 },
@@ -605,6 +615,53 @@ impl Repo {
         }
         out.reverse();
         Ok(out)
+    }
+
+    /// Whether `commit`, swapped onto `branch` at lineage `from`, landed: `now` has it, or
+    /// the first rewrite since replaced a tip that had it.
+    async fn landed_since(
+        &self,
+        branch: &str,
+        commit: Hash,
+        from: &Lineage,
+        now: &RefValue,
+    ) -> Result<bool> {
+        if now.commit == commit || self.is_ancestor(commit, now.commit).await? {
+            return Ok(true);
+        }
+        if now.lineage == *from {
+            return Ok(false);
+        }
+        match self
+            .rewrites_between(branch, from, &now.lineage)
+            .await?
+            .first()
+        {
+            Some(r) if r.epoch == from.epoch + 1 => {
+                Ok(r.old == commit || self.is_ancestor(commit, r.old).await?)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Whether record `id` is in `branch`'s chain of rewrites from lineage `from` to `to`.
+    async fn in_chain(&self, branch: &str, id: &str, from: &Lineage, to: &Lineage) -> Result<bool> {
+        let mut at = to.rewrite.clone();
+        for _ in 0..REWRITE_CHAIN_MAX {
+            let Some(cur) = at else { break };
+            if cur == id {
+                return Ok(true);
+            }
+            if Some(&cur) == from.rewrite.as_ref() {
+                break;
+            }
+            let r = self.read_rewrite(branch, &cur).await?;
+            if r.epoch <= from.epoch {
+                break;
+            }
+            at = r.prev;
+        }
+        Ok(false)
     }
 
     /// Where `commit`, from `branch`'s history at lineage `from`, is in its history at `to`:
@@ -1866,12 +1923,13 @@ impl Repo {
                 Ok(Cas::Conflict) => {}
                 Err(e) => {
                     // Unknown outcome (e.g. timeout): the ref tells us whether we won. Others
-                    // may have landed on top of the commit since, so it can be under the head;
-                    // retrying then would find our own change in the way and report a
-                    // conflict for a commit that was published (verify/scenarios.qnt,
-                    // timeoutLandedUnderRun).
+                    // may have landed on top of the commit since, so it can be under the head,
+                    // or rewritten the branch since, so it can be under the tip the first
+                    // rewrite replaced; retrying then would find our own change in the way
+                    // and report a conflict for a commit that was published
+                    // (verify/scenarios.qnt, timeoutLandedUnderRun, rewordAfterLostSwapRun).
                     if let Some((now, v)) = self.read_ref_value(&req.branch).await?
-                        && (now.commit == ch || self.is_ancestor(ch, now.commit).await?)
+                        && self.landed_since(&req.branch, ch, &lineage, &now).await?
                     {
                         return Ok(CommitOutcome {
                             head: now.commit,

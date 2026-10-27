@@ -45,14 +45,15 @@ module publish {
 
   /// List the leases. Under gc's exclusive one, drop its own and try again later; gc,
   /// having written its lease before listing, waits for this one to go. Otherwise gc's
-  /// lease, if any, came after this listing, so gc will see this lease and wait.
+  /// lease, if any, came after this listing, so gc will see this lease and wait. A
+  /// rewriter goes on to store its new commit (`rewrite.qnt`).
   pure def checkLeasesCan(s: State, c: str): bool = client(s, c).phase == CheckingLeases
 
   pure def checkLeasesNext(s: State, c: str): State =
     if (leasedByOthers(s.bucket, c, Set(Exclusive)))
       { ...s, bucket: unleased(s.bucket, c), clients: s.clients.set(c, { ...client(s, c), phase: Leasing }) }
     else
-      withClient(s, c, { ...client(s, c), phase: Reading })
+      withClient(s, c, { ...client(s, c), phase: if (client(s, c).rw == NO_RW) Reading else RwStoring })
 
   /// Read the ref. A head past the base replays the delta onto it, unless a path the delta
   /// writes changed in between (`check_disjoint`).
@@ -65,9 +66,9 @@ module publish {
         treeOf(s.bucket, client(s, c).base),
         treeOf(s.bucket, tip(s.bucket).commit),
       ))
-        { ...client(s, c), phase: Done, outcome: Conflicted, seen: tip(s.bucket), seenRecent: recentOf(s.bucket) }
+        { ...client(s, c), phase: Done, outcome: Conflicted, seen: tip(s.bucket), seenRecent: recentOf(s.bucket), seenLineage: lineageOf(s.bucket) }
       else
-        { ...client(s, c), phase: Uploading, seen: tip(s.bucket), seenRecent: recentOf(s.bucket) }
+        { ...client(s, c), phase: Uploading, seen: tip(s.bucket), seenRecent: recentOf(s.bucket), seenLineage: lineageOf(s.bucket) }
     )
 
   /// Store the commit and its page before any ref can name them, listing the branch's
@@ -120,12 +121,13 @@ module publish {
   )
 
   /// After an unanswered swap, read the ref to learn whether it won: the commit is on the
-  /// branch, as its head or under commits others landed since.
+  /// branch, as its head or under commits others landed since, or, if the branch was
+  /// rewritten since, under the tip the first rewrite replaced (its record's `old`).
   pure def recheckCan(s: State, c: str): bool = client(s, c).phase == Rechecking
 
   pure def recheckNext(s: State, c: str): State =
     finished(s, c,
-      if (onBranch(s.bucket, made(c, client(s, c))))
+      if (landedSince(s.bucket, made(c, client(s, c)), client(s, c).seenLineage))
         { ...client(s, c), phase: Done, outcome: Published }
       else if (client(s, c).attempt < DIRECT_ATTEMPTS)
         { ...client(s, c), phase: Reading, attempt: client(s, c).attempt + 1 }

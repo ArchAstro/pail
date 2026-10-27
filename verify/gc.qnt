@@ -16,8 +16,7 @@
 ///      └── done (release) ◀─ deletePage(t)* ◀─ GcSweepingPages ◀─ listPages ◀─────────────┘
 /// ```
 ///
-/// Time is abstract: `graceElapses` makes every object old. Reflog roots are not modelled
-/// (no rewrites yet).
+/// Time is abstract: `graceElapses` makes every object old.
 module gc {
   import store.* from "./store"
   import bucket.* from "./bucket"
@@ -42,7 +41,8 @@ module gc {
     else if (leasedByOthers(s.bucket, GC, Set(Shared))) s
     else { ...s, collector: { ...s.collector, phase: GcLocked } }
 
-  /// Read the refs and walk what they reach (commits, then each commit's root page).
+  /// Read the refs, then every reflog record, and walk what they reach (commits, then each
+  /// commit's root page): a rewrite's old history stays, for successor walks and undo.
   pure def gcMarkCan(s: State): bool = s.collector.phase == GcLocked
 
   pure def gcMarkNext(s: State): State = {
@@ -50,8 +50,8 @@ module gc {
     collector: {
       ...s.collector,
       phase: GcMarked,
-      liveCommits: branch(s.bucket),
-      livePages: branch(s.bucket).map(id => treeOf(s.bucket, id)),
+      liveCommits: branch(s.bucket).union(reflogReaches(s.bucket)),
+      livePages: branch(s.bucket).union(reflogReaches(s.bucket)).map(id => treeOf(s.bucket, id)),
     },
   }
 
