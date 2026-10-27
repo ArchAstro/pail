@@ -1,7 +1,7 @@
 # verify: a model of pail, and the code checked against it
 
-A [Quint](https://quint-lang.org) model of how `Repo::commit` publishes over a bucket and
-how `gc` collects it, the properties they must keep, and scenarios the real code is checked
+A [Quint](https://quint-lang.org) model of how `Repo::commit` publishes over a bucket, how
+`Repo::rewrite_ref` rewrites it and how `gc` collects it, the properties they must keep, and scenarios the real code is checked
 against request by request with
 [quint-refinements](https://github.com/ArchAstro/quint-refinements). Beside it: the store
 contract every backend follows, and the branch policy every enforcement point decides.
@@ -13,12 +13,14 @@ may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new
 ```text
 store.qnt     any object store: versioned objects, create / CAS / put / delete, lost requests
    ▲
-bucket.qnt    pail's layout in it: pages/, commits/ (create-once), refs/ (CAS), locks/, intents/
+bucket.qnt    pail's layout in it: pages/, commits/ (create-once), refs/ (CAS, lineage), locks/,
+              intents/, reflog/
    ▲
 world.qnt     the shared state: bucket, writers, the collector, ghosts
    ▲
 publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, expiry)
 combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
+rewrite.qnt   rewrite_ref steps (read the tip, lease, store, read + carry + record, swap, recheck)
 gc.qnt        gc steps (exclusive lease, drain, mark, list, delete, release)
    ▲
 pail.qnt      the steps as actions, any interleaving (`step`), the properties
@@ -29,7 +31,7 @@ pail.qnt ──quint run──▶ properties hold in every simulated interleavin
      │
 scenarios.qnt ──compile──▶ quint-refinements.json + tests/refinement/generated.rs
                                    │
-tests/refinement.rs ── real Repo::commit and gc, gated store ──▶ same state after every step
+tests/refinement.rs ── real commit, rewrite_ref and gc, gated store ──▶ same state after every step
 
 policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
                                     ├─▶ tests/policy_refinement/generated.rs  (pail)
@@ -47,6 +49,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `world.qnt` | The state every feature acts on (`State`, `Client`, `Collector`) |
 | `publish.qnt` | Writers running `commit_opts`, one store request per step |
 | `combine.qnt` | Writers that lost their direct attempts, running `commit_combining` |
+| `rewrite.qnt` | A client rewording the branch's tip, running `rewrite_ref` |
 | `gc.qnt` | The collector running `gc::gc_with`, one store request per step |
 | `pail.qnt` | Actions, `step`, and the properties (`safety`) |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
@@ -54,7 +57,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `policy_scenarios.qnt` | `@conformance` runs: documents to parse and requests to decide |
 | `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json` | Generated scenario artifacts (do not edit) |
 | `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
-| `../tests/refinement.rs` | `Repo::commit` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
+| `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
 | `../tests/store_refinement.rs` | Each `Store` backend against `store_spec.qnt` |
 | `../tests/policy_refinement.rs` | `Policy::parse`, `Policy::decide`, `policy::request_op` against `policy.qnt` |
 
@@ -78,12 +81,16 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 ## Properties (`pail.qnt`)
 
 1. `branchIsComplete`: every commit the branch reaches, and its page, is stored.
-2. `refOnlyMovesForward`: every move of the ref keeps what it named before.
+2. `refOnlyMovesForward`: every move of the ref keeps what it named before, unless a
+   rewrite's record names the move.
 3. `publishedIsOnBranch`: a client told "published" finds its commit on the branch.
 4. `conflictedHasNothingOnBranch`: a client told "conflict" landed nothing.
 5. `landsAtMostOnce`: one `commit` call lands at most one commit.
 6. `gcRunsAlone`: while gc marks and deletes, no writer is between its first read and its
    return.
+7. `recentIsTruthful`, and the rewrite properties `lineageNamesItsRecord`,
+   `recordsAreChained`, `reflogIsStored`, `rewriteOutcomeIsTruthful`: see the combining and
+   rewrite sections.
 
 `npm run simulate` checks them over random interleavings of three writers and gc,
 including crashes, expired leases and the grace period passing at any moment (simulation,
@@ -157,6 +164,12 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `cleanup(c)` | the DELETEs of the batch's intents |
 | action `batchRecheck(c)` | the ref read after an unanswered batch swap |
 | action `withdraw(c)` | `c`'s DELETE of its own intent |
+| action `beginRewrite(c)` | `c`'s `GET refs/main`; it then builds the reworded tip unleased (as `pail rebase` builds) |
+| action `rwStore(c)` | under `writing()`'s lease, the new commit's `PUT commits/<hash>` |
+| action `rwRead(c)` | `rewrite_ref`'s `GET refs/main`, then each carried commit's upload and the `PUT reflog/main/<id>` |
+| action `rwSwap(c, d)` / `rwRecheck(c)` | its conditional `PUT refs/main`; the ref read after an unanswered one |
+| `MARK` (`~carol`) | a commit with `rewritten.from`: its parent's name, its original's writer, the rewriter |
+| `reflog` (ids 1, 2, ..) | records in the order they were written; `lineage.rewrite` and `prev` by that number |
 | `INTENT_NAME` (`alice+`) | a round's commit for an intent: its parent's name and the intent's writer (`pail.intent`) |
 | `Comb` | the poll's ref read and listing, and the commits the round stored |
 | action `recheck(c)` | the ref read after an unanswered swap |
@@ -170,7 +183,7 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | `Versioned.version` | writes and deletes the gates saw per key (ETag order for the ref) |
 | `young` | objects created since the last `graceElapses` |
 | `phase`, collector `phase` | the request the actor is held at (or that it returned) |
-| `outcome` | what `commit` returned: Ok, `ConflictError`, another error |
+| `outcome` | what `commit` returned: Ok, `ConflictError`, another error; what `rewrite_ref` returned: Ok, `MovedError`, another error |
 
 Every actor is a real `Repo` behind a gate (`Gate` in `tests/refinement.rs`) that holds the
 requests above until the scenario releases them; everything else (commit and page reads,
@@ -178,8 +191,9 @@ writers' lease releases) passes straight through. A writer makes some requests t
 (an upload and a listing; a poll's ref read and listing; a round's uploads or deletes), so
 it may wait at several at once. After each action the harness waits until every released
 request is answered and the actor is held again or has returned, then compares
-the whole state: pages, commits, ref (with `recent`), leases, intents and young objects;
-each writer's phase, attempt, last read, combining round and outcome; the collector's
+the whole state: pages, commits, ref (with `recent` and lineage), leases, intents, reflog
+records and young objects; each writer's phase, attempt, last read, combining round,
+rewrite and outcome; the collector's
 phase, marks and doomed objects. Deleted
 objects map to `store.qnt` tombstones.
 
@@ -195,6 +209,17 @@ objects map to `store.qnt` tombstones.
    modelled; `tests/repo.rs` reproduced it on the real code. No grace period can fix it, so
    writers now hold a shared lease and gc an exclusive one (`src/lease.rs`):
    `gcWaitsForAWriterReusingAnOldPageRun` is the race, refining with gc waiting.
+3. `rewordAfterLostSwapRun`: alice's swap lands unanswered; carol rewords alice's commit
+   before alice rechecks. Alice's commit is no longer under the head (its reworded copy is),
+   so she retried, found her own change in the way and returned a conflict for a published
+   commit: `conflictedHasNothingOnBranch`, found by `quint run` within a minute. Fixed in
+   `commit_opts` (`landed_since`: also under the tip the first rewrite since replaced).
+4. `rewriteLostThenRewrittenRun`: carol's rewrite swap lands unanswered; dave rewrites again
+   before carol rechecks. The ref's lineage is dave's, so carol retried, found her tip gone
+   and returned `MovedError` for a rewrite that landed: `rewriteOutcomeIsTruthful`. Fixed in
+   `rewrite_ref` (`in_chain`: its record is in the ref's chain).
+
+Both scenarios diverge from the unfixed code at the recheck.
 
 ## Combining (`combine.qnt`)
 
@@ -213,9 +238,39 @@ now cover combined commits.
   `INTENT_MAX_AGE` and `RECENT_MAX` are never reached; reading the intents and storing the
   batch are one step.
 
+## Rewrites (`rewrite.qnt`)
+
+A client rewords the branch's tip (`beginRewrite` reads it and builds the new commit, as
+`pail rebase` builds before taking its lease), leases, stores it, then runs `rewrite_ref`:
+read the ref; moved off the tip: `MovedError`; otherwise carry each commit landed since onto
+the new tip, write the record (`reflog/<branch>/<id>`: old, new, epoch, prev, map) and swap
+with the epoch bumped. Moving the ref forward keeps its lineage. gc marks every record's old
+and new tips (and what is under them).
+
+- Properties: `lineageNamesItsRecord` (the ref's lineage names a record of its epoch whose
+  new tip the branch has), `recordsAreChained` (each record's epoch is its prev's plus one),
+  `reflogIsStored` (every commit a record reaches stays stored, for successor walks and
+  undo), `rewriteOutcomeIsTruthful` (Ok: its record is in the ref's chain; `MovedError`: none
+  is). `refOnlyMovesForward` allows moves a record names; `recentIsTruthful` asks only that
+  the branch has each landed intent's change (a rewrite keeps `recent` as it was).
+- Scenarios: `rewordCarriesRun`, `rewordAfterLostSwapRun`, `rewriteMovedRun`,
+  `rewriteLostThenRewrittenRun`, `rewriteSwapDroppedRun`, `gcKeepsRewrittenHistoryRun`.
+- `contendStep` interleaves rewriters with writers. 100,000 contended runs: no violation.
+- Ten mutants of the rewrite code (no carrying, epoch not bumped, no `prev`, gc ignoring
+  the reflog, a publish resetting the lineage, the moved check skipped, either recheck fix
+  undone, the record's map missing carried commits, `recent` dropped). The map mutant
+  survives on the pinned quint-refinements, whose runtime fills a map entry the snapshot
+  lacks in from the model (fixed in quint-refinements#25); dropping `recent` survives
+  because no scenario rewrites a ref with landed intents. The other eight fail a scenario.
+- Simplifications: the only rewrite is a reword (the tree stays, so every carried commit
+  applies: `check_applies` is not exercised); each client rewrites at most once, so a chain
+  has at most four records; no undo, reset or drops (`None` successors); `rewrites_between`'s
+  `REWRITE_CHAIN_MAX` is never reached.
+
 ## Not modelled yet
 
-1. `land --stack`, rewrites and epochs (`rewrite_ref`), successor maps, reflog roots.
+1. `land --stack`; `rebase --undo` and `force_ref` (reset); successor walks
+   (`Repo::successor`, `fork_point`) beyond the record's map.
 2. Packs and chunks (files are inline in the model's trees).
 3. Known heads (the fast path that skips the first ref read).
 4. Lease timing: a live holder is assumed to refresh within the lease's lifetime

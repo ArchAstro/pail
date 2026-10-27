@@ -8,10 +8,11 @@
 ///   refs/<branch>    the one mutable object, moved by CAS         Space[str, RefBody]
 ///   locks/<holder>   a lease: writers share, gc holds alone       Space[str, LeaseKind]
 ///   intents/<b>/<id> a combining writer's change, until it lands   Space[str, Intent]
+///   reflog/<b>/<id>  a rewrite's record, created once, kept         Space[int, Rewrite]
 /// ```
 ///
 /// A tree here is small enough for one page (as a real one of a few files is). Not laid
-/// out yet: packs and chunks (file contents inline), `reflog/`.
+/// out yet: packs and chunks (file contents inline).
 module bucket {
   import store.* from "./store"
 
@@ -34,8 +35,24 @@ module bucket {
   /// last `RECENT_MAX`; never reached here.)
   type Recent = str -> CommitId
 
-  /// A ref object's body. (pail's also carries its lineage.)
-  type RefBody = { commit: CommitId, recent: Recent }
+  /// Which rewrite a ref's history descends from: how many rewrites it has been through,
+  /// and the record of the last (0: none). Moving the ref forward keeps it.
+  type Lineage = { epoch: int, rewrite: int }
+
+  /// A rewrite's record (`reflog/<branch>/<id>`, ids here numbered in creation order):
+  /// the tip it replaced and the one it moved to, the epoch the branch entered, the
+  /// previous record (0: none), who rewrote it, and each rewritten commit's successor (pail's `map`).
+  type Rewrite = {
+    old: CommitId,
+    new: CommitId,
+    epoch: int,
+    prev: int,
+    by: str,
+    successors: CommitId -> CommitId,
+  }
+
+  /// A ref object's body.
+  type RefBody = { commit: CommitId, recent: Recent, lineage: Lineage }
 
   /// A ref as a client reads it: the commit, and the version a swap must match.
   type Ref = { commit: CommitId, version: int }
@@ -62,6 +79,7 @@ module bucket {
     refs: Space[str, RefBody],
     locks: Space[str, LeaseKind],
     intents: Space[str, Intent],
+    reflog: Space[int, Rewrite],
     young: Young,
   }
 
@@ -69,14 +87,16 @@ module bucket {
   pure val PATHS: Set[str] = Set("a", "b")
   pure val ROOT: CommitId = ["root"]
   pure val ROOT_TREE: Tree = Map("a" -> "0", "b" -> "0")
+  pure val NO_LINEAGE: Lineage = { epoch: 0, rewrite: 0 }
 
   /// A branch created with one commit holding every path, long enough ago to be old.
   pure val ROOT_BUCKET: Bucket = {
     pages: created(Map(), ROOT_TREE, true),
     commits: created(Map(), ROOT, { tree: ROOT_TREE, ancestors: Set() }),
-    refs: created(Map(), BRANCH, { commit: ROOT, recent: Map() }),
+    refs: created(Map(), BRANCH, { commit: ROOT, recent: Map(), lineage: NO_LINEAGE }),
     locks: Map(),
     intents: Map(),
+    reflog: Map(),
     young: { pages: Set(), commits: Set() },
   }
 
@@ -88,6 +108,10 @@ module bucket {
 
   /// The intents the ref has landed.
   pure def recentOf(b: Bucket): Recent = body(b.refs, BRANCH).recent
+
+  pure def lineageOf(b: Bucket): Lineage = body(b.refs, BRANCH).lineage
+
+  pure def recordOf(b: Bucket, id: int): Rewrite = body(b.reflog, id)
 
   pure def treeOf(b: Bucket, id: CommitId): Tree = body(b.commits, id).tree
 
@@ -136,11 +160,52 @@ module bucket {
   /// Whether a swap of the ref expecting `version` applies.
   pure def refSwapApplies(b: Bucket, version: int): bool = casApplies(b.refs, BRANCH, version)
 
-  /// The ref swapped to `target` with `recent`, if it is still at `version`.
+  /// The ref swapped to `target` with `recent`, if it is still at `version`: a move
+  /// forward, keeping the lineage (which, at that version, is the one the writer read).
   pure def refSwapped(b: Bucket, version: int, target: CommitId, recent: Recent): Bucket = {
     ...b,
-    refs: swapped(b.refs, BRANCH, version, { commit: target, recent: recent }),
+    refs: swapped(b.refs, BRANCH, version, { commit: target, recent: recent, lineage: lineageOf(b) }),
   }
+
+  /// The ref swapped to `body`, if it is still at `version`: a rewrite.
+  pure def refRewritten(b: Bucket, version: int, body: RefBody): Bucket =
+    { ...b, refs: swapped(b.refs, BRANCH, version, body) }
+
+  /// Record `r` under the next id.
+  pure def recorded(b: Bucket, r: Rewrite): Bucket =
+    { ...b, reflog: created(b.reflog, nextRecord(b), r) }
+
+  pure def nextRecord(b: Bucket): int = b.reflog.keys().size() + 1
+
+  /// Every commit a record names, and every commit below them: what walking a rewrite's
+  /// map (`Repo::successor`) or undoing it reads.
+  pure def recordReaches(b: Bucket, r: Rewrite): Set[CommitId] =
+    ancestorsOf(b, r.old).union(ancestorsOf(b, r.new)).union(Set(r.old, r.new))
+
+  /// The records from the ref's back, by `prev` (each client rewrites once: four at most).
+  pure def chain(b: Bucket): Set[int] = {
+    val r0 = lineageOf(b).rewrite
+    val r1 = prevOf(b, r0)
+    val r2 = prevOf(b, r1)
+    Set(r0, r1, r2, prevOf(b, r2)).exclude(Set(0))
+  }
+
+  /// The record before record `id` (0: none).
+  pure def prevOf(b: Bucket, id: int): int = if (id == 0) 0 else recordOf(b, id).prev
+
+  /// Whether commit `id`, made on the branch at lineage `from`, was published: the branch
+  /// has it, or the first rewrite since replaced a tip that had it.
+  pure def landedSince(b: Bucket, id: CommitId, from: Lineage): bool = or {
+    onBranch(b, id),
+    chain(b).exists(r => and {
+      recordOf(b, r).epoch == from.epoch + 1,
+      recordOf(b, r).old == id or ancestorsOf(b, recordOf(b, r).old).contains(id),
+    }),
+  }
+
+  /// Every commit some record reaches: gc's roots besides the refs.
+  pure def reflogReaches(b: Bucket): Set[CommitId] =
+    b.reflog.keys().fold(Set(), (acc, id) => acc.union(recordReaches(b, recordOf(b, id))))
 
   pure def intentPut(b: Bucket, w: str, i: Intent): Bucket =
     { ...b, intents: written(b.intents, w, i) }
@@ -157,7 +222,10 @@ module bucket {
 
   pure def unleased(b: Bucket, holder: str): Bucket = { ...b, locks: deleted(b.locks, holder) }
 
+  /// Whether each of `ids`, and its page, is stored.
+  pure def allStored(b: Bucket, ids: Set[CommitId]): bool =
+    ids.forall(id => isLive(b.commits, id) and isLive(b.pages, treeOf(b, id)))
+
   /// Whether every commit the branch reaches, and its page, is stored.
-  pure def branchIsStored(b: Bucket): bool =
-    branch(b).forall(id => isLive(b.commits, id) and isLive(b.pages, treeOf(b, id)))
+  pure def branchIsStored(b: Bucket): bool = allStored(b, branch(b))
 }
