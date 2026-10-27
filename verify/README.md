@@ -46,7 +46,10 @@ npm test            # scenarios pass in Quint
 npm run simulate    # random interleavings against `safety`
 npm run compile     # after editing scenarios.qnt or publish.qnt
 cd .. && cargo test --release --test refinement --test store_refinement
-# real S3/GCS (or emulators) too:
+# GCS runs in `cargo test` against the in-process emulator (src/gcs_emulator.rs); as a process:
+#   cargo run --release --bin pail-gcs-emulator 127.0.0.1:4443
+#   PAIL_TEST_STORES=gs://bucket/prefix PAIL_GCS_BASE_URL=http://127.0.0.1:4443 cargo test ...
+# real S3/GCS (or other emulators) too:
 PAIL_TEST_STORES="s3://bucket/prefix" AWS_ENDPOINT=... cargo test --release --test store_refinement
 ```
 
@@ -74,7 +77,12 @@ call's reply must equal the model's.
 | in-memory (`object_store` `InMemory`) | `cargo test` | 6/6 |
 | `file://` (pail's local CAS) | `cargo test` | 6/6 |
 | S3 API (moto) | CI `s3` job, `PAIL_TEST_STORES` | 6/6 |
-| GCS | `PAIL_TEST_STORES=gs://...` | not run: fake-gcs-server lacks the XML API `object_store` uses |
+| GCS API (`src/gcs_emulator.rs`) | `cargo test` (in-process), CI `gcs` job, `PAIL_TEST_STORES` + `PAIL_GCS_BASE_URL` | 6/6 |
+
+The GCS emulator is ours because fake-gcs-server lacks the XML API `object_store` calls
+(list 404s, PUT is `400 invalid uploadType`). It gives every write a fresh generation and
+answers a failed `x-goog-if-generation-match` with 412; what it omits is in its doc comment.
+It checks pail against the GCS semantics we encoded, not against Google's servers.
 
 Model versions count writes. Real stores differ when an object gets back bytes it had
 before: an S3 ETag and pail's local version hash the bytes, so the version comes back;

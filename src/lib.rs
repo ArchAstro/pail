@@ -7,6 +7,7 @@ pub mod enc;
 pub mod events;
 pub mod extensions;
 pub mod gc;
+pub mod gcs_emulator;
 pub mod gitcmd;
 pub mod gitdate;
 pub mod gitdiff;

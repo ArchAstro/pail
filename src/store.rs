@@ -89,6 +89,16 @@ impl Store {
     /// GCS honours `GOOGLE_*` env vars; `PAIL_GCS_TOKEN` supplies an OAuth token (e.g. from
     /// `gcloud auth print-access-token`); `PAIL_GCS_BASE_URL` points it at an emulator.
     pub fn open_in(url: &str, repo_dir: Option<&FsPath>) -> Result<Store> {
+        Store::open_with_gcs_base(url, repo_dir, std::env::var("PAIL_GCS_BASE_URL").ok())
+    }
+
+    /// [`Store::open_in`] with the GCS emulator base URL given instead of read from
+    /// `PAIL_GCS_BASE_URL` (tests running an emulator in-process must not touch the env).
+    pub fn open_with_gcs_base(
+        url: &str,
+        repo_dir: Option<&FsPath>,
+        gcs_base: Option<String>,
+    ) -> Result<Store> {
         let cfg = crate::config::Config::load(repo_dir);
         let choice = crate::creds::choose(url, &cfg)?;
         let helper = crate::creds::Source::new(&choice.provider, url);
@@ -130,7 +140,7 @@ impl Store {
             "gs" => {
                 let bucket = parsed.host_str().ok_or_else(|| anyhow!("missing bucket"))?;
                 let mut b = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
-                if let Ok(base) = std::env::var("PAIL_GCS_BASE_URL") {
+                if let Some(base) = gcs_base {
                     b = b.with_base_url(&base).with_bearer_token("emulator");
                 } else if let Some(src) = helper.clone() {
                     b = b.with_credentials(Arc::new(crate::creds::GcsProvider(src)));
