@@ -28,13 +28,15 @@ tests/refinement.rs ── real Repo::commit, gated store ──▶ same state a
 | File | What it is |
 |---|---|
 | `store.qnt` | The object store, independent of pail: `Space[k, b]` of versioned objects, writes, `Delivery` |
-| `store_test.qnt` | The store's contract: create conflicts, CAS needs the current version, no ABA after delete |
+| `store_spec.qnt` | One action per `Store` method, each recording its reply in `state.reply` |
+| `store_scenarios.qnt` | `@conformance` runs: the store contract every backend must follow, reply for reply |
 | `bucket.qnt` | Pail's spaces in the store and the operators on them (`uploaded`, `refSwapped`, `tip`) |
 | `publish.qnt` | Clients running `commit_opts`, one store request per action; the properties |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real client must follow |
-| `quint-refinements.json` | Generated from `scenarios.qnt` (do not edit) |
-| `../tests/refinement/generated.rs` | Generated Rust trait for the harness (do not edit) |
-| `../tests/refinement.rs` | The harness: real clients over a shared in-memory bucket |
+| `quint-refinements.json`, `store-refinements.json` | Generated scenario artifacts (do not edit) |
+| `../tests/refinement/generated.rs`, `../tests/store_refinement/generated.rs` | Generated Rust traits (do not edit) |
+| `../tests/refinement.rs` | `Repo::commit` against `publish.qnt`: real clients over a shared in-memory bucket |
+| `../tests/store_refinement.rs` | Each `Store` backend against `store_spec.qnt` |
 
 ## Run
 
@@ -43,7 +45,9 @@ cd verify && npm ci
 npm test            # scenarios pass in Quint
 npm run simulate    # random interleavings against `safety`
 npm run compile     # after editing scenarios.qnt or publish.qnt
-cd .. && cargo test --release --test refinement
+cd .. && cargo test --release --test refinement --test store_refinement
+# real S3/GCS (or emulators) too:
+PAIL_TEST_STORES="s3://bucket/prefix" AWS_ENDPOINT=... cargo test --release --test store_refinement
 ```
 
 CI runs all four (`npm run check` in place of `compile`, failing on stale generated files).
@@ -59,7 +63,26 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 `npm run simulate` checks them over random interleavings (simulation, not proof: it
 samples behaviours rather than exhausting them).
 
-## How the harness maps to the model
+## The store contract (`store_scenarios.qnt`)
+
+Each action is one `Store` call (`getOpt`, `putNew`, `putAny`, `casNew`, `cas`, `remove`,
+`listKeys`). After each, the objects in the store (bodies, versions, tombstones) and the
+call's reply must equal the model's.
+
+| Backend | Checked by | Result |
+|---|---|---|
+| in-memory (`object_store` `InMemory`) | `cargo test` | 6/6 |
+| `file://` (pail's local CAS) | `cargo test` | 6/6 |
+| S3 API (moto) | CI `s3` job, `PAIL_TEST_STORES` | 6/6 |
+| GCS | `PAIL_TEST_STORES=gs://...` | not run: fake-gcs-server lacks the XML API `object_store` uses |
+
+Model versions count writes. Real stores differ when an object gets back bytes it had
+before: an S3 ETag and pail's local version hash the bytes, so the version comes back;
+a GCS generation and an in-memory ETag do not. A first version of the scenarios asserted
+"never reused" and failed on `file://` and S3. Pail does not need it (a ref's body is its
+whole state), so `store.qnt` says so and no scenario rewrites old bytes.
+
+## How the publish harness maps to the model
 
 | Model | Real |
 |---|---|
