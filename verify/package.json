@@ -1,17 +1,18 @@
 {
   "name": "pail-verify",
   "private": true,
-  "description": "Quint model of pail's publish protocol and the tools that check it",
+  "description": "Quint models of pail's publish protocol, store and branch policy, and the tools that check them",
   "scripts": {
-    "compile": "npm run compile:publish && npm run compile:store",
-    "compile:publish": "quint-refinements compile scenarios.qnt --module scenarios --artifact quint-refinements.json --rust ../tests/refinement/generated.rs",
-    "compile:store": "quint-refinements compile store_scenarios.qnt --module storeScenarios --artifact store-refinements.json --rust ../tests/store_refinement/generated.rs",
-    "check": "npm run compile:publish -- --check && npm run compile:store -- --check",
-    "test": "quint test store_scenarios.qnt --main=storeScenarios --match='Run$' && quint test scenarios.qnt --main=scenarios --match='Run$'",
-    "simulate": "quint run pail.qnt --main=pail --invariant=safety --max-steps=40 --max-samples=20000"
+    "compile": "npm run compile:publish && npm run compile:store && npm run compile:policy",
+    "compile:publish": "quint-refinements compile scenarios.qnt --module scenarios --compact --artifact quint-refinements.json --rust ../tests/refinement/generated.rs",
+    "compile:store": "quint-refinements compile store_scenarios.qnt --module storeScenarios --compact --artifact store-refinements.json --rust ../tests/store_refinement/generated.rs",
+    "check": "npm run compile:publish -- --check && npm run compile:store -- --check && npm run compile:policy -- --check",
+    "test": "quint test store_scenarios.qnt --main=storeScenarios --match='Run$' && quint test scenarios.qnt --main=scenarios --match='Run$' && quint test policy_scenarios.qnt --main=policyScenarios --match='Run$'",
+    "simulate": "quint run pail.qnt --main=pail --invariant=safety --max-steps=40 --max-samples=20000",
+    "compile:policy": "quint-refinements compile policy_scenarios.qnt --module policyScenarios --compact --artifact policy/policy-refinements.json --rust ../tests/policy_refinement/generated.rs --go policy/pailpolicy_refinement_gen_test.go --go-package gateway"
   },
   "devDependencies": {
     "@informalsystems/quint": "0.33.0",
-    "quint-refinements": "https://codeload.github.com/ArchAstro/quint-refinements/tar.gz/83bf4348e48f852dc54589db048e74e5c436ca7f"
+    "quint-refinements": "https://codeload.github.com/ArchAstro/quint-refinements/tar.gz/04ae5ff3e58667da00916acf196a858108e10e0c"
   }
 }

@@ -112,6 +112,20 @@ pub enum Op {
     Delete,
 }
 
+/// The op a request to `key` is, as `pail serve` and the gateway check it: reads are GET and
+/// HEAD; branch objects are written and deleted by their writers; immutable content may only
+/// be created, so an unconditional write (no `If-None-Match: *`) or a delete of it counts as
+/// rewriting history.
+pub fn request_op(method: &str, key: &str, if_none_match: Option<&str>) -> Op {
+    let content = CONTENT.iter().any(|p| key.starts_with(p));
+    match method {
+        "GET" | "HEAD" => Op::Read,
+        "PUT" if content && if_none_match != Some("*") => Op::Delete,
+        "DELETE" if content => Op::Delete,
+        _ => Op::Write,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decision {
     pub allow: bool,

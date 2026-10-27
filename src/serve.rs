@@ -302,17 +302,7 @@ impl Proxy {
         if !valid_key(key) {
             return Err(Reply::new(400, "bad key"));
         }
-        // Branch objects are written and deleted by their writers; immutable content may only
-        // be created (an unconditional write or a delete counts as rewriting history).
-        let content = ["commits/", "pages/", "packs/", "chunks/"]
-            .iter()
-            .any(|p| key.starts_with(p));
-        let pop = match method {
-            "GET" | "HEAD" => PolicyOp::Read,
-            "PUT" if content && h("if-none-match") != Some("*") => PolicyOp::Delete,
-            "DELETE" if content => PolicyOp::Delete,
-            _ => PolicyOp::Write,
-        };
+        let pop = crate::policy::request_op(method, key, h("if-none-match"));
         check(pop, key)?;
         match method {
             "HEAD" => match store.size(key).await.map_err(fail)? {
