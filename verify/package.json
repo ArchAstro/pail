@@ -13,6 +13,6 @@
   },
   "devDependencies": {
     "@informalsystems/quint": "0.33.0",
-    "quint-refinements": "https://codeload.github.com/ArchAstro/quint-refinements/tar.gz/04ae5ff3e58667da00916acf196a858108e10e0c"
+    "quint-refinements": "https://codeload.github.com/ArchAstro/quint-refinements/tar.gz/4ef8e7ab1e1c62aa0b0e232b6729fa1f8a786325"
   }
 }
