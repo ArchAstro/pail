@@ -1431,7 +1431,7 @@ dependencies = [
 [[package]]
 name = "quint-refinements"
 version = "0.2.0"
-source = "git+https://github.com/ArchAstro/quint-refinements?rev=4737c9564d8f3e2472d3eaacf6c6ad9b423cc746#4737c9564d8f3e2472d3eaacf6c6ad9b423cc746"
+source = "git+https://github.com/ArchAstro/quint-refinements?rev=4ef8e7ab1e1c62aa0b0e232b6729fa1f8a786325#4ef8e7ab1e1c62aa0b0e232b6729fa1f8a786325"
 dependencies = [
  "serde",
  "serde_json",
