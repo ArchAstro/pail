@@ -254,14 +254,14 @@ and new tips (and what is under them).
   is). `refOnlyMovesForward` allows moves a record names; `recentIsTruthful` asks only that
   the branch has each landed intent's change (a rewrite keeps `recent` as it was).
 - Scenarios: `rewordCarriesRun`, `rewordAfterLostSwapRun`, `rewriteMovedRun`,
-  `rewriteLostThenRewrittenRun`, `rewriteSwapDroppedRun`, `gcKeepsRewrittenHistoryRun`.
+  `rewriteLostThenRewrittenRun`, `rewriteSwapDroppedRun`, `gcKeepsRewrittenHistoryRun`,
+  `rewordKeepsRecentRun` (a rewrite keeps `recent`).
 - `contendStep` interleaves rewriters with writers. 100,000 contended runs: no violation.
 - Ten mutants of the rewrite code (no carrying, epoch not bumped, no `prev`, gc ignoring
   the reflog, a publish resetting the lineage, the moved check skipped, either recheck fix
-  undone, the record's map missing carried commits, `recent` dropped). The map mutant
-  survives on the pinned quint-refinements, whose runtime fills a map entry the snapshot
-  lacks in from the model (fixed in quint-refinements#25); dropping `recent` survives
-  because no scenario rewrites a ref with landed intents. The other eight fail a scenario.
+  undone, the record's map missing carried commits, `recent` dropped) each fail a scenario.
+  The map mutant passed until quint-refinements#25 (the runtime filled a map entry the
+  snapshot lacked in from the model).
 - Simplifications: the only rewrite is a reword (the tree stays, so every carried commit
   applies: `check_applies` is not exercised); each client rewrites at most once, so a chain
   has at most four records; no undo, reset or drops (`None` successors); `rewrites_between`'s
