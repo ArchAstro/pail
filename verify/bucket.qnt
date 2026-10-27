@@ -7,10 +7,11 @@
 ///   commits/<hash>   immutable, created once, named by content    Space[CommitId, Commit]
 ///   refs/<branch>    the one mutable object, moved by CAS         Space[str, RefBody]
 ///   locks/<holder>   a lease: writers share, gc holds alone       Space[str, LeaseKind]
+///   intents/<b>/<id> a combining writer's change, until it lands   Space[str, Intent]
 /// ```
 ///
 /// A tree here is small enough for one page (as a real one of a few files is). Not laid
-/// out yet: packs and chunks (file contents inline), `intents/`, `reflog/`.
+/// out yet: packs and chunks (file contents inline), `reflog/`.
 module bucket {
   import store.* from "./store"
 
@@ -29,11 +30,24 @@ module bucket {
   /// A stored commit: its tree (the key of its root page) and every commit below it.
   type Commit = { tree: Tree, ancestors: Set[CommitId] }
 
-  /// A ref object's body. (pail's also carries `recent` and its lineage.)
-  type RefBody = { commit: CommitId }
+  /// The intents a ref has landed, each to the commit that carries it. (pail's keeps the
+  /// last `RECENT_MAX`; never reached here.)
+  type Recent = str -> CommitId
+
+  /// A ref object's body. (pail's also carries its lineage.)
+  type RefBody = { commit: CommitId, recent: Recent }
 
   /// A ref as a client reads it: the commit, and the version a swap must match.
   type Ref = { commit: CommitId, version: int }
+
+  /// A combining writer's change (`intents/<branch>/<id>.json`), keyed here by its writer
+  /// (a writer makes one per commit). Ids sort by creation time, `at`; clocks differ
+  /// between machines, so `at` is any time, ties broken by `RANK`.
+  type Intent = { base: CommitId, delta: Delta, at: int }
+
+  /// A commit a combining round builds for an intent: its tree and ancestors, known before
+  /// it is stored.
+  type Entry = { intent: str, commit: CommitId, tree: Tree, ancestors: Set[CommitId] }
 
   /// A lease's kind: writers hold shared leases together; gc holds an exclusive one alone.
   type LeaseKind = Shared | Exclusive
@@ -47,6 +61,7 @@ module bucket {
     commits: Space[CommitId, Commit],
     refs: Space[str, RefBody],
     locks: Space[str, LeaseKind],
+    intents: Space[str, Intent],
     young: Young,
   }
 
@@ -59,8 +74,9 @@ module bucket {
   pure val ROOT_BUCKET: Bucket = {
     pages: created(Map(), ROOT_TREE, true),
     commits: created(Map(), ROOT, { tree: ROOT_TREE, ancestors: Set() }),
-    refs: created(Map(), BRANCH, { commit: ROOT }),
+    refs: created(Map(), BRANCH, { commit: ROOT, recent: Map() }),
     locks: Map(),
+    intents: Map(),
     young: { pages: Set(), commits: Set() },
   }
 
@@ -69,6 +85,9 @@ module bucket {
     commit: body(b.refs, BRANCH).commit,
     version: versionOf(b.refs, BRANCH),
   }
+
+  /// The intents the ref has landed.
+  pure def recentOf(b: Bucket): Recent = body(b.refs, BRANCH).recent
 
   pure def treeOf(b: Bucket, id: CommitId): Tree = body(b.commits, id).tree
 
@@ -92,34 +111,42 @@ module bucket {
 
   /// Commit `id`, `d` on top of `parent`, uploaded with its page: two creates, each a
   /// no-op if the object is there already (`Store::put_new`), and so not making it young.
-  pure def uploaded(b: Bucket, id: CommitId, parent: CommitId, d: Delta): Bucket = {
-    val tree = overlay(treeOf(b, parent), d)
-    {
-      ...b,
-      pages: created(b.pages, tree, true),
-      commits: created(b.commits, id, {
-        tree: tree,
-        ancestors: ancestorsOf(b, parent).union(Set(parent)),
-      }),
-      young: {
-        pages:
-          if (createApplies(b.pages, tree)) b.young.pages.union(Set(tree))
-          else b.young.pages,
-        commits:
-          if (createApplies(b.commits, id)) b.young.commits.union(Set(id))
-          else b.young.commits,
-      },
-    }
+  pure def uploaded(b: Bucket, id: CommitId, parent: CommitId, d: Delta): Bucket =
+    stored(b, id, overlay(treeOf(b, parent), d), ancestorsOf(b, parent).union(Set(parent)))
+
+  /// Commit `id` with its page, created as `uploaded` does.
+  pure def stored(b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId]): Bucket = {
+    ...b,
+    pages: created(b.pages, tree, true),
+    commits: created(b.commits, id, { tree: tree, ancestors: ancestors }),
+    young: {
+      pages:
+        if (createApplies(b.pages, tree)) b.young.pages.union(Set(tree))
+        else b.young.pages,
+      commits:
+        if (createApplies(b.commits, id)) b.young.commits.union(Set(id))
+        else b.young.commits,
+    },
   }
+
+  /// Every commit of a combining round, stored in one wave.
+  pure def storedBatch(b: Bucket, batch: Set[Entry]): Bucket =
+    batch.fold(b, (acc, e) => stored(acc, e.commit, e.tree, e.ancestors))
 
   /// Whether a swap of the ref expecting `version` applies.
   pure def refSwapApplies(b: Bucket, version: int): bool = casApplies(b.refs, BRANCH, version)
 
-  /// The ref swapped to `target`, if it is still at `version`.
-  pure def refSwapped(b: Bucket, version: int, target: CommitId): Bucket = {
+  /// The ref swapped to `target` with `recent`, if it is still at `version`.
+  pure def refSwapped(b: Bucket, version: int, target: CommitId, recent: Recent): Bucket = {
     ...b,
-    refs: swapped(b.refs, BRANCH, version, { commit: target }),
+    refs: swapped(b.refs, BRANCH, version, { commit: target, recent: recent }),
   }
+
+  pure def intentPut(b: Bucket, w: str, i: Intent): Bucket =
+    { ...b, intents: written(b.intents, w, i) }
+
+  pure def intentsDeleted(b: Bucket, ws: Set[str]): Bucket =
+    { ...b, intents: ws.fold(b.intents, (acc, w) => deleted(acc, w)) }
 
   /// Whether a lease other than `holder`'s is live (of `kinds`).
   pure def leasedByOthers(b: Bucket, holder: str, kinds: Set[LeaseKind]): bool =

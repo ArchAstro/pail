@@ -8,6 +8,7 @@ module pail {
   import bucket.* from "./bucket"
   import world.* from "./world"
   import publish.* from "./publish"
+  import combine.* from "./combine"
   import gc.* from "./gc"
 
   var state: State
@@ -54,6 +55,37 @@ module pail {
     recheckCan(state, c),
     state' = recheckNext(state, c),
   }
+
+  // ---------- combining ----------
+
+  action intend(c: str, at: int): bool = all { intendCan(state, c), state' = intendNext(state, c, at) }
+
+  action pollRef(c: str): bool = all { pollRefCan(state, c), state' = pollRefNext(state, c) }
+
+  action pollList(c: str): bool = all { pollListCan(state, c), state' = pollListNext(state, c) }
+
+  action wait(c: str): bool = all { waitCan(state, c), state' = waitNext(state, c) }
+
+  action giveUp(c: str): bool = all { giveUpCan(state, c), state' = giveUpNext(state, c) }
+
+  action gather(c: str, vanished: Set[str]): bool = all {
+    gatherCan(state, c, vanished),
+    state' = gatherNext(state, c, vanished),
+  }
+
+  action batchSwap(c: str, d: Delivery): bool = all {
+    batchSwapCan(state, c),
+    state' = batchSwapNext(state, c, d),
+  }
+
+  action cleanup(c: str): bool = all { cleanupCan(state, c), state' = cleanupNext(state, c) }
+
+  action batchRecheck(c: str): bool = all {
+    batchRecheckCan(state, c),
+    state' = batchRecheckNext(state, c),
+  }
+
+  action withdraw(c: str): bool = all { withdrawCan(state, c), state' = withdrawNext(state, c) }
 
   // ---------- the collector ----------
 
@@ -103,6 +135,7 @@ module pail {
     nondet base = liveKeys(state.bucket.commits).oneOf()
     nondet delta = DELTAS.oneOf()
     nondet d = Set(Answered, Lost, Dropped).oneOf()
+    nondet at = Set(1, 2, 3).oneOf()
     any {
       begin(c, base, delta),
       lease(c),
@@ -113,6 +146,17 @@ module pail {
       upload(c),
       swap(c, d),
       recheck(c),
+      intend(c, at),
+      pollRef(c),
+      pollList(c),
+      wait(c),
+      giveUp(c),
+      nondet vanished = vanishable(state, c).powerset().oneOf()
+      gather(c, vanished),
+      batchSwap(c, d),
+      cleanup(c),
+      batchRecheck(c),
+      withdraw(c),
       gcLease,
       gcCheckLeases,
       gcMark,
@@ -128,9 +172,36 @@ module pail {
     }
   }
 
-  // ---------- properties ----------
+  /// Writers only, nothing crashing or giving up: random runs of `step` rarely get a
+  /// writer through two lost races into combining, so `npm run simulate` runs this too.
+  action contendStep = {
+    nondet c = CLIENTS.oneOf()
+    nondet base = liveKeys(state.bucket.commits).oneOf()
+    nondet delta = DELTAS.oneOf()
+    nondet d = Set(Answered, Answered, Lost, Dropped).oneOf()
+    nondet at = Set(1, 2, 3).oneOf()
+    any {
+      begin(c, base, delta),
+      lease(c),
+      checkLeases(c),
+      readRef(c),
+      upload(c),
+      swap(c, d),
+      recheck(c),
+      intend(c, at),
+      pollRef(c),
+      pollList(c),
+      wait(c),
+      nondet vanished = vanishable(state, c).powerset().oneOf()
+      gather(c, vanished),
+      batchSwap(c, d),
+      cleanup(c),
+      batchRecheck(c),
+      withdraw(c),
+    }
+  }
 
-  pure def author(id: CommitId): str = id[length(id) - 1]
+  // ---------- properties ----------
 
   /// Every commit the branch reaches, and its page, is stored: no ref dangles.
   val branchIsComplete: bool = branchIsStored(state.bucket)
@@ -141,12 +212,20 @@ module pail {
       i == 0 or ancestorsOf(state.bucket, state.history[i]).contains(state.history[i - 1])
     )
 
-  /// A client told its commit was published finds it on the branch, now and later.
+  /// A client told its commit was published finds it on the branch, now and later: its
+  /// own commit, or the one a combining round made of its intent.
   val publishedIsOnBranch: bool =
     CLIENTS.forall(c =>
       client(state, c).outcome == Published
-        implies onBranch(state.bucket, made(c, client(state, c)))
+        implies branch(state.bucket).exists(id => author(id) == c)
     )
+
+  /// The ref's `recent` names, for each landed intent, a commit on the branch made of it.
+  val recentIsTruthful: bool =
+    recentOf(state.bucket).keys().forall(w => and {
+      onBranch(state.bucket, recentOf(state.bucket).get(w)),
+      author(recentOf(state.bucket).get(w)) == w,
+    })
 
   /// A client told it conflicted has nothing on the branch: it can retry without
   /// publishing its change twice.
@@ -163,16 +242,14 @@ module pail {
   /// While gc marks and deletes, no writer is between its first read and its return.
   val gcRunsAlone: bool =
     Set(GcLocked, GcMarked, GcSweepingCommits, GcSweepingPages).contains(state.collector.phase)
-      implies CLIENTS.forall(c => and {
-        not(Set(Reading, Uploading, Swapping, Rechecking).contains(client(state, c).phase)),
-        not(client(state, c).outcome == Combining),
-      })
+      implies CLIENTS.forall(c => Set(Idle, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
 
   val safety: bool = and {
     gcRunsAlone,
     branchIsComplete,
     refOnlyMovesForward,
     publishedIsOnBranch,
+    recentIsTruthful,
     conflictedHasNothingOnBranch,
     landsAtMostOnce,
   }

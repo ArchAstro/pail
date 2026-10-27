@@ -6,16 +6,16 @@
 ///   begin ─▶ Leasing ─lease─▶ CheckingLeases ─checkLeases─▶ Reading   (gc holds one: Leasing)
 ///
 ///            Reading ─readRef─▶ Uploading ─upload─▶ Swapping ─swap(Answered)─▶ Done
-///               ▲  │ overlap: Conflicted               │  │ lost the race: retry
-///               │  ▼                                   │  ▼
-///               │ Done                 swap(Lost|Dropped) Reading (or Combining)
+///               ▲  │ overlap: Conflicted     │         │  │ lost the race: retry
+///               │  ▼      intents pending:   ▼         │  ▼
+///               │ Done              Intending ◀── swap(Lost|Dropped) Reading (or Intending)
 ///               └────────── recheck ◀── Rechecking ◀───┘
 /// ```
 ///
 /// Each step is a pair: `xCan(s, ...)`, whether the client can take it, and `x(s, ...)`,
 /// the state after. A client holds a shared lease from before its first read to its return
-/// (`finished`), so gc, which needs an exclusive one, never runs while it is in flight. Out of scope here: combining (a client that loses every direct
-/// attempt stops as `Combining`).
+/// (`finished`), so gc, which needs an exclusive one, never runs while it is in flight.
+/// `Intending` hands off to combining (`combine.qnt`).
 module publish {
   import store.* from "./store"
   import bucket.* from "./bucket"
@@ -65,12 +65,14 @@ module publish {
         treeOf(s.bucket, client(s, c).base),
         treeOf(s.bucket, tip(s.bucket).commit),
       ))
-        { ...client(s, c), phase: Done, outcome: Conflicted, seen: tip(s.bucket) }
+        { ...client(s, c), phase: Done, outcome: Conflicted, seen: tip(s.bucket), seenRecent: recentOf(s.bucket) }
       else
-        { ...client(s, c), phase: Uploading, seen: tip(s.bucket) }
+        { ...client(s, c), phase: Uploading, seen: tip(s.bucket), seenRecent: recentOf(s.bucket) }
     )
 
-  /// Store the commit and its page before any ref can name them.
+  /// Store the commit and its page before any ref can name them, listing the branch's
+  /// intents meanwhile. Pending ones (not landed in the ref as read) mean writers are
+  /// combining: swapping past them would starve them, so join them instead.
   pure def uploadCan(s: State, c: str): bool = client(s, c).phase == Uploading
 
   pure def uploadNext(s: State, c: str): State = {
@@ -81,7 +83,12 @@ module publish {
       client(s, c).seen.commit,
       client(s, c).delta,
     ),
-    clients: s.clients.set(c, { ...client(s, c), phase: Swapping }),
+    clients: s.clients.set(c, {
+      ...client(s, c),
+      phase:
+        if (liveKeys(s.bucket.intents).exclude(client(s, c).seenRecent.keys()) != Set()) Intending
+        else Swapping,
+    }),
   }
 
   /// CAS the ref from the version read to the new commit. Answered: a lost race retries
@@ -94,7 +101,7 @@ module publish {
       ...s,
       bucket:
         if (received(d))
-          refSwapped(s.bucket, client(s, c).seen.version, made(c, client(s, c)))
+          refSwapped(s.bucket, client(s, c).seen.version, made(c, client(s, c)), client(s, c).seenRecent)
         else s.bucket,
       history:
         if (received(d) and refSwapApplies(s.bucket, client(s, c).seen.version))
@@ -109,7 +116,7 @@ module publish {
       else if (client(s, c).attempt < DIRECT_ATTEMPTS)
         { ...client(s, c), phase: Reading, attempt: client(s, c).attempt + 1 }
       else
-        { ...client(s, c), phase: Done, outcome: Combining },
+        { ...client(s, c), phase: Intending },
   )
 
   /// After an unanswered swap, read the ref to learn whether it won: the commit is on the
@@ -137,11 +144,8 @@ module publish {
   /// A dead writer's lease expires (it stopped refreshing it). A live writer's never does:
   /// one that has not refreshed its lease within its lifetime makes no further ref
   /// request (`Lease::check`), so to the bucket it is dead.
-  pure def leaseExpiresCan(s: State, c: str): bool = and {
-    isLive(s.bucket.locks, c),
-    client(s, c).phase == Done,
-    client(s, c).outcome != Combining,
-  }
+  pure def leaseExpiresCan(s: State, c: str): bool =
+    isLive(s.bucket.locks, c) and client(s, c).phase == Done
 
   pure def leaseExpiresNext(s: State, c: str): State = { ...s, bucket: unleased(s.bucket, c) }
 }
