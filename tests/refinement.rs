@@ -27,7 +27,7 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as StoreResult,
 };
 use pail::hash::Hash;
-use pail::manifest::Kind;
+use pail::manifest::{Kind, Page, decode_page};
 use pail::objects::RefValue;
 use pail::repo::{CommitRequest, ConflictError, Delta, FileInput, Repo};
 use pail::store::Store;
@@ -54,7 +54,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        8,
+        12,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -71,6 +71,9 @@ enum Request {
     Swap,
     /// The first write of the combining path: the writer gave up swapping directly.
     PutIntent,
+    ListIntents,
+    GetIntent,
+    DeleteIntent,
     ListCommits,
     DeleteCommit,
     ListPages,
@@ -117,6 +120,8 @@ enum Event {
         request: Request,
         key: String,
         etag: Option<String>,
+        /// A listing's keys.
+        listed: Vec<String>,
     },
     Finished {
         actor: String,
@@ -135,8 +140,9 @@ struct Book {
     holders: HashMap<String, String>,
 }
 
-/// A writer's page puts wait for its commit upload to be released: the model uploads a
-/// commit and its page in one step.
+/// A writer's page puts wait for its commit uploads to be released: the model uploads a
+/// commit and its page in one step. Pages stay open until the writer's next other request
+/// (a combining round stores several commits in one wave).
 #[derive(Default)]
 struct Uploads {
     open: bool,
@@ -189,6 +195,9 @@ impl Gate {
     }
 
     fn list_request(prefix: &str) -> Option<Request> {
+        if prefix == format!("intents/{BRANCH}") {
+            return Some(Request::ListIntents);
+        }
         match prefix {
             "locks" => Some(Request::ListLeases),
             "commits" => Some(Request::ListCommits),
@@ -204,12 +213,17 @@ impl Gate {
             Some(Request::DeletePage)
         } else if key.starts_with("locks/") && self.actor == GC {
             Some(Request::DeleteLease)
+        } else if key.starts_with("intents/") {
+            Some(Request::DeleteIntent)
         } else {
             None
         }
     }
 
     async fn hold(&self, request: Request, key: &str) -> Delivery {
+        if request != Request::PutCommit {
+            self.uploads.lock().unwrap().open = false;
+        }
         let (go, released) = oneshot::channel();
         let _ = self.events.send(Event::Held {
             actor: self.actor.clone(),
@@ -230,11 +244,22 @@ impl Gate {
     }
 
     fn answered(&self, request: Request, key: &str, etag: Option<String>) {
+        self.answered_listing(request, key, etag, vec![]);
+    }
+
+    fn answered_listing(
+        &self,
+        request: Request,
+        key: &str,
+        etag: Option<String>,
+        listed: Vec<String>,
+    ) {
         let _ = self.events.send(Event::Answered {
             actor: self.actor.clone(),
             request,
             key: key.to_owned(),
             etag,
+            listed,
         });
     }
 
@@ -317,9 +342,6 @@ impl ObjectStore for Gate {
             }
             Delivery::Dropped => Err(lost_reply()),
         };
-        if request == Request::PutCommit {
-            self.uploads.lock().unwrap().open = false;
-        }
         self.answered(request, key, None);
         result
     }
@@ -333,6 +355,15 @@ impl ObjectStore for Gate {
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> StoreResult<GetResult> {
+        if location.as_ref().starts_with("intents/") {
+            let release = self.hold(Request::GetIntent, location.as_ref()).await;
+            let result = match release {
+                Delivery::Answered => self.inner.get_opts(location, options).await,
+                Delivery::Lost | Delivery::Dropped => Err(lost_reply()),
+            };
+            self.answered(Request::GetIntent, location.as_ref(), None);
+            return result;
+        }
         if location.as_ref() != format!("refs/{BRANCH}") {
             return self.inner.get_opts(location, options).await;
         }
@@ -364,9 +395,14 @@ impl ObjectStore for Gate {
                             _ => return Err(lost_reply()),
                         }
                     }
+                    // Deleting what is gone changes nothing (`store.qnt`'s `deleted`).
+                    let existed =
+                        object_store::ObjectStoreExt::head(gate.inner.as_ref(), &location)
+                            .await
+                            .is_ok();
                     let one = futures::stream::once(async { Ok(location) }).boxed();
                     let out = gate.inner.delete_stream(one).next().await.unwrap();
-                    if out.is_ok() {
+                    if out.is_ok() && existed {
                         gate.removed(&key);
                     }
                     if let Some(request) = request {
@@ -395,7 +431,11 @@ impl ObjectStore for Gate {
             }
             let items: Vec<_> = gate.inner.list(prefix.as_ref()).collect().await;
             if let Some(request) = request {
-                gate.answered(request, &key, None);
+                let keys = items
+                    .iter()
+                    .filter_map(|m| m.as_ref().ok().map(|m| m.location.to_string()))
+                    .collect();
+                gate.answered_listing(request, &key, None, keys);
             }
             let items = items
                 .into_iter()
@@ -494,12 +534,38 @@ fn versioned(body: RuntimeValue, version: i64, live: bool) -> RuntimeValue {
 
 // ---------- the actors ----------
 
+/// A request an actor is waiting at.
+type Held = (Request, String, oneshot::Sender<Delivery>);
+
 /// What an actor is doing, as read off its requests.
 #[derive(Default)]
 struct Progress {
-    /// The request it is waiting at, if any.
-    held: Option<(Request, String, oneshot::Sender<Delivery>)>,
+    /// The requests it is waiting at (a writer makes some together: an upload and a
+    /// listing, a ref read and a listing, a wave of commits or deletes).
+    held: Vec<Held>,
+    /// Requests released whose answers the harness has not yet seen.
+    awaiting: usize,
     outcome: Option<&'static str>,
+}
+
+impl Progress {
+    fn holds(&self, request: Request) -> bool {
+        self.held.iter().any(|(r, _, _)| *r == request)
+    }
+}
+
+/// Landed intents by writer: `Recent` in `bucket.qnt`.
+type Recent = BTreeMap<String, Id>;
+
+/// One poll-and-combine round of a combining writer: `Comb` in `world.qnt`.
+#[derive(Clone, Default)]
+struct Round {
+    /// The ref as the poll read it: commit, version, landed intents.
+    head: Option<(Id, i64, Recent)>,
+    /// The writers whose intents the poll listed.
+    listed: Option<BTreeSet<String>>,
+    /// The commits the round stored, in the order stored.
+    batch: Vec<Hash>,
 }
 
 #[derive(Default)]
@@ -511,8 +577,13 @@ struct Writer {
     rechecking: bool,
     /// Ref reads that began an attempt.
     attempts: i64,
-    /// The ref as its last attempt read it: commit and version.
-    seen: Option<(Id, i64)>,
+    /// The ref as its last attempt read it: commit, version, landed intents.
+    seen: Option<(Id, i64, Recent)>,
+    /// Where it is on the combining path (`Intending` ..), once it has written its intent.
+    combining: Option<&'static str>,
+    /// Its intent's id and the time the scenario gave it.
+    intent: Option<(String, i64)>,
+    round: Round,
 }
 
 /// The collector's run, as read off its requests.
@@ -539,6 +610,8 @@ struct Harness {
     collector: Collector,
     names: HashMap<Hash, Id>,
     hashes: HashMap<Id, Hash>,
+    /// Intent ids by writer, and writers by intent id.
+    intent_writers: HashMap<String, String>,
     /// Each object's body as last seen, so a deleted one keeps it (`store.qnt` tombstones).
     bodies: Mutex<HashMap<String, RuntimeValue>>,
     /// Pages by key: the tree each holds.
@@ -547,11 +620,13 @@ struct Harness {
     ref_etags: Mutex<Vec<String>>,
     /// The commit each version of the ref named, oldest first.
     ref_commits: Mutex<Vec<Hash>>,
+    /// Each version's body.
+    ref_values: Mutex<Vec<RefValue>>,
 }
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        // Actors still held (a writer that went on to combine) are abandoned, not released.
+        // Actors still held (a scenario that ends mid-call) are abandoned, not released.
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
@@ -627,17 +702,18 @@ impl Harness {
         let key = format!("refs/{BRANCH}");
         let (data, etag) = self.object(&key)?.ok_or("the branch ref is gone")?;
         let value: RefValue = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-        Ok((value.commit, self.ref_version(&etag, Some(value.commit))))
+        Ok((value.commit, self.ref_version(&etag, Some(&value))))
     }
 
-    fn ref_version(&self, etag: &str, commit: Option<Hash>) -> i64 {
+    fn ref_version(&self, etag: &str, value: Option<&RefValue>) -> i64 {
         let mut etags = self.ref_etags.lock().unwrap();
         if let Some(i) = etags.iter().position(|e| e == etag) {
             return i as i64 + 1;
         }
         etags.push(etag.to_owned());
-        if let Some(c) = commit {
-            self.ref_commits.lock().unwrap().push(c);
+        if let Some(v) = value {
+            self.ref_commits.lock().unwrap().push(v.commit);
+            self.ref_values.lock().unwrap().push(v.clone());
         }
         etags.len() as i64
     }
@@ -665,6 +741,28 @@ impl Harness {
         Ok((ids, trees))
     }
 
+    /// The model name of the writer whose intent has `key` (`intents/<branch>/<id>.json`).
+    fn intent_writer(&self, id: &str) -> Result<String, String> {
+        let id = id
+            .rsplit('/')
+            .next()
+            .unwrap_or(id)
+            .trim_end_matches(".json");
+        self.intent_writers
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("intent {id} has no writer the scenario knows"))
+    }
+
+    /// A ref's landed intents as the model's `Recent`.
+    fn recent(&self, value: &RefValue) -> Result<Recent, String> {
+        value
+            .recent
+            .iter()
+            .map(|l| Ok((self.intent_writer(&l.intent)?, self.name(&l.commit)?)))
+            .collect()
+    }
+
     fn handle(&mut self, event: Event) -> Result<(), String> {
         match event {
             Event::Held {
@@ -675,24 +773,35 @@ impl Harness {
             } => {
                 if actor != GC {
                     let w = self.writer(&actor)?;
-                    if request == Request::ReadRef && !w.rechecking {
+                    if request == Request::ReadRef && !w.rechecking && w.combining.is_none() {
                         w.attempts += 1;
+                    }
+                    if request == Request::PutIntent {
+                        w.combining = Some("Intending");
                     }
                 }
                 let p = self.progress(&actor)?;
-                if let Some((was, _, _)) = &p.held {
-                    return Err(format!(
-                        "{actor} made a {request:?} request while one {was:?} was held"
-                    ));
+                if p.holds(request)
+                    && !matches!(
+                        request,
+                        Request::PutCommit | Request::GetIntent | Request::DeleteIntent
+                    )
+                {
+                    return Err(format!("{actor} made a second {request:?} request at once"));
                 }
-                p.held = Some((request, key, go));
+                p.held.push((request, key, go));
             }
             Event::Answered {
                 actor,
                 request,
                 key,
                 etag,
-            } => self.answered(&actor, request, &key, etag)?,
+                listed,
+            } => {
+                let p = self.progress(&actor)?;
+                p.awaiting = p.awaiting.saturating_sub(1);
+                self.answered(&actor, request, &key, etag, listed)?
+            }
             Event::Finished { actor, outcome } => {
                 if actor == GC {
                     self.collector = Collector::default();
@@ -710,6 +819,7 @@ impl Harness {
         request: Request,
         key: &str,
         etag: Option<String>,
+        listed: Vec<String>,
     ) -> Result<(), String> {
         match request {
             Request::ReadRef => {
@@ -727,31 +837,67 @@ impl Harness {
                     self.collector.marked = Some(self.reach(commit)?);
                     return Ok(());
                 }
+                // The ref as read: the version names the body, which only that version had.
                 let seen = match seen {
-                    Some((c, v)) => Some((self.name(&c)?, v)),
+                    Some((c, v)) => {
+                        let value = self.ref_values.lock().unwrap()[v as usize - 1].clone();
+                        Some((self.name(&c)?, v, self.recent(&value)?))
+                    }
                     None => None,
                 };
                 let w = self.writer(actor)?;
                 if w.rechecking {
                     w.rechecking = false;
+                } else if w.combining.is_some() {
+                    w.round.head = seen;
                 } else {
                     w.seen = seen;
                 }
+            }
+            Request::ListIntents => {
+                let writers = listed
+                    .iter()
+                    .map(|k| self.intent_writer(k))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                let w = self.writer(actor)?;
+                if w.combining.is_some() {
+                    w.round.listed = Some(writers);
+                }
+            }
+            Request::PutIntent => {
+                let id = key
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(key)
+                    .trim_end_matches(".json")
+                    .to_owned();
+                self.intent_writers.insert(id.clone(), actor.to_owned());
+                let w = self.writer(actor)?;
+                let at = w.intent.as_ref().map(|(_, at)| *at).unwrap_or(0);
+                w.intent = Some((id, at));
+                self.intents_in_order()?;
             }
             Request::PutCommit => {
                 let h = Hash::from_hex(key.trim_start_matches("commits/"))
                     .map_err(|e| e.to_string())?;
                 if !self.names.contains_key(&h) {
-                    let parent = self
+                    let c = self
                         .rt()
                         .block_on(self.observer.commit_obj(&h))
-                        .map_err(|e| e.to_string())?
-                        .parent
-                        .ok_or("a writer's commit has no parent")?;
+                        .map_err(|e| e.to_string())?;
+                    let parent = c.parent.ok_or("a writer's commit has no parent")?;
                     let mut id = self.name(&parent)?;
-                    id.push(actor.to_owned());
+                    // A combining round's commit is its intent writer's, not the uploader's.
+                    match c.meta.get("pail.intent") {
+                        Some(intent) => id.push(format!("{}+", self.intent_writer(intent)?)),
+                        None => id.push(actor.to_owned()),
+                    }
                     self.names.insert(h, id.clone());
                     self.hashes.insert(id, h);
+                }
+                let w = self.writer(actor)?;
+                if w.combining.is_some() && !w.round.batch.contains(&h) {
+                    w.round.batch.push(h);
                 }
             }
             Request::ListCommits => {
@@ -789,7 +935,8 @@ impl Harness {
                 self.collector.doomed_pages.remove(key);
             }
             Request::Swap
-            | Request::PutIntent
+            | Request::GetIntent
+            | Request::DeleteIntent
             | Request::PutLease
             | Request::ListLeases
             | Request::DeleteLease => {}
@@ -797,15 +944,54 @@ impl Harness {
         Ok(())
     }
 
-    /// Process requests until `actor` waits at its next one or has returned.
+    /// Intent ids sort by creation time; the model sorts intents by the time the scenario
+    /// gave them (`at`, ties broken by `RANK`). The scenario must give times in the order
+    /// the intents are made.
+    fn intents_in_order(&self) -> Result<(), String> {
+        let rank = |w: &str| {
+            ["alice", "bob", "carol", "dave"]
+                .iter()
+                .position(|n| *n == w)
+        };
+        let mut made: Vec<(&String, &str, i64)> = self
+            .writers
+            .iter()
+            .filter_map(|(n, w)| w.intent.as_ref().map(|(id, at)| (id, n.as_str(), *at)))
+            .collect();
+        made.sort();
+        let by_model: Vec<&str> = {
+            let mut m = made.clone();
+            m.sort_by_key(|(_, n, at)| (*at, rank(n)));
+            m.into_iter().map(|(_, n, _)| n).collect()
+        };
+        let by_id: Vec<&str> = made.into_iter().map(|(_, n, _)| n).collect();
+        if by_id != by_model {
+            return Err(format!(
+                "intents were made in the order {by_id:?}, but the scenario's times sort them {by_model:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Process requests until `actor` waits at a request or has returned.
     fn settle(&mut self, actor: &str) -> Result<(), String> {
+        self.settle_until(actor, |p| !p.held.is_empty())
+    }
+
+    /// Process requests until `ready` holds of `actor`'s progress, or it has returned.
+    fn settle_until(
+        &mut self,
+        actor: &str,
+        ready: impl Fn(&Progress) -> bool,
+    ) -> Result<(), String> {
         loop {
             let done = if actor == GC {
                 !self.collector.running
             } else {
                 self.writer(actor)?.progress.outcome.is_some()
             };
-            if self.progress(actor)?.held.is_some() || done {
+            let p = self.progress(actor)?;
+            if p.awaiting == 0 && (ready(p) || done) {
                 return Ok(());
             }
             let event = self
@@ -817,7 +1003,7 @@ impl Harness {
     }
 
     /// Let `actor`'s held request through, which the model says is `expected` (and, if
-    /// given, on `key`).
+    /// given, on `key`), waiting for it if the actor makes it alongside another.
     fn release(
         &mut self,
         actor: &str,
@@ -825,26 +1011,87 @@ impl Harness {
         key: Option<&str>,
         how: Delivery,
     ) -> Result<(), String> {
+        self.release_one(actor, expected, key, how)?;
+        self.settle(actor)
+    }
+
+    fn release_one(
+        &mut self,
+        actor: &str,
+        expected: Request,
+        key: Option<&str>,
+        how: Delivery,
+    ) -> Result<(), String> {
+        let matches = |r: &Request, k: &String| *r == expected && key.is_none_or(|key| key == k);
+        self.settle_until(actor, |p| p.held.iter().any(|(r, k, _)| matches(r, k)))?;
         let p = self.progress(actor)?;
-        let Some((request, held_key, go)) = p.held.take() else {
+        let Some(i) = p.held.iter().position(|(r, k, _)| matches(r, k)) else {
+            let held: Vec<_> = p
+                .held
+                .iter()
+                .map(|(r, k, _)| format!("{r:?} {k}"))
+                .collect();
             return Err(format!(
-                "the model's next step for {actor} is {expected:?}, but it is making no request \
-                 (outcome {:?})",
+                "the model's next step for {actor} is {expected:?} {key:?}, but it is waiting at \
+                 {held:?} (outcome {:?})",
                 p.outcome
             ));
         };
-        if request != expected || key.is_some_and(|k| k != held_key) {
-            return Err(format!(
-                "the model's next step for {actor} is {expected:?} {key:?}, but its next request \
-                 is {request:?} {held_key}"
-            ));
-        }
-        if actor != GC && !matches!(how, Delivery::Answered) {
+        if actor != GC && expected == Request::Swap && !matches!(how, Delivery::Answered) {
             self.writer(actor)?.rechecking = true;
         }
-        go.send(how)
-            .map_err(|_| format!("{actor} stopped waiting"))?;
-        self.settle(actor)
+        self.send(actor, i, how)
+    }
+
+    /// Let `actor`'s `i`th held request through.
+    fn send(&mut self, actor: &str, i: usize, how: Delivery) -> Result<(), String> {
+        let p = self.progress(actor)?;
+        let (_, _, go) = p.held.remove(i);
+        p.awaiting += 1;
+        go.send(how).map_err(|_| format!("{actor} stopped waiting"))
+    }
+
+    /// Release every request of `kinds` `actor` makes, as it makes them, until it waits at
+    /// another kind or returns.
+    fn drain(&mut self, actor: &str, kinds: &[Request]) -> Result<(), String> {
+        loop {
+            self.settle(actor)?;
+            let p = self.progress(actor)?;
+            let Some(i) = p.held.iter().position(|(r, _, _)| kinds.contains(r)) else {
+                return Ok(());
+            };
+            self.send(actor, i, Delivery::Answered)?;
+        }
+    }
+
+    /// `actor` starts a poll: `NO_COMB`.
+    fn new_round(&mut self, actor: &str) -> Result<(), String> {
+        let w = self.writer(actor)?;
+        w.combining = Some("Polling");
+        w.round = Round::default();
+        Ok(())
+    }
+
+    fn returned_or_new_round(&mut self, actor: &str) -> Result<(), String> {
+        if self.writer(actor)?.progress.outcome.is_some() {
+            Ok(())
+        } else {
+            self.new_round(actor)
+        }
+    }
+
+    /// After a poll request: once both are answered, the writer withdraws (landed or
+    /// conflicted) or goes on deciding.
+    fn polled(&mut self, actor: &str) -> Result<(), String> {
+        let w = self.writer(actor)?;
+        if w.round.head.is_some() && w.round.listed.is_some() {
+            w.combining = Some(if w.progress.holds(Request::DeleteIntent) {
+                "Withdrawing"
+            } else {
+                "Deciding"
+            });
+        }
+        Ok(())
     }
 
     fn actor_arg(arguments: &[RuntimeValue]) -> Result<String, String> {
@@ -1059,18 +1306,29 @@ impl Harness {
             let (_, etag) = self
                 .object(&format!("refs/{branch}"))?
                 .ok_or("the ref vanished")?;
-            let body = record([("commit", id_value(&self.name(&value.commit)?))]);
+            let body = record([
+                ("commit", id_value(&self.name(&value.commit)?)),
+                ("recent", self.recent_value(&self.recent(&value)?)),
+            ]);
             refs.insert(
                 RuntimeValue::Text(branch),
                 versioned(body, self.ref_version(&etag, None), true),
             );
         }
+        let intents = self.space(&format!("intents/{BRANCH}/"), |name, data| {
+            let writer = self.intent_writer(name)?;
+            Ok((
+                RuntimeValue::Text(writer.clone()),
+                self.intent_value(&writer, data)?,
+            ))
+        })?;
         let (young_pages, young_commits) = self.young()?;
         Ok(record([
             ("pages", RuntimeValue::Map(pages)),
             ("commits", RuntimeValue::Map(commits)),
             ("refs", RuntimeValue::Map(refs)),
             ("locks", self.locks_value()?),
+            ("intents", RuntimeValue::Map(intents)),
             (
                 "young",
                 record([
@@ -1081,46 +1339,168 @@ impl Harness {
         ]))
     }
 
+    fn recent_value(&self, recent: &Recent) -> RuntimeValue {
+        RuntimeValue::Map(
+            recent
+                .iter()
+                .map(|(w, id)| (RuntimeValue::Text(w.clone()), id_value(id)))
+                .collect(),
+        )
+    }
+
+    /// An intent as the model's `Intent`: its base, its delta decoded from the leaf page it
+    /// carries, and the time the scenario gave it.
+    fn intent_value(&self, writer: &str, data: &Bytes) -> Result<RuntimeValue, String> {
+        #[derive(serde::Deserialize)]
+        struct Stored {
+            base: Option<Hash>,
+            puts: String,
+        }
+        let i: Stored = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+        let page = hex::decode(&i.puts).map_err(|e| e.to_string())?;
+        let Page::Leaf(entries) = decode_page(&page).map_err(|e| e.to_string())? else {
+            return Err(format!("{writer}'s intent carries no entry list"));
+        };
+        let data = self
+            .rt()
+            .block_on(self.observer.read_files(&entries))
+            .map_err(|e| e.to_string())?;
+        let delta: Tree = entries
+            .iter()
+            .zip(data)
+            .map(|(e, d)| (e.path.clone(), String::from_utf8_lossy(&d).into_owned()))
+            .collect();
+        let base = i.base.ok_or(format!("{writer}'s intent has no base"))?;
+        let at = self
+            .writers
+            .get(writer)
+            .and_then(|w| w.intent.as_ref())
+            .map(|(_, at)| *at)
+            .ok_or(format!("{writer} has no intent"))?;
+        Ok(record([
+            ("base", id_value(&self.name(&base)?)),
+            ("delta", tree_value(&delta)),
+            ("at", RuntimeValue::Int(at)),
+        ]))
+    }
+
+    fn ref_seen_value(&self, seen: &Option<(Id, i64, Recent)>, fallback: &Id) -> RuntimeValue {
+        let (commit, version) = seen
+            .as_ref()
+            .map(|(c, v, _)| (c.clone(), *v))
+            .unwrap_or((fallback.clone(), 0));
+        record([
+            ("commit", id_value(&commit)),
+            ("version", RuntimeValue::Int(version)),
+        ])
+    }
+
+    /// A combining writer's round as the model's `Comb`.
+    fn comb_value(&self, name: &str, w: &Writer) -> Result<RuntimeValue, String> {
+        let root: Id = vec!["root".to_owned()];
+        let r = &w.round;
+        let recent = r
+            .head
+            .as_ref()
+            .map(|(_, _, rc)| rc.clone())
+            .unwrap_or_default();
+        let mut entries = Vec::new();
+        let mut tip = root.clone();
+        let mut longest = 0;
+        for h in &r.batch {
+            let id = self.name(h)?;
+            let commit = self.commit_value(h)?;
+            let ancestors = field(&commit, "ancestors")?.clone();
+            let depth = match &ancestors {
+                RuntimeValue::Set(a) => a.len(),
+                _ => 0,
+            };
+            if depth >= longest {
+                (longest, tip) = (depth, id.clone());
+            }
+            let intent = id
+                .last()
+                .map(|a| a.trim_end_matches('+').to_owned())
+                .unwrap_or_default();
+            entries.push(record([
+                ("intent", RuntimeValue::Text(intent)),
+                ("commit", id_value(&id)),
+                ("tree", field(&commit, "tree")?.clone()),
+                ("ancestors", ancestors),
+            ]));
+        }
+        // Withdrawing: landed (its intent in `recent`), or else conflicted.
+        let then = match w.combining {
+            Some("Withdrawing") | Some("Done") if r.head.is_some() => {
+                if recent.contains_key(name) {
+                    "Published"
+                } else {
+                    "Conflicted"
+                }
+            }
+            _ => "Pending",
+        };
+        Ok(record([
+            ("polledRef", RuntimeValue::Bool(r.head.is_some())),
+            ("head", self.ref_seen_value(&r.head, &root)),
+            ("recent", self.recent_value(&recent)),
+            ("polledList", RuntimeValue::Bool(r.listed.is_some())),
+            (
+                "listed",
+                set(r
+                    .listed
+                    .iter()
+                    .flatten()
+                    .map(|w| RuntimeValue::Text(w.clone()))),
+            ),
+            ("batch", set(entries)),
+            ("tip", id_value(&tip)),
+            ("then", RuntimeValue::Text(then.to_owned())),
+        ]))
+    }
+
     fn writer_value(&self, name: &str, w: &Writer) -> Result<RuntimeValue, String> {
         let root: Id = vec!["root".to_owned()];
-        let held = w.progress.held.as_ref().map(|(r, _, _)| *r);
-        let phase = match (&w.progress.outcome, held, w.base.is_some()) {
+        let p = &w.progress;
+        let phase = match (&p.outcome, w.combining, w.base.is_some()) {
             (_, _, false) => "Idle",
-            (_, Some(Request::PutIntent), _) | (Some(_), _, _) => "Done",
-            (None, Some(Request::PutLease), _) => "Leasing",
-            (None, Some(Request::ListLeases), _) => "CheckingLeases",
-            (None, Some(Request::ReadRef), _) if w.rechecking => "Rechecking",
-            (None, Some(Request::ReadRef), _) => "Reading",
-            (None, Some(Request::PutCommit), _) => "Uploading",
-            (None, Some(Request::Swap), _) => "Swapping",
-            (None, other, true) => return Err(format!("{name} is between requests ({other:?})")),
+            (Some(_), _, _) => "Done",
+            (None, Some(phase), _) => phase,
+            (None, None, true) if p.holds(Request::PutLease) => "Leasing",
+            (None, None, true) if p.holds(Request::ListLeases) => "CheckingLeases",
+            (None, None, true) if p.holds(Request::ReadRef) && w.rechecking => "Rechecking",
+            (None, None, true) if p.holds(Request::ReadRef) => "Reading",
+            (None, None, true) if p.holds(Request::PutCommit) || p.holds(Request::ListIntents) => {
+                "Uploading"
+            }
+            (None, None, true) if p.holds(Request::Swap) => "Swapping",
+            (None, None, true) => {
+                let held: Vec<_> = p.held.iter().map(|(r, _, _)| *r).collect();
+                return Err(format!("{name} is between requests ({held:?})"));
+            }
         };
-        let outcome = match (&w.progress.outcome, held) {
-            (Some(o), _) => *o,
-            (None, Some(Request::PutIntent)) => "Combining",
-            (None, _) => "Pending",
-        };
+        let outcome = p.outcome.unwrap_or("Pending");
         let base = w.base.clone().unwrap_or_else(|| root.clone());
-        let (seen, seen_version) = w.seen.clone().unwrap_or((base.clone(), 0));
+        let seen_recent = w
+            .seen
+            .as_ref()
+            .map(|(_, _, r)| r.clone())
+            .unwrap_or_default();
         Ok(record([
             ("base", id_value(&base)),
             ("delta", tree_value(&w.delta)),
             ("phase", RuntimeValue::Text(phase.to_owned())),
-            (
-                "seen",
-                record([
-                    ("commit", id_value(&seen)),
-                    ("version", RuntimeValue::Int(seen_version)),
-                ]),
-            ),
+            ("seen", self.ref_seen_value(&w.seen, &base)),
+            ("seenRecent", self.recent_value(&seen_recent)),
             ("attempt", RuntimeValue::Int(w.attempts.max(1))),
+            ("comb", self.comb_value(name, w)?),
             ("outcome", RuntimeValue::Text(outcome.to_owned())),
         ]))
     }
 
     fn collector_value(&self) -> Result<RuntimeValue, String> {
         let c = &self.collector;
-        let held = c.progress.held.as_ref().map(|(r, _, _)| *r);
+        let held = c.progress.held.first().map(|(r, _, _)| *r);
         let phase = match (c.running, held) {
             (false, _) | (true, Some(Request::PutLease)) => "GcIdle",
             (true, Some(Request::ListLeases)) => "GcDraining",
@@ -1222,10 +1602,12 @@ impl generated::Implementation for Harness {
             collector: Collector::default(),
             names: HashMap::new(),
             hashes: HashMap::new(),
+            intent_writers: HashMap::new(),
             bodies: Mutex::default(),
             trees: Mutex::default(),
             ref_etags: Mutex::default(),
             ref_commits: Mutex::default(),
+            ref_values: Mutex::default(),
         };
         let bucket = field(initial, "bucket")?;
         let RuntimeValue::Map(refs) = field(bucket, "refs")? else {
@@ -1332,9 +1714,90 @@ impl generated::Implementation for Harness {
         self.release(&c, Request::Swap, None, how)
     }
 
+    /// The commit and its page, and the intent listing made alongside them.
     fn upload(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
         let c = Harness::actor_arg(arguments)?;
+        self.release_one(&c, Request::ListIntents, None, Delivery::Answered)?;
         self.release(&c, Request::PutCommit, None, Delivery::Answered)
+    }
+
+    fn intend(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        let at = match arguments.get(1) {
+            Some(RuntimeValue::Int(at)) => *at,
+            other => return Err(format!("intend takes a time, got {other:?}")),
+        };
+        self.writer(&c)?.intent = Some((String::new(), at));
+        self.release(&c, Request::PutIntent, None, Delivery::Answered)?;
+        self.new_round(&c)
+    }
+
+    fn poll_ref(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)?;
+        self.polled(&c)
+    }
+
+    fn poll_list(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::ListIntents, None, Delivery::Answered)?;
+        self.polled(&c)
+    }
+
+    /// The writer has decided to poll again (it is not the oldest).
+    fn wait(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        let p = &self.writer(&c)?.progress;
+        if !(p.holds(Request::ReadRef) || p.holds(Request::ListIntents)) {
+            return Err(format!("{c} is not polling again"));
+        }
+        self.new_round(&c)
+    }
+
+    /// The intents read and the batch stored: every intent read and commit upload it makes.
+    fn gather(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.drain(&c, &[Request::GetIntent, Request::PutCommit])?;
+        if self.writer(&c)?.progress.holds(Request::Swap) {
+            self.writer(&c)?.combining = Some("BatchSwapping");
+            Ok(())
+        } else {
+            self.new_round(&c)
+        }
+    }
+
+    fn batch_swap(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        let how = Delivery::of(arguments.get(1).ok_or("batchSwap takes a Delivery")?)?;
+        self.release(&c, Request::Swap, None, how)?;
+        let w = self.writer(&c)?;
+        if w.rechecking {
+            w.combining = Some("BatchRechecking");
+            Ok(())
+        } else if w.progress.holds(Request::DeleteIntent) {
+            w.combining = Some("Cleaning");
+            Ok(())
+        } else {
+            self.new_round(&c)
+        }
+    }
+
+    /// The batch's intents deleted, all at once.
+    fn cleanup(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.drain(&c, &[Request::DeleteIntent])?;
+        self.returned_or_new_round(&c)
+    }
+
+    fn batch_recheck(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)?;
+        self.returned_or_new_round(&c)
+    }
+
+    fn withdraw(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::DeleteIntent, None, Delivery::Answered)
     }
 
     fn gc_lease(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {

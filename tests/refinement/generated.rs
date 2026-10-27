@@ -11,11 +11,31 @@ use quint_refinements::{
 const TRACES: &str = include_str!("../../verify/quint-refinements.json");
 
 quint_ownership! {
+    const BATCH_RECHECK = {
+        primitive: "scenarios.batchRecheck",
+        refines: ["batchRecheck"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const BATCH_SWAP = {
+        primitive: "scenarios.batchSwap",
+        refines: ["batchSwap"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
     const BEGIN = {
         primitive: "scenarios.begin",
         refines: ["begin"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -25,7 +45,27 @@ quint_ownership! {
         primitive: "scenarios.checkLeases",
         refines: ["checkLeases"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const CLEANUP = {
+        primitive: "scenarios.cleanup",
+        refines: ["cleanup"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const GATHER = {
+        primitive: "scenarios.gather",
+        refines: ["gather"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -35,7 +75,7 @@ quint_ownership! {
         primitive: "scenarios.gcCheckLeases",
         refines: ["gcCheckLeases"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -45,7 +85,7 @@ quint_ownership! {
         primitive: "scenarios.gcDeleteCommit",
         refines: ["gcDeleteCommit"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -55,7 +95,7 @@ quint_ownership! {
         primitive: "scenarios.gcDeletePage",
         refines: ["gcDeletePage"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -65,7 +105,7 @@ quint_ownership! {
         primitive: "scenarios.gcDone",
         refines: ["gcDone"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -75,7 +115,7 @@ quint_ownership! {
         primitive: "scenarios.gcLease",
         refines: ["gcLease"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -85,7 +125,7 @@ quint_ownership! {
         primitive: "scenarios.gcListCommits",
         refines: ["gcListCommits"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -95,7 +135,7 @@ quint_ownership! {
         primitive: "scenarios.gcListPages",
         refines: ["gcListPages"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -105,7 +145,7 @@ quint_ownership! {
         primitive: "scenarios.gcMark",
         refines: ["gcMark"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -115,7 +155,17 @@ quint_ownership! {
         primitive: "scenarios.graceElapses",
         refines: ["graceElapses"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const INTEND = {
+        primitive: "scenarios.intend",
+        refines: ["intend"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -125,7 +175,27 @@ quint_ownership! {
         primitive: "scenarios.lease",
         refines: ["lease"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const POLL_LIST = {
+        primitive: "scenarios.pollList",
+        refines: ["pollList"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const POLL_REF = {
+        primitive: "scenarios.pollRef",
+        refines: ["pollRef"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -135,7 +205,7 @@ quint_ownership! {
         primitive: "scenarios.readRef",
         refines: ["readRef"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -145,7 +215,7 @@ quint_ownership! {
         primitive: "scenarios.recheck",
         refines: ["recheck"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -155,7 +225,7 @@ quint_ownership! {
         primitive: "scenarios.swap",
         refines: ["swap"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -165,7 +235,27 @@ quint_ownership! {
         primitive: "scenarios.upload",
         refines: ["upload"],
         aliases: [],
-        observations: ["path:Rec.commit", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.commit", "path:get.body.tree", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.version", "path:ite.outcome", "path:ite.phase", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.bucket", "path:with.bucket.locks", "path:with.clients"],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const WAIT = {
+        primitive: "scenarios.wait",
+        refines: ["wait"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
+    const WITHDRAW = {
+        primitive: "scenarios.withdraw",
+        refines: ["withdraw"],
+        aliases: [],
+        observations: ["path:Rec.commit", "path:acc.ancestors", "path:acc.batch", "path:acc.commits", "path:acc.pages", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.commits", "path:acc.young.pages", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.recent", "path:get.body.tree", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.live", "path:get.outcome", "path:get.phase", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenRecent", "path:get.version", "path:ite.phase", "path:r.batch", "path:r.tip", "path:state.bucket", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.pages", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.commits", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedCommits", "path:state.collector.doomedPages", "path:state.collector.liveCommits", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.commits", "path:state.collector.spared.pages", "path:state.history", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.clients", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.delta", "path:with.phase"],
         retrieve: ["name:state"],
     };
 }
@@ -174,8 +264,12 @@ quint_ownership! {
 pub const OWNERSHIP: OwnershipTable = OwnershipTable {
     owner: "scenarios-generated-refinement",
     descriptors: &[
+        BATCH_RECHECK,
+        BATCH_SWAP,
         BEGIN,
         CHECK_LEASES,
+        CLEANUP,
+        GATHER,
         GC_CHECK_LEASES,
         GC_DELETE_COMMIT,
         GC_DELETE_PAGE,
@@ -185,11 +279,16 @@ pub const OWNERSHIP: OwnershipTable = OwnershipTable {
         GC_LIST_PAGES,
         GC_MARK,
         GRACE_ELAPSES,
+        INTEND,
         LEASE,
+        POLL_LIST,
+        POLL_REF,
         READ_REF,
         RECHECK,
         SWAP,
         UPLOAD,
+        WAIT,
+        WITHDRAW,
     ],
 };
 
@@ -198,21 +297,31 @@ pub const RETRIEVE: &[&str] = &[
     "name:ALICE_1",
     "name:ALICE_2",
     "name:ALICE_A",
+    "name:ALICE_C",
     "name:BOB_1",
     "name:BOB_A",
     "name:BOB_B",
     "name:BRANCH",
+    "name:CAROL_1",
+    "name:CAROL_B",
     "name:Conflicted",
+    "name:DAVE_A",
+    "name:DAVE_B",
     "name:DIRECT_ATTEMPTS",
     "name:GC",
     "name:GC_IDLE",
     "name:GcDraining",
     "name:IDLE",
+    "name:INTENT_NAME",
+    "name:Intending",
     "name:Leasing",
+    "name:NO_COMB",
     "name:Published",
+    "name:RANK",
     "name:ROOT",
     "name:ROOT_TREE",
     "name:Unknown",
+    "name:Withdrawing",
     "name:branchIsComplete",
     "name:state",
     "operator:Map",
@@ -230,6 +339,7 @@ pub const RETRIEVE: &[&str] = &[
     "operator:field",
     "operator:filter",
     "operator:fold",
+    "operator:forall",
     "operator:get",
     "operator:iadd",
     "operator:ilt",
@@ -241,15 +351,47 @@ pub const RETRIEVE: &[&str] = &[
     "operator:or",
     "operator:put",
     "operator:set",
+    "operator:size",
     "operator:union",
     "operator:with",
     "path:Rec.commit",
+    "path:acc.ancestors",
+    "path:acc.batch",
+    "path:acc.commits",
+    "path:acc.pages",
+    "path:acc.tip",
+    "path:acc.tree",
+    "path:acc.young",
+    "path:acc.young.commits",
+    "path:acc.young.pages",
+    "path:cl.comb",
+    "path:cl.comb.batch",
+    "path:cl.comb.head",
+    "path:cl.comb.head.commit",
+    "path:cl.comb.head.version",
+    "path:cl.comb.listed",
+    "path:cl.comb.recent",
+    "path:cl.comb.then",
+    "path:cl.comb.tip",
+    "path:e.ancestors",
+    "path:e.commit",
+    "path:e.intent",
+    "path:e.tree",
     "path:get.attempt",
     "path:get.base",
     "path:get.body",
     "path:get.body.ancestors",
+    "path:get.body.at",
+    "path:get.body.base",
     "path:get.body.commit",
+    "path:get.body.delta",
+    "path:get.body.recent",
     "path:get.body.tree",
+    "path:get.comb",
+    "path:get.comb.listed",
+    "path:get.comb.polledList",
+    "path:get.comb.polledRef",
+    "path:get.comb.recent",
     "path:get.delta",
     "path:get.live",
     "path:get.outcome",
@@ -257,11 +399,14 @@ pub const RETRIEVE: &[&str] = &[
     "path:get.seen",
     "path:get.seen.commit",
     "path:get.seen.version",
+    "path:get.seenRecent",
     "path:get.version",
-    "path:ite.outcome",
     "path:ite.phase",
+    "path:r.batch",
+    "path:r.tip",
     "path:state.bucket",
     "path:state.bucket.commits",
+    "path:state.bucket.intents",
     "path:state.bucket.locks",
     "path:state.bucket.pages",
     "path:state.bucket.refs",
@@ -279,9 +424,18 @@ pub const RETRIEVE: &[&str] = &[
     "path:state.collector.spared.commits",
     "path:state.collector.spared.pages",
     "path:state.history",
+    "path:with.base",
     "path:with.bucket",
     "path:with.bucket.locks",
     "path:with.clients",
+    "path:with.comb",
+    "path:with.comb.head",
+    "path:with.comb.head.commit",
+    "path:with.comb.polledList",
+    "path:with.comb.polledRef",
+    "path:with.comb.recent",
+    "path:with.delta",
+    "path:with.phase",
 ];
 
 /// Domain implementation connected to the generated Quint scenarios.
@@ -304,11 +458,23 @@ pub trait Implementation: Sized {
         FixtureTable::from_artifact("scenarios", artifact).map_err(|error| error.to_string())
     }
 
+    /// Execute Quint action `batchRecheck` with its generated arguments.
+    fn batch_recheck(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `batchSwap` with its generated arguments.
+    fn batch_swap(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
     /// Execute Quint action `begin` with its generated arguments.
     fn begin(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 
     /// Execute Quint action `checkLeases` with its generated arguments.
     fn check_leases(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `cleanup` with its generated arguments.
+    fn cleanup(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `gather` with its generated arguments.
+    fn gather(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 
     /// Execute Quint action `gcCheckLeases` with its generated arguments.
     fn gc_check_leases(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
@@ -337,8 +503,17 @@ pub trait Implementation: Sized {
     /// Execute Quint action `graceElapses` with its generated arguments.
     fn grace_elapses(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 
+    /// Execute Quint action `intend` with its generated arguments.
+    fn intend(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
     /// Execute Quint action `lease` with its generated arguments.
     fn lease(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `pollList` with its generated arguments.
+    fn poll_list(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `pollRef` with its generated arguments.
+    fn poll_ref(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 
     /// Execute Quint action `readRef` with its generated arguments.
     fn read_ref(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
@@ -351,6 +526,12 @@ pub trait Implementation: Sized {
 
     /// Execute Quint action `upload` with its generated arguments.
     fn upload(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `wait` with its generated arguments.
+    fn wait(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
+    /// Execute Quint action `withdraw` with its generated arguments.
+    fn withdraw(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 }
 
 /// Result of refining one generated Quint run.
@@ -378,6 +559,33 @@ impl<I: Implementation> PrimitiveDriver for Driver<I> {
         actions: &[ResolvedAction],
     ) -> Result<Vec<Self::Evidence>, String> {
         match primitive {
+            "scenarios.batchRecheck" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "batchRecheck expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "batchRecheck" {
+                    return Err(format!(
+                        "batchRecheck primitive cannot refine {}",
+                        action.name
+                    ));
+                }
+                self.implementation.batch_recheck(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.batchSwap" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "batchSwap expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "batchSwap" {
+                    return Err(format!("batchSwap primitive cannot refine {}", action.name));
+                }
+                self.implementation.batch_swap(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
             "scenarios.begin" => {
                 let [action] = actions else {
                     return Err(format!("begin expects one Quint action; got {actions:?}"));
@@ -401,6 +609,26 @@ impl<I: Implementation> PrimitiveDriver for Driver<I> {
                     ));
                 }
                 self.implementation.check_leases(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.cleanup" => {
+                let [action] = actions else {
+                    return Err(format!("cleanup expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "cleanup" {
+                    return Err(format!("cleanup primitive cannot refine {}", action.name));
+                }
+                self.implementation.cleanup(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.gather" => {
+                let [action] = actions else {
+                    return Err(format!("gather expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "gather" {
+                    return Err(format!("gather primitive cannot refine {}", action.name));
+                }
+                self.implementation.gather(&action.arguments)?;
                 Ok(vec![self.implementation.snapshot()])
             }
             "scenarios.gcCheckLeases" => {
@@ -523,6 +751,16 @@ impl<I: Implementation> PrimitiveDriver for Driver<I> {
                 self.implementation.grace_elapses(&action.arguments)?;
                 Ok(vec![self.implementation.snapshot()])
             }
+            "scenarios.intend" => {
+                let [action] = actions else {
+                    return Err(format!("intend expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "intend" {
+                    return Err(format!("intend primitive cannot refine {}", action.name));
+                }
+                self.implementation.intend(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
             "scenarios.lease" => {
                 let [action] = actions else {
                     return Err(format!("lease expects one Quint action; got {actions:?}"));
@@ -531,6 +769,28 @@ impl<I: Implementation> PrimitiveDriver for Driver<I> {
                     return Err(format!("lease primitive cannot refine {}", action.name));
                 }
                 self.implementation.lease(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.pollList" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "pollList expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "pollList" {
+                    return Err(format!("pollList primitive cannot refine {}", action.name));
+                }
+                self.implementation.poll_list(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.pollRef" => {
+                let [action] = actions else {
+                    return Err(format!("pollRef expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "pollRef" {
+                    return Err(format!("pollRef primitive cannot refine {}", action.name));
+                }
+                self.implementation.poll_ref(&action.arguments)?;
                 Ok(vec![self.implementation.snapshot()])
             }
             "scenarios.readRef" => {
@@ -571,6 +831,28 @@ impl<I: Implementation> PrimitiveDriver for Driver<I> {
                     return Err(format!("upload primitive cannot refine {}", action.name));
                 }
                 self.implementation.upload(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.wait" => {
+                let [action] = actions else {
+                    return Err(format!("wait expects one Quint action; got {actions:?}"));
+                };
+                if action.name != "wait" {
+                    return Err(format!("wait primitive cannot refine {}", action.name));
+                }
+                self.implementation.wait(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.withdraw" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "withdraw expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "withdraw" {
+                    return Err(format!("withdraw primitive cannot refine {}", action.name));
+                }
+                self.implementation.withdraw(&action.arguments)?;
                 Ok(vec![self.implementation.snapshot()])
             }
             other => Err(format!("unknown generated primitive {other}")),

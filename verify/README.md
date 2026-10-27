@@ -13,11 +13,12 @@ may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new
 ```text
 store.qnt     any object store: versioned objects, create / CAS / put / delete, lost requests
    ▲
-bucket.qnt    pail's layout in it: pages/, commits/ (create-once), refs/ (CAS), locks/
+bucket.qnt    pail's layout in it: pages/, commits/ (create-once), refs/ (CAS), locks/, intents/
    ▲
 world.qnt     the shared state: bucket, writers, the collector, ghosts
    ▲
 publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, expiry)
+combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
 gc.qnt        gc steps (exclusive lease, drain, mark, list, delete, release)
    ▲
 pail.qnt      the steps as actions, any interleaving (`step`), the properties
@@ -45,6 +46,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `bucket.qnt` | Pail's spaces in the store and the operators on them (`uploaded`, `refSwapped`, `leased`) |
 | `world.qnt` | The state every feature acts on (`State`, `Client`, `Collector`) |
 | `publish.qnt` | Writers running `commit_opts`, one store request per step |
+| `combine.qnt` | Writers that lost their direct attempts, running `commit_combining` |
 | `gc.qnt` | The collector running `gc::gc_with`, one store request per step |
 | `pail.qnt` | Actions, `step`, and the properties (`safety`) |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
@@ -61,7 +63,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 ```sh
 cd verify && npm ci
 npm test            # scenarios pass in Quint
-npm run simulate    # random interleavings against `safety`
+npm run simulate    # random interleavings against `safety` (`step`, then writers only: `contendStep`)
 npm run compile     # after editing any .qnt file
 cd .. && cargo test --release --test refinement --test store_refinement --test policy_refinement
 # GCS runs in `cargo test` against the in-process emulator (src/gcs_emulator.rs); as a process:
@@ -146,6 +148,17 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `swap(c, Answered)` | `c`'s next conditional `PUT refs/main`, answered |
 | `swap(c, Lost)` | that PUT performed, its reply replaced by an error |
 | `swap(c, Dropped)` | that PUT failed without reaching the bucket |
+| action `upload(c)` (also) | the `LIST intents/main/` made with the upload: pending intents send `c` to `Intending` |
+| action `intend(c, at)` | `c`'s `PUT intents/main/<id>.json`; `at` orders it (the scenario's times must follow creation order) |
+| action `pollRef(c)` / `pollList(c)` | the ref read and intent listing of a poll, made together, released in either order |
+| action `wait(c)` | `c` polls again without combining (not the oldest intent) |
+| action `gather(c, vanished)` | the GETs of the other pending intents, then the batch's commit uploads |
+| action `batchSwap(c, d)` | the batch's conditional `PUT refs/main` |
+| action `cleanup(c)` | the DELETEs of the batch's intents |
+| action `batchRecheck(c)` | the ref read after an unanswered batch swap |
+| action `withdraw(c)` | `c`'s DELETE of its own intent |
+| `INTENT_NAME` (`alice+`) | a round's commit for an intent: its parent's name and the intent's writer (`pail.intent`) |
+| `Comb` | the poll's ref read and listing, and the commits the round stored |
 | action `recheck(c)` | the ref read after an unanswered swap |
 | `gcListCommits` / `gcListPages` | gc's listing of `commits/` / `pages/` |
 | `gcDeleteCommit(id)` / `gcDeletePage(t)` | gc's next DELETE, which must be of that object |
@@ -160,11 +173,14 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | `outcome` | what `commit` returned: Ok, `ConflictError`, another error |
 
 Every actor is a real `Repo` behind a gate (`Gate` in `tests/refinement.rs`) that holds the
-requests above until the scenario releases them; everything else (commit reads, intent
-listings, writers' lease releases) passes straight through. After each action the harness
-waits until the released actor is held at its next request or has returned, then compares
-the whole state: pages, commits, ref, leases and young objects; each writer's phase,
-attempt, last read and outcome; the collector's phase, marks and doomed objects. Deleted
+requests above until the scenario releases them; everything else (commit and page reads,
+writers' lease releases) passes straight through. A writer makes some requests together
+(an upload and a listing; a poll's ref read and listing; a round's uploads or deletes), so
+it may wait at several at once. After each action the harness waits until every released
+request is answered and the actor is held again or has returned, then compares
+the whole state: pages, commits, ref (with `recent`), leases, intents and young objects;
+each writer's phase, attempt, last read, combining round and outcome; the collector's
+phase, marks and doomed objects. Deleted
 objects map to `store.qnt` tombstones.
 
 ## What it found
@@ -180,14 +196,29 @@ objects map to `store.qnt` tombstones.
    writers now hold a shared lease and gc an exclusive one (`src/lease.rs`):
    `gcWaitsForAWriterReusingAnOldPageRun` is the race, refining with gc waiting.
 
+## Combining (`combine.qnt`)
+
+A writer that loses both direct attempts (or whose upload finds intents pending) writes an
+intent and polls. Whoever combines lands every pending intent in one swap, oldest first,
+skipping any that conflicts with what lands before it, and records each in the ref's
+`recent`. New property `recentIsTruthful`: each landed intent names a commit on the branch
+made of it. `publishedIsOnBranch`, `conflictedHasNothingOnBranch` and `landsAtMostOnce`
+now cover combined commits.
+
+- `quint run --step=contendStep` (writers only: no crashes, gc, give-ups) reaches combining;
+  `step` rarely gets a writer through two lost races. 100,000 contended runs: no violation.
+- Scenarios: `combineAloneRun`, `joinedBatchRun` (a writer joins, waits, finds its intent
+  landed), `conflictSkippedRun`, `batchSwapLostRun`.
+- Simplifications: any writer may combine at any time (the stall takeover is by time);
+  `INTENT_MAX_AGE` and `RECENT_MAX` are never reached; reading the intents and storing the
+  batch are one step.
+
 ## Not modelled yet
 
-1. Combining under contention (intents): a client that loses every direct attempt stops as
-   `Combining` (holding its lease).
-2. `land --stack`, rewrites and epochs (`rewrite_ref`), successor maps, reflog roots.
-3. Packs and chunks (files are inline in the model's trees).
-4. Known heads (the fast path that skips the first ref read).
-5. Lease timing: a live holder is assumed to refresh within the lease's lifetime
+1. `land --stack`, rewrites and epochs (`rewrite_ref`), successor maps, reflog roots.
+2. Packs and chunks (files are inline in the model's trees).
+3. Known heads (the fast path that skips the first ref read).
+4. Lease timing: a live holder is assumed to refresh within the lease's lifetime
    (`Lease::check` refuses a ref swap otherwise); only dead holders' leases expire.
 
 ## Notes
