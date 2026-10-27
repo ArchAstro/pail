@@ -1,226 +1,147 @@
 // -*- mode: Bluespec; -*-
 /// Publishing a commit: `Repo::commit` racing other writers on one branch, over a store
-/// whose requests can fail in transit.
-///
-/// Each action is one store request a client makes, so any interleaving of clients is a
-/// behaviour of the model. A client's steps follow `commit_opts`:
+/// whose requests can fail in transit. Each step is one store request a client makes:
 ///
 /// ```text
-///   begin ─▶ Reading ─readRef─▶ Uploading ─upload─▶ Swapping ─swap(Answered)─▶ Done
+///   begin ─▶ Leasing ─lease─▶ CheckingLeases ─checkLeases─▶ Reading   (gc holds one: Leasing)
+///
+///            Reading ─readRef─▶ Uploading ─upload─▶ Swapping ─swap(Answered)─▶ Done
 ///               ▲  │ overlap: Conflicted               │  │ lost the race: retry
 ///               │  ▼                                   │  ▼
 ///               │ Done                 swap(Lost|Dropped) Reading (or Combining)
 ///               └────────── recheck ◀── Rechecking ◀───┘
 /// ```
 ///
-/// Out of scope here: combining under contention (a client that loses every direct attempt
-/// stops as `Combining`), rewrites, hooks and GC.
+/// Each step is a pair: `xCan(s, ...)`, whether the client can take it, and `x(s, ...)`,
+/// the state after. A client holds a shared lease from before its first read to its return
+/// (`finished`), so gc, which needs an exclusive one, never runs while it is in flight. Out of scope here: combining (a client that loses every direct
+/// attempt stops as `Combining`).
 module publish {
   import store.* from "./store"
   import bucket.* from "./bucket"
+  import world.* from "./world"
 
-  type Phase = Idle | Reading | Uploading | Swapping | Rechecking | Done
+  /// `commit(base, delta)` is called; its first request will take a lease.
+  pure def beginCan(s: State, c: str, base: CommitId): bool =
+    client(s, c).phase == Idle and isLive(s.bucket.commits, base)
 
-  /// What `commit` returned: nothing yet, Ok, a ConflictError, another error (its outcome
-  /// unknown to the caller), or a hand-off to the combining path.
-  type Outcome = Pending | Published | Conflicted | Unknown | Combining
+  pure def beginNext(s: State, c: str, base: CommitId, delta: Delta): State =
+    withClient(s, c, {
+      ...IDLE,
+      base: base,
+      delta: delta,
+      phase: Leasing,
+      seen: { commit: base, version: 0 },
+    })
 
-  type Client = {
-    base: CommitId,
-    delta: Delta,
-    phase: Phase,
-    // The ref as this client last read it; version 0 until it reads.
-    seen: Ref,
-    // Which direct attempt (`1..=DIRECT_ATTEMPTS`) the client is on.
-    attempt: int,
-    outcome: Outcome,
+  /// Write its shared lease (`locks/<c>`).
+  pure def leaseCan(s: State, c: str): bool = client(s, c).phase == Leasing
+
+  pure def leaseNext(s: State, c: str): State = {
+    ...s,
+    bucket: leased(s.bucket, c, Shared),
+    clients: s.clients.set(c, { ...client(s, c), phase: CheckingLeases }),
   }
 
-  type State = {
-    bucket: Bucket,
-    clients: str -> Client,
-    // Ghost: every commit the ref has named, oldest first. Not stored by pail.
-    history: List[CommitId],
-  }
+  /// List the leases. Under gc's exclusive one, drop its own and try again later; gc,
+  /// having written its lease before listing, waits for this one to go. Otherwise gc's
+  /// lease, if any, came after this listing, so gc will see this lease and wait.
+  pure def checkLeasesCan(s: State, c: str): bool = client(s, c).phase == CheckingLeases
 
-  pure val CLIENTS: Set[str] = Set("alice", "bob")
-  /// `DIRECT_ATTEMPTS` in repo.rs.
-  pure val DIRECT_ATTEMPTS: int = 2
-
-  pure val IDLE: Client = {
-    base: ROOT,
-    delta: Map(),
-    phase: Idle,
-    seen: { commit: ROOT, version: 0 },
-    attempt: 1,
-    outcome: Pending,
-  }
-
-  /// The commit `c` builds on what it read. Its hash would be the same on every attempt
-  /// that read the same head.
-  pure def made(c: str, cl: Client): CommitId = { by: c, gen: cl.seen.commit.gen + 1 }
-
-  var state: State
-
-  action init = all {
-    state' = {
-      bucket: ROOT_BUCKET,
-      clients: CLIENTS.mapBy(c => IDLE),
-      history: [ROOT],
-    },
-  }
-
-  /// `commit(base, delta)` is called; its first request will read the ref.
-  action begin(c: str, base: CommitId, delta: Delta): bool = all {
-    state.clients.get(c).phase == Idle,
-    isLive(state.bucket.commits, base),
-    state' = {
-      ...state,
-      clients: state.clients.set(c, {
-        ...IDLE,
-        base: base,
-        delta: delta,
-        phase: Reading,
-        seen: { commit: base, version: 0 },
-      }),
-    },
-  }
+  pure def checkLeasesNext(s: State, c: str): State =
+    if (leasedByOthers(s.bucket, c, Set(Exclusive)))
+      { ...s, bucket: unleased(s.bucket, c), clients: s.clients.set(c, { ...client(s, c), phase: Leasing }) }
+    else
+      withClient(s, c, { ...client(s, c), phase: Reading })
 
   /// Read the ref. A head past the base replays the delta onto it, unless a path the delta
   /// writes changed in between (`check_disjoint`).
-  action readRef(c: str): bool = all {
-    state.clients.get(c).phase == Reading,
-    state' = {
-      ...state,
-      clients: state.clients.set(c,
-        if (overlaps(
-          state.clients.get(c).delta,
-          treeOf(state.bucket, state.clients.get(c).base),
-          treeOf(state.bucket, tip(state.bucket).commit),
-        ))
-          { ...state.clients.get(c), phase: Done, outcome: Conflicted, seen: tip(state.bucket) }
-        else
-          { ...state.clients.get(c), phase: Uploading, seen: tip(state.bucket) }
-      ),
-    },
-  }
+  pure def readRefCan(s: State, c: str): bool = client(s, c).phase == Reading
 
-  /// Store the commit object (and its pages) before any ref can name it.
-  action upload(c: str): bool = all {
-    state.clients.get(c).phase == Uploading,
-    state' = {
-      ...state,
-      bucket: uploaded(
-        state.bucket,
-        made(c, state.clients.get(c)),
-        state.clients.get(c).seen.commit,
-        state.clients.get(c).delta,
-      ),
-      clients: state.clients.set(c, { ...state.clients.get(c), phase: Swapping }),
-    },
+  pure def readRefNext(s: State, c: str): State =
+    finished(s, c,
+      if (overlaps(
+        client(s, c).delta,
+        treeOf(s.bucket, client(s, c).base),
+        treeOf(s.bucket, tip(s.bucket).commit),
+      ))
+        { ...client(s, c), phase: Done, outcome: Conflicted, seen: tip(s.bucket) }
+      else
+        { ...client(s, c), phase: Uploading, seen: tip(s.bucket) }
+    )
+
+  /// Store the commit and its page before any ref can name them.
+  pure def uploadCan(s: State, c: str): bool = client(s, c).phase == Uploading
+
+  pure def uploadNext(s: State, c: str): State = {
+    ...s,
+    bucket: uploaded(
+      s.bucket,
+      made(c, client(s, c)),
+      client(s, c).seen.commit,
+      client(s, c).delta,
+    ),
+    clients: s.clients.set(c, { ...client(s, c), phase: Swapping }),
   }
 
   /// CAS the ref from the version read to the new commit. Answered: a lost race retries
   /// from the read, and after the last direct attempt hands off to combining. Unanswered
   /// (`Lost`: performed if it applied; `Dropped`: never received): recheck.
-  action swap(c: str, d: Delivery): bool = all {
-    state.clients.get(c).phase == Swapping,
-    state' = {
+  pure def swapCan(s: State, c: str): bool = client(s, c).phase == Swapping
+
+  pure def swapNext(s: State, c: str, d: Delivery): State = finished(
+    {
+      ...s,
       bucket:
         if (received(d))
-          refSwapped(state.bucket, state.clients.get(c).seen.version, made(c, state.clients.get(c)))
-        else state.bucket,
-      clients: state.clients.set(c,
-        if (not(answered(d)))
-          { ...state.clients.get(c), phase: Rechecking }
-        else if (refSwapApplies(state.bucket, state.clients.get(c).seen.version))
-          { ...state.clients.get(c), phase: Done, outcome: Published }
-        else if (state.clients.get(c).attempt < DIRECT_ATTEMPTS)
-          { ...state.clients.get(c), phase: Reading, attempt: state.clients.get(c).attempt + 1 }
-        else
-          { ...state.clients.get(c), phase: Done, outcome: Combining }
-      ),
+          refSwapped(s.bucket, client(s, c).seen.version, made(c, client(s, c)))
+        else s.bucket,
       history:
-        if (received(d) and refSwapApplies(state.bucket, state.clients.get(c).seen.version))
-          state.history.append(made(c, state.clients.get(c)))
-        else state.history,
+        if (received(d) and refSwapApplies(s.bucket, client(s, c).seen.version))
+          s.history.append(made(c, client(s, c)))
+        else s.history,
     },
-  }
+    c,
+      if (not(answered(d)))
+        { ...client(s, c), phase: Rechecking }
+      else if (refSwapApplies(s.bucket, client(s, c).seen.version))
+        { ...client(s, c), phase: Done, outcome: Published }
+      else if (client(s, c).attempt < DIRECT_ATTEMPTS)
+        { ...client(s, c), phase: Reading, attempt: client(s, c).attempt + 1 }
+      else
+        { ...client(s, c), phase: Done, outcome: Combining },
+  )
 
   /// After an unanswered swap, read the ref to learn whether it won: the commit is on the
   /// branch, as its head or under commits others landed since.
-  action recheck(c: str): bool = all {
-    state.clients.get(c).phase == Rechecking,
-    state' = {
-      ...state,
-      clients: state.clients.set(c,
-        if (onBranch(state.bucket, made(c, state.clients.get(c))))
-          { ...state.clients.get(c), phase: Done, outcome: Published }
-        else if (state.clients.get(c).attempt < DIRECT_ATTEMPTS)
-          { ...state.clients.get(c), phase: Reading, attempt: state.clients.get(c).attempt + 1 }
-        else
-          { ...state.clients.get(c), phase: Done, outcome: Unknown }
-      ),
-    },
-  }
+  pure def recheckCan(s: State, c: str): bool = client(s, c).phase == Rechecking
 
-  /// Deltas a simulated client may write. None writes a path's root content, so a landed
-  /// commit always changes what it writes.
-  pure val DELTAS: Set[Delta] = Set(
-    Map("a" -> "1"),
-    Map("b" -> "1"),
-    Map("a" -> "2", "b" -> "2"),
-  )
-
-  action step = {
-    nondet c = CLIENTS.oneOf()
-    nondet base = liveKeys(state.bucket.commits).oneOf()
-    nondet delta = DELTAS.oneOf()
-    nondet d = Set(Answered, Lost, Dropped).oneOf()
-    any {
-      begin(c, base, delta),
-      readRef(c),
-      upload(c),
-      swap(c, d),
-      recheck(c),
-    }
-  }
-
-  // Properties. Each holds in every reachable state.
-
-  /// The ref never names a commit that is not stored.
-  val refNamesStoredCommit: bool = isLive(state.bucket.commits, tip(state.bucket).commit)
-
-  /// Every move of the ref keeps what it named before: nothing published is overwritten.
-  val refOnlyMovesForward: bool =
-    state.history.indices().forall(i =>
-      i == 0 or ancestorsOf(state.bucket, state.history[i]).contains(state.history[i - 1])
+  pure def recheckNext(s: State, c: str): State =
+    finished(s, c,
+      if (onBranch(s.bucket, made(c, client(s, c))))
+        { ...client(s, c), phase: Done, outcome: Published }
+      else if (client(s, c).attempt < DIRECT_ATTEMPTS)
+        { ...client(s, c), phase: Reading, attempt: client(s, c).attempt + 1 }
+      else
+        { ...client(s, c), phase: Done, outcome: Unknown }
     )
 
-  /// A client told its commit was published finds it on the branch, now and later.
-  val publishedIsOnBranch: bool =
-    CLIENTS.forall(c =>
-      state.clients.get(c).outcome == Published
-        implies onBranch(state.bucket, made(c, state.clients.get(c)))
-    )
+  // ---------- failures ----------
 
-  /// A client told it conflicted has nothing on the branch: it can retry without
-  /// publishing its change twice.
-  val conflictedHasNothingOnBranch: bool =
-    CLIENTS.forall(c =>
-      state.clients.get(c).outcome == Conflicted
-        implies branch(state.bucket).forall(id => id.by != c)
-    )
+  /// The process dies mid-call: it makes no more requests and leaves its lease behind.
+  pure def crashCan(s: State, c: str): bool = not(Set(Idle, Done).contains(client(s, c).phase))
 
-  /// One call to `commit` lands at most one commit.
-  val landsAtMostOnce: bool =
-    CLIENTS.forall(c => branch(state.bucket).filter(id => id.by == c).size() <= 1)
+  pure def crashNext(s: State, c: str): State =
+    withClient(s, c, { ...client(s, c), phase: Done, outcome: Unknown })
 
-  val safety: bool = and {
-    refNamesStoredCommit,
-    refOnlyMovesForward,
-    publishedIsOnBranch,
-    conflictedHasNothingOnBranch,
-    landsAtMostOnce,
+  /// A dead writer's lease expires (it stopped refreshing it). A live writer's never does:
+  /// one that has not refreshed its lease within its lifetime makes no further ref
+  /// request (`Lease::check`), so to the bucket it is dead.
+  pure def leaseExpiresCan(s: State, c: str): bool = and {
+    isLive(s.bucket.locks, c),
+    client(s, c).phase == Done,
+    client(s, c).outcome != Combining,
   }
+
+  pure def leaseExpiresNext(s: State, c: str): State = { ...s, bucket: unleased(s.bucket, c) }
 }

@@ -8,7 +8,7 @@
     "compile:store": "quint-refinements compile store_scenarios.qnt --module storeScenarios --artifact store-refinements.json --rust ../tests/store_refinement/generated.rs",
     "check": "npm run compile:publish -- --check && npm run compile:store -- --check",
     "test": "quint test store_scenarios.qnt --main=storeScenarios --match='Run$' && quint test scenarios.qnt --main=scenarios --match='Run$'",
-    "simulate": "quint run publish.qnt --main=publish --invariant=safety --max-steps=20 --max-samples=20000"
+    "simulate": "quint run pail.qnt --main=pail --invariant=safety --max-steps=40 --max-samples=20000"
   },
   "devDependencies": {
     "@informalsystems/quint": "0.33.0",
