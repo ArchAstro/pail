@@ -1322,4 +1322,167 @@ module scenarios {
       }),
       state' = state,
     })
+
+  // ---------- finding a commit after rewrites ----------
+
+  /// Carol's plan drops alice's commit from under bob's while dave lands on bob's. Bob,
+  /// who built on alice's commit, finds it dropped: its nearest kept ancestor, the root.
+  /// Dave, who built on bob's, finds bob's picked copy.
+  /// @conformance
+  run locateAfterDropRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "dropParent"))
+    .then(begin("dave", BOB_ON_ALICE, DAVE_B))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(locate("bob"))
+    .then(locate("dave"))
+    .then(all {
+      assert(all {
+        client(state, "bob").found == ROOT,
+        client(state, "dave").found == BOB_PICKED,
+        client(state, "dave").foundAt == { epoch: 1, rewrite: 1 },
+      }),
+      state' = state,
+    })
+
+  /// Carol rewords alice's commit while bob lands on it; bob finds it reworded. Dave
+  /// undoes the reword, and bob, asking again, walks both records, oldest first, back to
+  /// alice's commit.
+  /// @conformance
+  run locateThroughUndoRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(locate("bob"))
+    .then(all {
+      assert(client(state, "bob").found == ALICE_RW),
+      state' = state,
+    })
+    .then(beginUndo("dave"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(locate("bob"))
+    .then(all {
+      assert(all {
+        lineageOf(state.bucket) == { epoch: 2, rewrite: 2 },
+        client(state, "bob").found == ALICE_1,
+      }),
+      state' = state,
+    })
+
+  /// Carol rewords alice's commit while bob lands on it, then dave rewords the tip (bob's
+  /// carried commit). Bob walks both records: carol's maps alice's commit to its reword,
+  /// which dave's keeps. (Walking dave's alone, alice's commit is in neither history, and
+  /// the walk falls back to the root.)
+  /// @conformance
+  run locateThroughRewordsRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(beginRewrite("dave"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwStore("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(locate("bob"))
+    .then(all {
+      assert(all {
+        lineageOf(state.bucket) == { epoch: 2, rewrite: 2 },
+        client(state, "bob").found == ALICE_RW,
+      }),
+      state' = state,
+    })
+
+  /// Dave reads bob's commit on alice's (his own change to `a` conflicts), then carol's plan
+  /// swaps the two. Bob's commit maps to its pick on the root, which lacks alice's change;
+  /// dave finds the place above it that has both, alice's moved commit.
+  /// @conformance
+  run locateThroughReorderRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(begin("dave", ROOT, DAVE_A))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(all {
+      assert(all {
+        client(state, "dave").phase == Done,
+        client(state, "dave").seen.commit == BOB_ON_ALICE,
+      }),
+      state' = state,
+    })
+    .then(beginRebase("carol", "reorder"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(locate("dave"))
+    .then(all {
+      assert(client(state, "dave").found == BOB_PICKED.append("alice").append("~carol")),
+      state' = state,
+    })
 }

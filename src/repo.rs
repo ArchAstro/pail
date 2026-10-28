@@ -727,18 +727,29 @@ impl Repo {
         Ok(cur)
     }
 
+    /// The latest place in `r`'s new history of any commit of `commit`'s history: a reorder
+    /// can move an older commit above a newer one, and that place has both.
     async fn map_through(&self, r: &Rewrite, commit: Hash) -> Result<Option<Hash>> {
+        let mut best: Option<(u64, Hash)> = None;
+        let mut keep = |h: Hash, g: u64| {
+            if best.is_none_or(|(bg, _)| g > bg) {
+                best = Some((g, h));
+            }
+        };
         let mut at = Some(commit);
         while let Some(h) = at {
             match r.map.get(&h) {
-                Some(Some(next)) => return Ok(Some(*next)),
+                Some(Some(next)) => keep(*next, self.commit_meta(next).await?.generation),
                 Some(None) => {}
-                None if self.is_ancestor(h, r.new).await? => return Ok(Some(h)),
+                None if self.is_ancestor(h, r.new).await? => {
+                    keep(h, self.commit_meta(&h).await?.generation);
+                    break;
+                }
                 None => {}
             }
             at = self.commit_meta(&h).await?.parent;
         }
-        Ok(None)
+        Ok(best.map(|(_, h)| h))
     }
 
     /// Where `tip`'s own commits start relative to `upstream`: their merge base, or a commit

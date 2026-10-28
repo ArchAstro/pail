@@ -53,6 +53,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `combine.qnt` | Writers that lost their direct attempts, running `commit_combining` |
 | `rewrite.qnt` | A client rewording the tip, undoing the last rewrite or resetting the tip, running `rewrite_ref` |
 | `land.qnt` | A client making a stack (a branch of its own) and landing it with `land_stack` |
+| `locate.qnt` | A writer finding where the commit it read is after rewrites (`Repo::successor`) |
 | `gc.qnt` | The collector running `gc::gc_with`, one store request per step |
 | `pail.qnt` | Actions, `step`, and the properties (`safety`) |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
@@ -60,7 +61,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `policy_scenarios.qnt` | `@conformance` runs: documents to parse and requests to decide |
 | `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json` | Generated scenario artifacts (do not edit) |
 | `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
-| `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref`, `Repo::land_stack` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
+| `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref`, `Repo::land_stack`, `Repo::successor` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
 | `../tests/store_refinement.rs` | Each `Store` backend against `store_spec.qnt` |
 | `../tests/policy_refinement.rs` | `Policy::parse`, `Policy::decide`, `policy::request_op` against `policy.qnt` |
 
@@ -99,6 +100,7 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 8. `publishedOnce`: each client's change enters the branch at most once by a publish (a
    move no record names); after an undo or reset takes it off, only a rewrite brings it
    back.
+9. `locatedOnBranch`, `locateKeepsChanges`: see the successor walks section.
 
 `npm run simulate` checks them over random interleavings of three writers and gc,
 including crashes, expired leases and the grace period passing at any moment (simulation,
@@ -179,6 +181,7 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `beginLand(c)` | `land_stack(c, main)` spawned; it leases first |
 | action `ldRead(c)` | its `GET refs/main` (the stack's ref and records are read past the gate), then the copy's upload |
 | action `ldSwap(c, d)` / `ldRecheck(c)` | its conditional `PUT refs/main`; the ref read after one it did not win |
+| action `locate(c)` | `Repo::successor` of `c`'s read commit, from its read's lineage to the branch's, read past every gate |
 | action `rwStore(c)` | under `writing()`'s lease, the wave of `PUT commits/<hash>` for the plan's commits (`rebase::store`) |
 | action `rwRead(c)` | `rewrite_ref`'s `GET refs/main`, then each carried commit's upload and the `PUT reflog/main/<id>` |
 | action `rwSwap(c, d)` / `rwRecheck(c)` | its conditional `PUT refs/main`; the ref read after an unanswered one |
@@ -348,10 +351,42 @@ lineage; after a swap it did not win, recheck (`landed_since`) or try again.
   steps), and is not moved after; a client lands at most its own stack; `land --stack`'s
   CLI (pre-publish hook, reporting) is not modelled.
 
+## Successor walks (`locate.qnt`)
+
+A writer that returned asks where the commit it read is now (`Repo::successor`, as `pail
+sync` and `pail commit` do after a rewrite): from the lineage it read at to the branch's,
+each record between, oldest first (`rewrites_between`: back from the branch's record to
+its own, or one no later than its epoch), maps the commit: each commit of its history the
+record rewrote goes to its successor, each the new history kept to itself, dropped ones
+nowhere; the latest of those places wins. (Taking the first one up the history lost
+changes: a reorder or a fixup can move an older commit above a newer one. The simulation
+found it; `locateKeepsChanges` failed.)
+
+```text
+  seen ──r1──▶ x1 ──r2──▶ x2 ── … ──▶ found      (oldest record first)
+  per record: latest of { successor(h) | h kept: h } over h in x, parent(x), … (dropped skipped)
+```
+
+- Properties, while the branch is at the lineage it looked at:
+  1. `locatedOnBranch`: what it found is on the branch.
+  2. `locateKeepsChanges`: what it found has every change the commit it read had, but
+     those a record in the chain dropped.
+- Scenarios: `locateAfterDropRun` (a dropped commit → its kept ancestor; a picked one →
+  its copy), `locateThroughUndoRun` (a reword, then its undo: two records, oldest first,
+  and asking again after each), `locateThroughRewordsRun` (two rewords: the older record
+  matters), `locateThroughReorderRun` (a swap: the top commit's own successor lacks the
+  moved one's change; the place above it has both).
+- Five of six mutants (plus the first-place-up-the-history walk, which only
+  `locateThroughReorderRun` kills) of `successor`/`map_through` fail a scenario: a dropped commit
+  mapped to itself, kept commits not kept, records newest first, the newest record only,
+  no walking up the history. The sixth (`rewrites_between` not stopping at `from`'s own
+  record) is equivalent: that record's epoch stops the walk anyway.
+- Simplifications: only a writer's read commit is located; `None` (nothing survived)
+  never happens, since the root survives every rewrite.
+
 ## Not modelled yet
 
-1. Squash and fixup plans; successor walks
-   (`Repo::successor`, `fork_point`) beyond the record's map.
+1. Squash and fixup plans.
 2. Packs and chunks (files are inline in the model's trees).
 3. Known heads (the fast path that skips the first ref read).
 4. Lease timing: a live holder is assumed to refresh within the lease's lifetime
