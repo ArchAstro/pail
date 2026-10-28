@@ -1394,7 +1394,7 @@ impl Repo {
                 _ => unreachable!(),
             };
             let wanted: Vec<_> = idxs.iter().map(|&i| span(i)).collect();
-            for r in crate::fetch::plan_reads(&wanted, crate::fetch::GAP, crate::fetch::MAX_LEN) {
+            for r in crate::fetch::plan_reads(&wanted, crate::fetch::gap(), crate::fetch::MAX_LEN) {
                 jobs.push(Job::Pack {
                     pack,
                     range: r.range,
