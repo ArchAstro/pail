@@ -97,6 +97,11 @@ module pail {
     state' = beginRewriteNext(state, c),
   }
 
+  action beginRebase(c: str, plan: str): bool = all {
+    beginRebaseCan(state, c, plan),
+    state' = beginRebaseNext(state, c, plan),
+  }
+
   action beginUndo(c: str): bool = all {
     beginUndoCan(state, c),
     state' = beginUndoNext(state, c),
@@ -182,6 +187,7 @@ module pail {
     nondet delta = DELTAS.oneOf()
     nondet d = Set(Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
+    nondet plan = PLANS.oneOf()
     any {
       begin(c, base, delta),
       lease(c),
@@ -204,6 +210,7 @@ module pail {
       batchRecheck(c),
       withdraw(c),
       beginRewrite(c),
+      beginRebase(c, plan),
       beginUndo(c),
       beginReset(c),
       rwStore(c),
@@ -239,6 +246,7 @@ module pail {
     nondet delta = DELTAS.oneOf()
     nondet d = Set(Answered, Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
+    nondet plan = PLANS.oneOf()
     any {
       begin(c, base, delta),
       lease(c),
@@ -258,6 +266,7 @@ module pail {
       batchRecheck(c),
       withdraw(c),
       beginRewrite(c),
+      beginRebase(c, plan),
       beginUndo(c),
       beginReset(c),
       rwStore(c),
@@ -289,12 +298,15 @@ module pail {
       }),
     })
 
-  /// Whether `c`'s change was taken off the branch by an undo or reset (on purpose: a
-  /// rebase keeps every change).
+  /// Whether `c`'s change was taken off the branch on purpose: by an undo or reset, or by
+  /// a rebase that dropped its commit.
   def dropped(c: str): bool =
     state.bucket.reflog.keys().exists(id => and {
-      recordOf(state.bucket, id).op != "rebase",
       droppedBy(state.bucket, recordOf(state.bucket, id)).contains(c),
+      or {
+        recordOf(state.bucket, id).op != "rebase",
+        recordOf(state.bucket, id).dropped.exists(x => author(x) == c),
+      },
     })
 
   /// A client told its commit was published finds it on the branch, now and later: its
@@ -331,12 +343,14 @@ module pail {
       branch(state.bucket).exists(id => author(id) == w) or dropped(w),
     })
 
-  /// A rebase takes no change off the branch; an undo or reset takes off at most one (the
-  /// tip it drops, or the one the record it undoes added back): every change landed on
-  /// top meanwhile is carried.
+  /// A rebase takes off the branch only the changes of the commits its record says it
+  /// dropped; an undo or reset at most one (the tip it drops, or the one the record it
+  /// undoes added back): every change landed on top meanwhile is carried.
   val rewritesDropOnlyTheirTarget: bool =
     state.bucket.reflog.keys().forall(id =>
-      if (recordOf(state.bucket, id).op == "rebase") droppedBy(state.bucket, recordOf(state.bucket, id)) == Set()
+      if (recordOf(state.bucket, id).op == "rebase")
+        droppedBy(state.bucket, recordOf(state.bucket, id))
+          .forall(w => recordOf(state.bucket, id).dropped.exists(x => author(x) == w))
       else droppedBy(state.bucket, recordOf(state.bucket, id)).size() <= 1
     )
 

@@ -33,7 +33,6 @@ use pail::manifest::{Kind, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
 use pail::repo::{
     CommitFields, CommitRequest, ConflictError, Delta, FileInput, MovedError, Repo, RewriteRequest,
-    rewritten_fields,
 };
 use pail::store::Store;
 use quint_refinements::{NormalizedRuntimeEvidence, RuntimeValue};
@@ -59,7 +58,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        30,
+        35,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -133,6 +132,13 @@ enum Event {
     Finished {
         actor: String,
         outcome: &'static str,
+    },
+    /// What a rebase built, before it leases.
+    Planned {
+        actor: String,
+        tip: Hash,
+        map: BTreeMap<Hash, Option<Hash>>,
+        commits: Vec<(Hash, Bytes)>,
     },
 }
 
@@ -608,13 +614,17 @@ struct Round {
 /// A client rewriting the branch: `Rw` in `world.qnt`.
 #[derive(Clone, Default)]
 struct Rewriter {
-    /// Its record's `op`: `rebase`, `undo` or `reset`.
+    /// Its record's `op`: `rebase`, `undo` or `reset`; a rebase's plan.
     op: &'static str,
+    plan: &'static str,
     /// The tip it was made from, the commit replacing it, and the successors it starts
     /// from (empty until its first read).
     expected: Id,
     new: Id,
     successors: BTreeMap<Id, Id>,
+    /// The commits it drops, and the ones it makes.
+    dropped: BTreeSet<Id>,
+    made: BTreeSet<Id>,
     /// For an undo, the lineage that named its record.
     since: Lineage,
     /// The version its last attempt read; `version` once that attempt wrote its record.
@@ -899,6 +909,12 @@ impl Harness {
                 p.awaiting = p.awaiting.saturating_sub(1);
                 self.answered(&actor, request, &key, etag, listed)?
             }
+            Event::Planned {
+                actor,
+                tip,
+                map,
+                commits,
+            } => self.planned(&actor, tip, map, commits)?,
             Event::Finished { actor, outcome } => {
                 if actor == GC {
                     self.collector = Collector::default();
@@ -1119,6 +1135,133 @@ impl Harness {
         Ok(())
     }
 
+    /// `pail rebase` with `plan` on the tip's commits: read the ref, build the plan in memory
+    /// (unleased; it reports what it built), then lease, store it and `rewrite_ref`.
+    fn rebase(&mut self, name: &str, plan: &'static str) -> Result<(), String> {
+        use pail::rebase::{self as rb, Action, Step};
+        let repo = Repo::with_store(self.gate(name), None);
+        let events = self.sender.clone();
+        let actor = name.to_owned();
+        let committer = format!("{name} <{name}@example.com>");
+        self.rt().spawn(async move {
+            let result: anyhow::Result<()> = async {
+                let (cur, _) = repo.read_ref_value(BRANCH).await?.context("no branch")?;
+                let t = cur.commit;
+                let p = repo.commit_meta(&t).await?.parent.context("the root")?;
+                let step = |action, commit| Step {
+                    action,
+                    commit,
+                    message: None,
+                };
+                let (base, steps) = if plan == "reword" {
+                    let reword = Step {
+                        message: Some(format!("{actor}'s reword\n")),
+                        ..step(Action::Reword, t)
+                    };
+                    (p, vec![reword])
+                } else {
+                    let g = repo.commit_meta(&p).await?.parent.context("the root")?;
+                    let steps = match plan {
+                        "dropParent" => vec![step(Action::Drop, p), step(Action::Pick, t)],
+                        "dropTip" => vec![step(Action::Pick, p), step(Action::Drop, t)],
+                        _ => vec![step(Action::Pick, t), step(Action::Pick, p)],
+                    };
+                    (g, steps)
+                };
+                let plan = rb::Plan {
+                    branch: BRANCH.to_owned(),
+                    expected: t,
+                    base,
+                    onto: base,
+                    steps,
+                };
+                let built = rb::build(&repo, &plan, &committer, DATE).await?;
+                let _ = events.send(Event::Planned {
+                    actor: actor.clone(),
+                    tip: built.tip,
+                    map: built.map.clone(),
+                    commits: built
+                        .prepared()
+                        .iter()
+                        .map(|p| (p.commit, p.data.clone()))
+                        .collect(),
+                });
+                let writing = repo.writing().await?;
+                let out = async {
+                    rb::store(&repo, &built).await?;
+                    let req = RewriteRequest {
+                        branch: BRANCH.to_owned(),
+                        expected: t,
+                        new: built.tip,
+                        op: "rebase".into(),
+                        committer: committer.clone(),
+                        date: DATE.to_owned(),
+                        map: built.map.clone(),
+                        since: None,
+                    };
+                    repo.rewrite_ref(req, None).await
+                }
+                .await;
+                writing.done().await?;
+                out.map(|_| ())
+            }
+            .await;
+            let _ = events.send(Event::Finished {
+                actor,
+                outcome: rewrite_outcome(result),
+            });
+        });
+        self.began_rewrite(name, "rebase")?;
+        self.writer(name)?.rw.as_mut().unwrap().plan = plan;
+        Ok(())
+    }
+
+    /// What a rebase built: its commits named (as stored ones are), its tip, map and the
+    /// commits it makes.
+    fn planned(
+        &mut self,
+        actor: &str,
+        tip: Hash,
+        map: BTreeMap<Hash, Option<Hash>>,
+        commits: Vec<(Hash, Bytes)>,
+    ) -> Result<(), String> {
+        let mut made = BTreeSet::new();
+        for (h, data) in commits {
+            let c = pail::objects::Commit::decode(&h, &data).map_err(|e| e.to_string())?;
+            let from = c
+                .meta
+                .get("rewritten.from")
+                .ok_or("a planned commit names no original")?;
+            let from = Hash::from_hex(from).map_err(|e| e.to_string())?;
+            let mut id = self.name(&c.parent.ok_or("a planned root")?)?;
+            id.push(tag(&self.name(&from)?));
+            id.push(format!("~{actor}"));
+            self.names.insert(h, id.clone());
+            self.hashes.insert(id.clone(), h);
+            made.insert(id);
+        }
+        let mut successors = BTreeMap::new();
+        let mut dropped = BTreeSet::new();
+        for (old, new) in &map {
+            match new {
+                Some(n) => {
+                    successors.insert(self.name(old)?, self.name(n)?);
+                }
+                None => {
+                    dropped.insert(self.name(old)?);
+                }
+            }
+        }
+        let new = self.name(&tip)?;
+        let rw = self
+            .writer(actor)?
+            .rw
+            .as_mut()
+            .ok_or("a plan from no rewriter")?;
+        (rw.new, rw.successors, rw.dropped, rw.made) = (new, successors, dropped, made);
+        Ok(())
+    }
+
     /// A rewriter spawned: it is one from now on, and its first ref read is its begin.
     fn began_rewrite(&mut self, name: &str, op: &'static str) -> Result<(), String> {
         let w = self.writer(name)?;
@@ -1154,15 +1297,11 @@ impl Harness {
         };
         let mut since = Lineage::default();
         let (expected, new, successors) = match op {
+            // What the plan makes comes with `Planned`.
             "rebase" => {
                 let expected = self.name(&commit)?;
-                let mut new = parent()?;
-                new.extend([tag(&expected), format!("~{actor}")]);
-                (
-                    expected.clone(),
-                    new.clone(),
-                    BTreeMap::from([(expected, new)]),
-                )
+                self.writer(actor)?.rw.as_mut().unwrap().expected = expected;
+                return Ok(());
             }
             "reset" => (self.name(&commit)?, parent()?, BTreeMap::new()),
             _ => {
@@ -1180,8 +1319,9 @@ impl Harness {
                     .map_err(|e| e.to_string())?;
                 let mut successors = BTreeMap::new();
                 for (old, new) in &r.map {
-                    let new = new.ok_or("the model's rewrites drop nothing")?;
-                    successors.insert(self.name(&new)?, self.name(old)?);
+                    if let Some(new) = new {
+                        successors.insert(self.name(new)?, self.name(old)?);
+                    }
                 }
                 (self.name(&r.new)?, self.name(&r.old)?, successors)
             }
@@ -1624,14 +1764,16 @@ impl Harness {
             rewrite: r.prev.clone(),
         })?;
         let by = r.by.split(" <").next().unwrap_or_default().to_owned();
-        let map = r
-            .map
-            .iter()
-            .map(|(old, new)| {
-                let new = new.ok_or("the model's rewrites drop nothing")?;
-                Ok((id_value(&self.name(old)?), id_value(&self.name(&new)?)))
-            })
-            .collect::<Result<_, String>>()?;
+        let mut map = BTreeMap::new();
+        let mut dropped = vec![];
+        for (old, new) in &r.map {
+            match new {
+                Some(n) => {
+                    map.insert(id_value(&self.name(old)?), id_value(&self.name(n)?));
+                }
+                None => dropped.push(id_value(&self.name(old)?)),
+            }
+        }
         Ok(record([
             ("op", RuntimeValue::Text(r.op.clone())),
             ("old", id_value(&self.name(&r.old)?)),
@@ -1640,6 +1782,7 @@ impl Harness {
             ("prev", field(&prev, "rewrite")?.clone()),
             ("by", RuntimeValue::Text(by)),
             ("successors", RuntimeValue::Map(map)),
+            ("dropped", set(dropped)),
         ]))
     }
 
@@ -1769,6 +1912,7 @@ impl Harness {
         let or_root = |id: Id| if id.is_empty() { root.clone() } else { id };
         Ok(record([
             ("op", RuntimeValue::Text(rw.op.to_owned())),
+            ("plan", RuntimeValue::Text(rw.plan.to_owned())),
             ("expected", id_value(&or_root(rw.expected))),
             ("new", id_value(&or_root(rw.new))),
             (
@@ -1780,6 +1924,8 @@ impl Harness {
                         .collect(),
                 ),
             ),
+            ("dropped", set(rw.dropped.iter().map(id_value))),
+            ("made", set(rw.made.iter().map(id_value))),
             ("since", self.lineage_value(&rw.since)?),
             ("version", RuntimeValue::Int(rw.version)),
             ("tip", id_value(&rw.tip.unwrap_or(root.clone()))),
@@ -2161,48 +2307,21 @@ impl generated::Implementation for Harness {
         self.release(&c, Request::DeleteIntent, None, Delivery::Answered)
     }
 
-    /// Read the ref and make the reworded tip (unleased, as `pail rebase` builds its
-    /// commits), then lease to store it and publish it with `rewrite_ref`.
+    /// Reword the tip: `beginRebase` with the `reword` plan.
     fn begin_rewrite(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
         let name = Harness::actor_arg(arguments)?;
-        let repo = Repo::with_store(self.gate(&name), None);
-        let events = self.sender.clone();
-        let actor = name.clone();
-        let committer = format!("{name} <{name}@example.com>");
-        self.rt().spawn(async move {
-            let result: anyhow::Result<()> = async {
-                let (cur, _) = repo.read_ref_value(BRANCH).await?.context("no branch")?;
-                let x = cur.commit;
-                let c = repo.commit_obj(&x).await?;
-                let delta = repo.delta_of(&x).await?;
-                let fields = rewritten_fields(&c, &[x], &committer, DATE);
-                let p = repo.prepare_commit(c.parent, &delta, &fields).await?;
-                let writing = repo.writing().await?;
-                let out = async {
-                    let new = repo.store_commit(&p, vec![]).await?.commit;
-                    let req = RewriteRequest {
-                        branch: BRANCH.to_owned(),
-                        expected: x,
-                        new,
-                        op: "rebase".into(),
-                        committer: committer.clone(),
-                        date: DATE.to_owned(),
-                        map: BTreeMap::from([(x, Some(new))]),
-                        since: None,
-                    };
-                    repo.rewrite_ref(req, None).await
-                }
-                .await;
-                writing.done().await?;
-                out.map(|_| ())
-            }
-            .await;
-            let _ = events.send(Event::Finished {
-                actor,
-                outcome: rewrite_outcome(result),
-            });
-        });
-        self.began_rewrite(&name, "rebase")
+        self.rebase(&name, "reword")
+    }
+
+    fn begin_rebase(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = Harness::actor_arg(arguments)?;
+        let plan = match arguments.get(1).map(text).transpose()? {
+            Some("dropParent") => "dropParent",
+            Some("dropTip") => "dropTip",
+            Some("reorder") => "reorder",
+            other => return Err(format!("unknown plan {other:?}")),
+        };
+        self.rebase(&name, plan)
     }
 
     /// Read the ref, then the record its lineage names, and publish the undo of it
@@ -2260,9 +2379,11 @@ impl generated::Implementation for Harness {
         self.began_rewrite(&name, "reset")
     }
 
+    /// The plan's commits, stored in one wave.
     fn rw_store(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
         let c = Harness::actor_arg(arguments)?;
-        self.release(&c, Request::PutCommit, None, Delivery::Answered)
+        self.release(&c, Request::PutCommit, None, Delivery::Answered)?;
+        self.drain(&c, &[Request::PutCommit])
     }
 
     /// The ref read, then every commit it carries and its record, until it swaps or fails.

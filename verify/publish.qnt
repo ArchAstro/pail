@@ -56,7 +56,7 @@ module publish {
       withClient(s, c, { ...client(s, c), phase:
         if (client(s, c).ld.calls > 0) LdReading
         else if (client(s, c).rw == NO_RW) Reading
-        else if (client(s, c).rw.op == "rebase") RwStoring
+        else if (client(s, c).rw.made != Set()) RwStoring
         else RwReading })
 
   /// Read the ref. A head past the base replays the delta onto it, unless a path the delta

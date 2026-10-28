@@ -497,6 +497,7 @@ module scenarios {
           prev: 0,
           by: "carol",
           successors: Map(ALICE_1 -> ALICE_RW, BOB_ON_ALICE -> BOB_CARRIED),
+          dropped: Set(),
         },
         treeOf(state.bucket, BOB_CARRIED) == Map("a" -> "1", "b" -> "1"),
         client(state, "carol").outcome == Rewritten,
@@ -766,6 +767,7 @@ module scenarios {
           prev: 1,
           by: "dave",
           successors: Map(ALICE_RW -> ALICE_1, BOB_ON_RW -> BOB_UNDONE),
+          dropped: Set(),
         },
         ancestorsOf(state.bucket, BOB_UNDONE) == Set(ROOT, ALICE_1),
         client(state, "dave").outcome == Rewritten,
@@ -808,6 +810,7 @@ module scenarios {
           prev: 0,
           by: "carol",
           successors: Map(),
+          dropped: Set(),
         },
         client(state, "bob").outcome == Published,
       }),
@@ -1125,6 +1128,197 @@ module scenarios {
         tip(state.bucket).commit == ["root", "alice", "~alice"],
         not(branch(state.bucket).exists(id => author(id) == "bob")),
         client(state, "alice").outcome == Published,
+      }),
+      state' = state,
+    })
+
+  // ---------- rebase plans ----------
+
+  pure val BOB_PICKED: CommitId = ["root", "bob", "~carol"]
+
+  /// Carol's plan drops alice's commit from under bob's: bob's change, picked onto the
+  /// root, applies (it writes `b`, which alice left alone). Dave lands on bob's commit
+  /// meanwhile, and carol carries his on top. The record maps both and names alice's as
+  /// dropped; her change is off the branch on purpose.
+  /// @conformance
+  run rebaseDropParentRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "dropParent"))
+    .then(begin("dave", BOB_ON_ALICE, DAVE_B))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == BOB_PICKED.append("dave").append("~carol"),
+        treeOf(state.bucket, BOB_PICKED) == Map("a" -> "0", "b" -> "1"),
+        recordOf(state.bucket, 1) == {
+          op: "rebase",
+          old: BOB_ON_ALICE.append("dave"),
+          new: BOB_PICKED.append("dave").append("~carol"),
+          epoch: 1,
+          prev: 0,
+          by: "carol",
+          successors: Map(
+            BOB_ON_ALICE -> BOB_PICKED,
+            BOB_ON_ALICE.append("dave") -> BOB_PICKED.append("dave").append("~carol"),
+          ),
+          dropped: Set(ALICE_1),
+        },
+        not(branch(state.bucket).exists(id => author(id) == "alice")),
+        client(state, "alice").outcome == Published,
+        client(state, "carol").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+  /// Carol's plan keeps alice's commit and drops bob's on top: alice's is reused as it
+  /// is, so nothing is stored before the swap.
+  /// @conformance
+  run rebaseDropTipRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "dropTip"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ALICE_1,
+        recordOf(state.bucket, 1).successors == Map(),
+        recordOf(state.bucket, 1).dropped == Set(BOB_ON_ALICE),
+        client(state, "carol").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+  /// Carol's plan swaps alice's and bob's commits: bob's picked onto the root, alice's on
+  /// top of it.
+  /// @conformance
+  run rebaseReorderRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "reorder"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == BOB_PICKED.append("alice").append("~carol"),
+        treeOf(state.bucket, tip(state.bucket).commit) == Map("a" -> "1", "b" -> "1"),
+        recordOf(state.bucket, 1).successors == Map(
+          BOB_ON_ALICE -> BOB_PICKED,
+          ALICE_1 -> BOB_PICKED.append("alice").append("~carol"),
+        ),
+        recordOf(state.bucket, 1).dropped == Set(),
+      }),
+      state' = state,
+    })
+
+  /// Bob's commit rewrites `a` from alice's content; carol's plan drops alice's from under
+  /// it. On the root bob's change does not apply: a conflict before carol leases, nothing
+  /// stored or published.
+  /// @conformance
+  run rebaseConflictRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "dropParent"))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == BOB_ON_ALICE,
+        state.bucket.reflog.keys() == Set(),
+        client(state, "carol").outcome == Conflicted,
+        not(state.bucket.locks.keys().contains("carol")),
+      }),
+      state' = state,
+    })
+
+  /// Carol sets `b`; alice changes `a` on top; bob writes `b` as carol left it, a commit
+  /// that changes nothing. Dave's plan drops alice's commit from under bob's: bob's, on
+  /// carol's, would change nothing either, so it is dropped as empty too. The branch is
+  /// back at carol's commit.
+  /// @conformance
+  run rebaseEmptyRun = init
+    .then(begin("carol", ROOT, BOB_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(begin("alice", CAROL_ON_ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", CAROL_ON_ROOT.append("alice"), BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("dave", "dropParent"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == CAROL_ON_ROOT,
+        recordOf(state.bucket, 1).dropped == Set(CAROL_ON_ROOT.append("alice"), CAROL_ON_ROOT.append("alice").append("bob")),
+        recordOf(state.bucket, 1).successors == Map(),
+        client(state, "dave").outcome == Rewritten,
       }),
       state' = state,
     })

@@ -172,14 +172,14 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `cleanup(c)` | the DELETEs of the batch's intents |
 | action `batchRecheck(c)` | the ref read after an unanswered batch swap |
 | action `withdraw(c)` | `c`'s DELETE of its own intent |
-| action `beginRewrite(c)` | `c`'s `GET refs/main`; it then builds the reworded tip unleased (as `pail rebase` builds) |
+| action `beginRewrite(c)` / `beginRebase(c, plan)` | `c`'s `GET refs/main`; it then runs `rebase::build` on the plan unleased (as `pail rebase` builds), reporting what it built |
 | action `beginUndo(c)` | `c`'s `GET refs/main` (then the record its lineage names, not held); `RewriteRequest::undo` |
 | action `beginReset(c)` | `force_ref`'s `GET refs/main`, to the tip's parent |
 | action `stack(c, delta)` | `c`'s stack, made whole past every gate: `write_commit` on the branch's tip, `create_branch c` (each under a lease) |
 | action `beginLand(c)` | `land_stack(c, main)` spawned; it leases first |
 | action `ldRead(c)` | its `GET refs/main` (the stack's ref and records are read past the gate), then the copy's upload |
 | action `ldSwap(c, d)` / `ldRecheck(c)` | its conditional `PUT refs/main`; the ref read after one it did not win |
-| action `rwStore(c)` | under `writing()`'s lease, the new commit's `PUT commits/<hash>` |
+| action `rwStore(c)` | under `writing()`'s lease, the wave of `PUT commits/<hash>` for the plan's commits (`rebase::store`) |
 | action `rwRead(c)` | `rewrite_ref`'s `GET refs/main`, then each carried commit's upload and the `PUT reflog/main/<id>` |
 | action `rwSwap(c, d)` / `rwRecheck(c)` | its conditional `PUT refs/main`; the ref read after an unanswered one |
 | `MARK` (`~carol`) | a commit with `rewritten.from`: its parent's name, its original's writer, the rewriter |
@@ -270,8 +270,12 @@ now cover combined commits.
 
 Three rewrites, each its record's `op`, all published by `rewrite_ref`:
 
-1. `rebase`: a client rewords the branch's tip (`beginRewrite` reads it and builds the new
-   commit, as `pail rebase` builds before taking its lease), leases and stores it.
+1. `rebase`: a client carries out a plan on the tip's commits (`beginRewrite`: reword the
+   tip; `beginRebase`: drop its parent, drop the tip, or swap the two). It reads the ref
+   and builds the plan in memory as `rebase::build` does (each picked commit kept if it
+   still sits on the history so far, else its change checked to apply and written over
+   it, dropped if that changes nothing; a commit that does not apply is a conflict before
+   any lease), then leases and stores the commits it made in one wave.
 2. `undo` (`pail rebase --undo`): `beginUndo` reads the ref and the record its lineage
    names; `RewriteRequest::undo` goes from that record's new tip back to its old one, each
    successor mapped back, and fails if the branch was rewritten since (its lineage moved).
@@ -289,8 +293,9 @@ what is under them).
   new tip the branch has), `recordsAreChained` (each record's epoch is its prev's plus one),
   `reflogIsStored` (every commit a record reaches stays stored, for successor walks and
   undo), `rewriteOutcomeIsTruthful` (Ok: its record is in the ref's chain; `MovedError` or
-  `ConflictError`: none is), `rewritesDropOnlyTheirTarget` (a rebase takes no change off
-  the branch; an undo or reset at most one: every change landed meanwhile is carried).
+  `ConflictError`: none is), `rewritesDropOnlyTheirTarget` (a rebase takes off the branch only
+  the changes of the commits its record lists as dropped, `None` in pail's map; an undo
+  or reset at most one: every change landed meanwhile is carried).
   `refOnlyMovesForward` allows moves a record names; `recentIsTruthful` asks only that the
   branch has each landed intent's change (a rewrite keeps `recent` as it was), and with
   `publishedIsOnBranch` excuses a change an undo or reset took off.
@@ -301,20 +306,25 @@ what is under them).
   dropped still reports published; the undo brings it back), `resetCarriesRun` (a carried
   commit's change written over the new tip's tree), `resetConflictRun` (a commit landed
   since does not apply: nothing published), `undoTwiceRun` (an undo of a reset already
-  undone moves).
+  undone moves); `rebaseDropParentRun` (a plan dropping a commit, then carrying one
+  landed since), `rebaseDropTipRun` (a kept commit reused, nothing stored),
+  `rebaseReorderRun`, `rebaseConflictRun` (a plan's commit does not apply: nothing
+  leased), `rebaseEmptyRun` (commits whose changes are already there dropped as empty).
 - `contendStep` interleaves rewriters with writers. 100,000 contended runs and 50,000
   `step` runs: no violation.
-- Sixteen mutants of the rewrite code each fail a scenario: no carrying, epoch not bumped,
+- Twenty mutants of the rewrite code each fail a scenario: no carrying, epoch not bumped,
   no `prev`, gc ignoring the reflog, a publish resetting the lineage, the moved check
   skipped, either recheck fix undone, the record's map missing carried commits, `recent`
   dropped; the undo's map not reversed, the undo expecting the old tip, a reset naming no
   one, carried commits unchecked, a carried commit keeping its own tree, an undo ignoring a
-  rewrite since. The map mutant
+  rewrite since; and four of `rebase::build`: never reusing a kept commit, the map
+  missing drops, no apply check, empty commits kept. The map mutant
   passed until quint-refinements#25 (the runtime filled a map entry the snapshot lacked in
   from the model).
-- Simplifications: a rebase only rewords the tip and a reset only drops it; each client
-  rewrites at most once, so a chain has at most four records; nothing maps to `None`
-  (dropped by a plan); `rewrites_between`'s `REWRITE_CHAIN_MAX` is never reached.
+- Simplifications: plans are over the tip's two commits, without squash or fixup (the
+  model names a commit by one author); a reset only drops the tip; each client rewrites
+  at most once, so a chain has at most four records; `rewrites_between`'s
+  `REWRITE_CHAIN_MAX` is never reached.
 
 ## Landing a stack (`land.qnt`)
 
@@ -340,7 +350,7 @@ lineage; after a swap it did not win, recheck (`landed_since`) or try again.
 
 ## Not modelled yet
 
-1. Rebase plans beyond a reword (reorder, squash, drop); successor walks
+1. Squash and fixup plans; successor walks
    (`Repo::successor`, `fork_point`) beyond the record's map.
 2. Packs and chunks (files are inline in the model's trees).
 3. Known heads (the fast path that skips the first ref read).

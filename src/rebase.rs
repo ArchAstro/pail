@@ -351,6 +351,11 @@ impl Built {
     pub fn created(&self) -> usize {
         self.prepared.len()
     }
+
+    /// The commits the rewrite creates, in order, prepared but not stored.
+    pub fn prepared(&self) -> &[PreparedCommit] {
+        &self.prepared
+    }
 }
 
 /// Carry out `plan` in memory: each commit's change list applied on the new history, which

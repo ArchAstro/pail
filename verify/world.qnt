@@ -45,17 +45,21 @@ module world {
   /// another error (`Unknown`).
   type Outcome = Pending | Published | Conflicted | Unknown | Rewritten | Moved
 
-  /// A rewrite in progress: what it is (its record's `op`: `rebase` rewords the tip,
-  /// `undo` reverses the ref's last record, `reset` drops the tip), the tip it was made
-  /// from, the commit replacing it, the successors it starts from and, for an undo, the
-  /// lineage that named its record (another rewrite since fails it); then, as its last
+  /// A rewrite in progress: what it is (its record's `op`: `rebase` carries out a `plan`
+  /// on the tip's commits, `undo` reverses the ref's last record, `reset` drops the tip),
+  /// the tip it was made from, the commit replacing it, the successors it starts from, the
+  /// commits it drops and the ones it makes (stored before the first attempt) and, for an
+  /// undo, the lineage that named its record (another rewrite since fails it); then, as its last
   /// attempt read the ref, the version its swap expects, the tip it moves to (with any
   /// commits landed since carried onto it) and the record it wrote.
   type Rw = {
     op: str,
+    plan: str,
     expected: CommitId,
     new: CommitId,
     successors: CommitId -> CommitId,
+    dropped: Set[CommitId],
+    made: Set[CommitId],
     since: Lineage,
     version: int,
     tip: CommitId,
@@ -147,7 +151,19 @@ module world {
   pure val MARK: str -> str =
     Map("alice" -> "~alice", "bob" -> "~bob", "carol" -> "~carol", "dave" -> "~dave")
 
-  pure val NO_RW: Rw = { op: "", expected: ROOT, new: ROOT, successors: Map(), since: NO_LINEAGE, version: 0, tip: ROOT, id: 0 }
+  pure val NO_RW: Rw = {
+    op: "",
+    plan: "",
+    expected: ROOT,
+    new: ROOT,
+    successors: Map(),
+    dropped: Set(),
+    made: Set(),
+    since: NO_LINEAGE,
+    version: 0,
+    tip: ROOT,
+    id: 0,
+  }
 
   pure val NO_LD: Ld = { calls: 0, tip: ROOT, version: 0, lineage: NO_LINEAGE }
 
