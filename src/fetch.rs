@@ -7,10 +7,12 @@ use std::ops::Range;
 /// request it saves; with hundreds of requests in flight that request is nearly free (latency
 /// overlaps) and the gap's bytes are not (bandwidth is shared), so the break-even is small:
 /// round-trip time x per-stream throughput is ~100 ms x ~1 MB/s once the link is saturated.
+/// Measured on GCS, services/rust cone (15.7 MB wanted): gap 0 = 853 requests / 15.7 MB,
+/// 16 KiB = 608 / 17.5 MB, 64 KiB = 398 / 24.2 MB, 256 KiB or 1 MiB = 344 / 29.8 MB, with
+/// the same ~1.7 s wall time at every gap.
 /// Packs written one commit at a time hold other files between the wanted ones, so a wide gap
-/// downloads much more than needed (firstlanding, whole tree: 1 MiB +20% bytes, 256 KiB +10%,
-/// 16 KiB +5%). `PAIL_FETCH_GAP` (bytes) overrides.
-pub const GAP: u64 = 64 << 10;
+/// downloads much more than needed. `PAIL_FETCH_GAP` (bytes) overrides.
+pub const GAP: u64 = 16 << 10;
 
 /// The merge gap in use.
 pub fn gap() -> u64 {
