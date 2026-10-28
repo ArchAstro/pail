@@ -1,7 +1,8 @@
 # verify: a model of pail, and the code checked against it
 
 A [Quint](https://quint-lang.org) model of how `Repo::commit` publishes over a bucket, how
-`Repo::rewrite_ref` rewrites it and how `gc` collects it, the properties they must keep, and scenarios the real code is checked
+`Repo::rewrite_ref` rewrites it, how `Repo::land_stack` lands a stack on it and how `gc`
+collects it, the properties they must keep, and scenarios the real code is checked
 against request by request with
 [quint-refinements](https://github.com/ArchAstro/quint-refinements). Beside it: the store
 contract every backend follows, and the branch policy every enforcement point decides.
@@ -21,6 +22,7 @@ world.qnt     the shared state: bucket, writers, the collector, ghosts
 publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, expiry)
 combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
 rewrite.qnt   rewrite_ref steps for rebase, undo, reset (read, lease, store, read + carry + record, swap, recheck)
+land.qnt      land_stack steps (make the stack; lease, read + fork point + copy, swap, recheck)
 gc.qnt        gc steps (exclusive lease, drain, mark, list, delete, release)
    ▲
 pail.qnt      the steps as actions, any interleaving (`step`), the properties
@@ -31,7 +33,7 @@ pail.qnt ──quint run──▶ properties hold in every simulated interleavin
      │
 scenarios.qnt ──compile──▶ quint-refinements.json + tests/refinement/generated.rs
                                    │
-tests/refinement.rs ── real commit, rewrite_ref and gc, gated store ──▶ same state after every step
+tests/refinement.rs ── real commit, rewrite_ref, land_stack and gc, gated store ──▶ same state after every step
 
 policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
                                     ├─▶ tests/policy_refinement/generated.rs  (pail)
@@ -50,6 +52,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `publish.qnt` | Writers running `commit_opts`, one store request per step |
 | `combine.qnt` | Writers that lost their direct attempts, running `commit_combining` |
 | `rewrite.qnt` | A client rewording the tip, undoing the last rewrite or resetting the tip, running `rewrite_ref` |
+| `land.qnt` | A client making a stack (a branch of its own) and landing it with `land_stack` |
 | `gc.qnt` | The collector running `gc::gc_with`, one store request per step |
 | `pail.qnt` | Actions, `step`, and the properties (`safety`) |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
@@ -57,7 +60,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `policy_scenarios.qnt` | `@conformance` runs: documents to parse and requests to decide |
 | `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json` | Generated scenario artifacts (do not edit) |
 | `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
-| `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
+| `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref`, `Repo::land_stack` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
 | `../tests/store_refinement.rs` | Each `Store` backend against `store_spec.qnt` |
 | `../tests/policy_refinement.rs` | `Policy::parse`, `Policy::decide`, `policy::request_op` against `policy.qnt` |
 
@@ -80,7 +83,8 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 
 ## Properties (`pail.qnt`)
 
-1. `branchIsComplete`: every commit the branch reaches, and its page, is stored.
+1. `branchIsComplete`: every commit a ref reaches (the branch, each stack), and its page,
+   is stored.
 2. `refOnlyMovesForward`: every move of the ref keeps what it named before, unless a
    rewrite's record names the move.
 3. `publishedIsOnBranch`: a client told "published" finds its commit on the branch (unless
@@ -92,6 +96,9 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 7. `recentIsTruthful`, and the rewrite properties `lineageNamesItsRecord`,
    `recordsAreChained`, `reflogIsStored`, `rewriteOutcomeIsTruthful`,
    `rewritesDropOnlyTheirTarget`: see the combining and rewrite sections.
+8. `publishedOnce`: each client's change enters the branch at most once by a publish (a
+   move no record names); after an undo or reset takes it off, only a rewrite brings it
+   back.
 
 `npm run simulate` checks them over random interleavings of three writers and gc,
 including crashes, expired leases and the grace period passing at any moment (simulation,
@@ -168,6 +175,10 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `beginRewrite(c)` | `c`'s `GET refs/main`; it then builds the reworded tip unleased (as `pail rebase` builds) |
 | action `beginUndo(c)` | `c`'s `GET refs/main` (then the record its lineage names, not held); `RewriteRequest::undo` |
 | action `beginReset(c)` | `force_ref`'s `GET refs/main`, to the tip's parent |
+| action `stack(c, delta)` | `c`'s stack, made whole past every gate: `write_commit` on the branch's tip, `create_branch c` (each under a lease) |
+| action `beginLand(c)` | `land_stack(c, main)` spawned; it leases first |
+| action `ldRead(c)` | its `GET refs/main` (the stack's ref and records are read past the gate), then the copy's upload |
+| action `ldSwap(c, d)` / `ldRecheck(c)` | its conditional `PUT refs/main`; the ref read after one it did not win |
 | action `rwStore(c)` | under `writing()`'s lease, the new commit's `PUT commits/<hash>` |
 | action `rwRead(c)` | `rewrite_ref`'s `GET refs/main`, then each carried commit's upload and the `PUT reflog/main/<id>` |
 | action `rwSwap(c, d)` / `rwRecheck(c)` | its conditional `PUT refs/main`; the ref read after an unanswered one |
@@ -229,8 +240,14 @@ objects map to `store.qnt` tombstones.
    other rewrite since fails it with `MovedError`.
 6. `force_ref` named no one, in its record or as committer of the commits it carried. It
    now takes the committer.
+7. `landAfterResetRun`: alice's land swap lands unanswered; bob resets the branch, dropping
+   her copy, before she rechecks. Her recheck compared the branch's tip with her copy
+   alone, so she retried and landed her change again, undoing the reset:
+   `publishedOnce`, found by `quint run` once landing was modelled. (A fast-forward land
+   did not: its fork point then fell on the reset's old tip.) Fixed in `land_stack`: its
+   recheck asks `landed_since`, as a writer's does.
 
-Scenarios 3 and 4 diverge from the unfixed code at the recheck, 5 at bob's read.
+Scenarios 3, 4 and 7 diverge from the unfixed code at the recheck, 5 at bob's read.
 
 ## Combining (`combine.qnt`)
 
@@ -299,9 +316,31 @@ what is under them).
   rewrites at most once, so a chain has at most four records; nothing maps to `None`
   (dropped by a plan); `rewrites_between`'s `REWRITE_CHAIN_MAX` is never reached.
 
+## Landing a stack (`land.qnt`)
+
+A client makes its stack whole (`stack`: one commit on the branch's tip and a branch named
+after the client), then runs `land_stack` onto the branch: lease; read the stack and the
+branch; find the fork point (the merge base, or the merge base with a rewrite's old tip if
+later); land nothing if the branch has the commit or a copy of it above that; fast-forward
+if the branch is still at the fork point; otherwise copy the commit onto the branch's tip
+unless a path it writes changed since (`ConflictError`); swap, keeping `recent` and
+lineage; after a swap it did not win, recheck (`landed_since`) or try again.
+
+- Properties: `publishedIsOnBranch`, `conflictedHasNothingOnBranch`, `landsAtMostOnce` hold
+  of landers as of writers; `publishedOnce` is new; gc marks every ref.
+- Scenarios: `landAfterResetRun` (finding 7), `landFastForwardRun`, `landAfterRewordRun`
+  (the fork point under a reword), `landAfterResetDropRun` (a reset's old tip as the fork
+  point: the dropped commit below the stack stays dropped), `landConflictRun`,
+  `landTwiceRun` (landing again finds the copy).
+- Five mutants each fail a scenario: the recheck comparing tips, the fork point ignoring
+  rewrites, no conflict check, no fast-forward, copies ignored.
+- Simplifications: a stack is one commit, made whole (its own lease and requests are not
+  steps), and is not moved after; a client lands at most its own stack; `land --stack`'s
+  CLI (pre-publish hook, reporting) is not modelled.
+
 ## Not modelled yet
 
-1. `land --stack`; rebase plans beyond a reword (reorder, squash, drop); successor walks
+1. Rebase plans beyond a reword (reorder, squash, drop); successor walks
    (`Repo::successor`, `fork_point`) beyond the record's map.
 2. Packs and chunks (files are inline in the model's trees).
 3. Known heads (the fast path that skips the first ref read).

@@ -12,7 +12,8 @@ module world {
   /// Where a writer is: the direct path (`Leasing` .. `Rechecking`), then, having lost it,
   /// combining (`Intending` .. `Withdrawing`, `Repo::commit_combining`). A client
   /// rewriting the branch instead (`rewrite.qnt`) leases as a writer does, then goes
-  /// `RwStoring` .. `RwRechecking`.
+  /// `RwStoring` .. `RwRechecking`; one landing a stack (`land.qnt`) first makes it
+  /// (`Stacked`), then leases and goes `LdReading` .. `LdRechecking`.
   type Phase =
     | Idle
     | Leasing
@@ -32,6 +33,10 @@ module world {
     | RwReading
     | RwSwapping
     | RwRechecking
+    | Stacked
+    | LdReading
+    | LdSwapping
+    | LdRechecking
     | Done
 
   /// What `commit` returned: nothing yet, Ok, a ConflictError, or another error (its
@@ -71,6 +76,10 @@ module world {
     then: Outcome,
   }
 
+  /// A landing in progress: how many land calls the client has begun, what its last
+  /// attempt read of the branch (version, lineage) and the tip its swap moves it to.
+  type Ld = { calls: int, tip: CommitId, version: int, lineage: Lineage }
+
   type Client = {
     base: CommitId,
     delta: Delta,
@@ -85,6 +94,7 @@ module world {
     attempt: int,
     comb: Comb,
     rw: Rw,
+    ld: Ld,
     outcome: Outcome,
   }
 
@@ -139,6 +149,8 @@ module world {
 
   pure val NO_RW: Rw = { op: "", expected: ROOT, new: ROOT, successors: Map(), since: NO_LINEAGE, version: 0, tip: ROOT, id: 0 }
 
+  pure val NO_LD: Ld = { calls: 0, tip: ROOT, version: 0, lineage: NO_LINEAGE }
+
   pure val NO_COMB: Comb = {
     polledRef: false,
     head: { commit: ROOT, version: 0 },
@@ -160,6 +172,7 @@ module world {
     attempt: 1,
     comb: NO_COMB,
     rw: NO_RW,
+    ld: NO_LD,
     outcome: Pending,
   }
 

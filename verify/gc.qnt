@@ -50,8 +50,8 @@ module gc {
     collector: {
       ...s.collector,
       phase: GcMarked,
-      liveCommits: branch(s.bucket).union(reflogReaches(s.bucket)),
-      livePages: branch(s.bucket).union(reflogReaches(s.bucket)).map(id => treeOf(s.bucket, id)),
+      liveCommits: refsReach(s.bucket).union(reflogReaches(s.bucket)),
+      livePages: refsReach(s.bucket).union(reflogReaches(s.bucket)).map(id => treeOf(s.bucket, id)),
     },
   }
 

@@ -935,4 +935,197 @@ module scenarios {
       }),
       state' = state,
     })
+
+  // ---------- landing a stack ----------
+
+  pure val ALICE_STACK: CommitId = ["root", "alice"]
+  pure val ALICE_LANDED: CommitId = ["root", "carol", "alice", "~alice"]
+  pure val CAROL_ON_ROOT: CommitId = ["root", "carol"]
+
+  /// Alice stacks her commit on the root; carol publishes meanwhile, so alice's land copies
+  /// the commit onto carol's. Its swap lands unanswered, and bob resets the branch,
+  /// dropping the copy, before alice looks. The reset's record replaced a tip that had it:
+  /// alice landed, and the reset stands. (Comparing the branch's tip with her copy alone,
+  /// alice retried and landed her change again.)
+  /// @conformance
+  run landAfterResetRun = init
+    .then(stack("alice", ALICE_A))
+    .then(begin("carol", ROOT, BOB_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(ldSwap("alice", Lost))
+    .then(beginReset("bob"))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(rwRead("bob"))
+    .then(rwSwap("bob", Answered))
+    .then(ldRecheck("alice"))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: CAROL_ON_ROOT, version: 4 },
+        client(state, "alice").outcome == Published,
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// Alice stacks her commit on the root and lands it while the branch is still there: a
+  /// fast-forward, no copy. Carol's stack, also on the root, then lands as a copy onto
+  /// alice's commit.
+  /// @conformance
+  run landFastForwardRun = init
+    .then(stack("alice", ALICE_A))
+    .then(stack("carol", BOB_B))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(ldSwap("alice", Answered))
+    .then(beginLand("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(ldRead("carol"))
+    .then(ldSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "alice", "carol", "~carol"],
+        treeOf(state.bucket, ["root", "alice", "carol", "~carol"]) == Map("a" -> "1", "b" -> "1"),
+        client(state, "alice").outcome == Published,
+        client(state, "carol").outcome == Published,
+      }),
+      state' = state,
+    })
+
+  /// Alice stacks her commit on bob's; dave rewords bob's commit before
+  /// alice lands. The merge base with the branch is the root, but bob's old commit (the
+  /// reword's old tip) is a later one: alice's stack starts above it, so only her own
+  /// commit is copied, onto the reworded one.
+  /// @conformance
+  run landAfterRewordRun = init
+    .then(begin("bob", ROOT, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(stack("alice", ALICE_A))
+    .then(beginRewrite("dave"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwStore("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(ldSwap("alice", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "bob", "~dave", "alice", "~alice"],
+        ancestorsOf(state.bucket, tip(state.bucket).commit) == Set(ROOT, ["root", "bob", "~dave"]),
+        client(state, "alice").outcome == Published,
+      }),
+      state' = state,
+    })
+
+  /// Alice stacks a change to `a` on the root; bob changes `a` on the branch first. Her
+  /// land finds the path changed since her stack left the branch: a conflict, nothing
+  /// landed.
+  /// @conformance
+  run landConflictRun = init
+    .then(stack("alice", ALICE_A))
+    .then(begin("bob", ROOT, BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == BOB_1,
+        client(state, "alice").outcome == Conflicted,
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// Alice's stack lands as a copy onto carol's commit; dave publishes on top; alice lands
+  /// again. The branch has a copy of her commit above where her stack left it: nothing
+  /// more lands.
+  /// @conformance
+  run landTwiceRun = init
+    .then(stack("alice", ALICE_A))
+    .then(begin("carol", ROOT, BOB_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(ldSwap("alice", Answered))
+    .then(begin("dave", ALICE_LANDED, DAVE_B))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ALICE_LANDED.append("dave"),
+        client(state, "alice").outcome == Published,
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// Alice stacks her commit on bob's; carol resets the branch, dropping bob's commit,
+  /// before alice lands. The reset's old tip is where alice's stack left the branch: only
+  /// her own commit lands, onto the root. (From the merge base alone, the root, bob's
+  /// commit counted as part of her stack and landed again.)
+  /// @conformance
+  run landAfterResetDropRun = init
+    .then(begin("bob", ROOT, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(stack("alice", ALICE_A))
+    .then(beginReset("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(ldSwap("alice", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "alice", "~alice"],
+        not(branch(state.bucket).exists(id => author(id) == "bob")),
+        client(state, "alice").outcome == Published,
+      }),
+      state' = state,
+    })
 }

@@ -238,6 +238,13 @@ module bucket {
   pure def allStored(b: Bucket, ids: Set[CommitId]): bool =
     ids.forall(id => isLive(b.commits, id) and isLive(b.pages, treeOf(b, id)))
 
-  /// Whether every commit the branch reaches, and its page, is stored.
-  pure def branchIsStored(b: Bucket): bool = allStored(b, branch(b))
+  /// Every commit in the history at `id`, `id` included.
+  pure def historyAt(b: Bucket, id: CommitId): Set[CommitId] = ancestorsOf(b, id).union(Set(id))
+
+  /// Every commit some ref reaches: the branch and each stack (`land.qnt`).
+  pure def refsReach(b: Bucket): Set[CommitId] =
+    liveKeys(b.refs).fold(Set(), (acc, r) => acc.union(historyAt(b, body(b.refs, r).commit)))
+
+  /// Whether every commit a ref reaches, and its page, is stored.
+  pure def branchIsStored(b: Bucket): bool = allStored(b, refsReach(b))
 }
