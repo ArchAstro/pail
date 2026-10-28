@@ -6,6 +6,7 @@ pub mod creds;
 pub mod enc;
 pub mod events;
 pub mod extensions;
+pub mod fetch;
 pub mod gc;
 pub mod gcs_emulator;
 pub mod gitcmd;
