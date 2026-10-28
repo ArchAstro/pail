@@ -100,6 +100,11 @@ module world {
     rw: Rw,
     ld: Ld,
     outcome: Outcome,
+    // Where its read commit is in the branch's history at lineage `foundAt`, once it asked
+    // (`locate.qnt`).
+    located: bool,
+    found: CommitId,
+    foundAt: Lineage,
   }
 
   // ---------- the collector (`pail gc`) ----------
@@ -190,6 +195,9 @@ module world {
     rw: NO_RW,
     ld: NO_LD,
     outcome: Pending,
+    located: false,
+    found: ROOT,
+    foundAt: NO_LINEAGE,
   }
 
   pure val GC_IDLE: Collector = {

@@ -58,7 +58,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        35,
+        39,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -669,6 +669,8 @@ struct Writer {
     /// Set once it has made a stack; `ld` once it lands it.
     stacked: bool,
     ld: Option<Lander>,
+    /// Where it found the commit it read (`Repo::successor`), and the lineage it looked at.
+    found: Option<(Id, Lineage)>,
     /// Where it is on the combining path (`Intending` ..), once it has written its intent.
     combining: Option<&'static str>,
     /// Its intent's id and the time the scenario gave it.
@@ -1266,6 +1268,7 @@ impl Harness {
     fn began_rewrite(&mut self, name: &str, op: &'static str) -> Result<(), String> {
         let w = self.writer(name)?;
         w.base = Some(vec!["root".to_owned()]);
+        w.found = None;
         w.rw = Some(Rewriter {
             op,
             ..Rewriter::default()
@@ -2001,6 +2004,15 @@ impl Harness {
             ("rw", self.rw_value(w)?),
             ("ld", self.ld_value(w)?),
             ("outcome", RuntimeValue::Text(outcome.to_owned())),
+            ("located", RuntimeValue::Bool(w.found.is_some())),
+            (
+                "found",
+                id_value(w.found.as_ref().map_or(&root, |(id, _)| id)),
+            ),
+            (
+                "foundAt",
+                self.lineage_value(w.found.as_ref().map_or(&Lineage::default(), |(_, l)| l))?,
+            ),
         ]))
     }
 
@@ -2189,6 +2201,7 @@ impl generated::Implementation for Harness {
         let w = self.writer(&name)?;
         w.base = Some(base);
         w.delta = delta;
+        w.found = None;
         self.settle(&name)
     }
 
@@ -2489,6 +2502,37 @@ impl generated::Implementation for Harness {
         let c = Harness::actor_arg(arguments)?;
         let how = Delivery::of(arguments.get(1).ok_or("ldSwap takes a Delivery")?)?;
         self.release(&c, Request::Swap, None, how)
+    }
+
+    /// `Repo::successor` of the commit `c` last read, from the lineage it read it at to the
+    /// branch's now, read past every gate.
+    fn locate(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = Harness::actor_arg(arguments)?;
+        let w = self.writer(&name)?;
+        let (seen, _, _) = w.seen.clone().ok_or(format!("{name} has read nothing"))?;
+        let since = w.seen_lineage.clone();
+        let commit = *self
+            .hashes
+            .get(&seen)
+            .ok_or_else(|| format!("no commit {seen:?}"))?;
+        let (data, _) = self
+            .object(&format!("refs/{BRANCH}"))?
+            .ok_or("the branch ref is gone")?;
+        let now: RefValue = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+        let found = self
+            .rt()
+            .block_on(
+                self.observer
+                    .successor(BRANCH, commit, &since, &now.lineage),
+            )
+            .map_err(|e| e.to_string())?;
+        // None (nothing of its history survived) has no model counterpart: it names no commit.
+        let id = match found {
+            Some(h) => self.name(&h)?,
+            None => vec!["none".to_owned()],
+        };
+        self.writer(&name)?.found = Some((id, now.lineage));
+        Ok(())
     }
 
     fn ld_recheck(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {

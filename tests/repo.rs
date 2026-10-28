@@ -788,10 +788,11 @@ async fn rebase_rewrites_in_one_publish_and_records_the_map() {
     };
     assert_eq!(snap(new_c).await, vec!["a", "base.txt", "c"]);
 
-    // Successors: every old commit finds its place, a dropped one its kept ancestor's.
+    // Successors: every old commit finds its place, a dropped one its kept ancestor's; the
+    // fixup melds down into a, but its history had c, so its place is c's.
     let (r, _) = repo.read_ref_value("f").await.unwrap().unwrap();
     let old = pail::objects::Lineage::default();
-    for (c, want) in [(cs[0], new_a), (cs[1], new_a), (cs[3], new_a), (c0, c0)] {
+    for (c, want) in [(cs[0], new_a), (cs[1], new_a), (cs[3], new_c), (c0, c0)] {
         assert_eq!(
             repo.successor("f", c, &old, &r.lineage).await.unwrap(),
             Some(want)

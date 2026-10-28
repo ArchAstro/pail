@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
 /// Pail as a whole: every feature's steps (`publish.qnt`, `combine.qnt`, `rewrite.qnt`,
-/// `land.qnt`, `gc.qnt`) as actions on one
+/// `land.qnt`, `locate.qnt`, `gc.qnt`) as actions on one
 /// state, a `step` that interleaves them freely, and the properties that must hold in
 /// every reachable state. `npm run simulate` checks them; `scenarios.qnt` holds runs the
 /// real code is checked against.
@@ -12,6 +12,7 @@ module pail {
   import combine.* from "./combine"
   import rewrite.* from "./rewrite"
   import land.* from "./land"
+  import locate.* from "./locate"
   import gc.* from "./gc"
 
   var state: State
@@ -138,6 +139,10 @@ module pail {
 
   action ldRecheck(c: str): bool = all { ldRecheckCan(state, c), state' = ldRecheckNext(state, c) }
 
+  // ---------- finding a commit after rewrites ----------
+
+  action locate(c: str): bool = all { locateCan(state, c), state' = locateNext(state, c) }
+
   // ---------- the collector ----------
 
   action gcLease: bool = all { gcLeaseCan(state), state' = gcLeaseNext(state) }
@@ -222,6 +227,7 @@ module pail {
       ldRead(c),
       ldSwap(c, d),
       ldRecheck(c),
+      locate(c),
       gcLease,
       gcCheckLeases,
       gcMark,
@@ -278,6 +284,7 @@ module pail {
       ldRead(c),
       ldSwap(c, d),
       ldRecheck(c),
+      locate(c),
     }
   }
 
@@ -400,6 +407,21 @@ module pail {
         implies chain(state.bucket).forall(id => recordOf(state.bucket, id).by != c),
     })
 
+  /// Where a client found the commit it read is on the branch, while the branch has not
+  /// been rewritten since.
+  val locatedOnBranch: bool =
+    CLIENTS.forall(c => client(state, c).located and client(state, c).foundAt == lineageOf(state.bucket)
+      implies historyAt(state.bucket, tip(state.bucket).commit).contains(client(state, c).found))
+
+  /// What a client found has every change the commit it read had, but those a rewrite in
+  /// the branch's chain took off: rewrites carry history, they do not lose it.
+  val locateKeepsChanges: bool =
+    CLIENTS.forall(c => client(state, c).located and client(state, c).foundAt == lineageOf(state.bucket)
+      implies authorsAt(state.bucket, client(state, c).seen.commit).forall(a => or {
+        authorsAt(state.bucket, client(state, c).found).contains(a),
+        chain(state.bucket).exists(r => droppedBy(state.bucket, recordOf(state.bucket, r)).contains(a)),
+      }))
+
   /// While gc marks and deletes, no writer is between its first read and its return.
   val gcRunsAlone: bool =
     Set(GcLocked, GcMarked, GcSweepingCommits, GcSweepingPages).contains(state.collector.phase)
@@ -419,5 +441,7 @@ module pail {
     rewriteOutcomeIsTruthful,
     rewritesDropOnlyTheirTarget,
     publishedOnce,
+    locatedOnBranch,
+    locateKeepsChanges,
   }
 }
