@@ -2,8 +2,8 @@
 /// Rewriting a branch (`Repo::rewrite_ref`), racing the writers that keep landing on it.
 /// Three rewrites, each its record's `op`:
 ///
-/// 1. `rebase` (`pail rebase`) rewords the tip: one new commit with the tip's change, on
-///    the tip's parent.
+/// 1. `rebase` (`pail rebase`) carries out a plan on the tip's commits in memory
+///    (`rebase::build`): reword the tip, drop its parent, drop the tip, or swap the two.
 /// 2. `undo` (`pail rebase --undo`) reverses the ref's last record: from its new tip back
 ///    to its old one, each successor mapped back.
 /// 3. `reset` (`Repo::force_ref`) moves the branch to the tip's parent, dropping the tip.
@@ -12,8 +12,9 @@
 ///
 /// ```text
 ///   begin* (reads the ref, and the record to undo) ─▶ Leasing ─▶ CheckingLeases
-///   CheckingLeases ─▶ RwStoring (rebase) ─rwStore (the new commit)─▶ RwReading
-///                  ─▶ RwReading (undo, reset: the new tip is stored already)
+///   beginRebase ─▶ Done (Conflicted)               (a commit of the plan does not apply)
+///   CheckingLeases ─▶ RwStoring (a plan made commits) ─rwStore (them)─▶ RwReading
+///                  ─▶ RwReading (otherwise: the new tip is stored already)
 ///   RwReading ─rwRead─▶ RwSwapping                (carried what landed since, wrote the record)
 ///             ─rwRead─▶ Done (Moved)               (the tip is gone, or an undo's record is not the last)
 ///             ─rwRead─▶ Done (Conflicted)          (a commit landed since does not apply)
@@ -42,19 +43,109 @@ module rewrite {
   pure def inverse(m: CommitId -> CommitId): CommitId -> CommitId =
     m.keys().fold(Map(), (acc, k) => acc.put(m.get(k), k))
 
-  /// Read the ref: its tip is the commit to reword (the root has none to keep).
-  pure def beginRewriteCan(s: State, c: str): bool =
-    client(s, c).phase == Idle and tip(s.bucket).commit != ROOT
+  /// A plan carried out in memory (`rebase::build`): the tip so far, its tree and
+  /// ancestors, each rewritten commit's successor, the commits dropped, the ones made, and
+  /// whether every commit so far applied.
+  type Built = {
+    ok: bool,
+    tip: CommitId,
+    tree: Tree,
+    ancestors: Set[CommitId],
+    successors: CommitId -> CommitId,
+    dropped: Set[CommitId],
+    made: Set[Carried],
+  }
 
-  pure def beginRewriteNext(s: State, c: str): State = {
+  /// A commit carried onto the new history, known before it is stored.
+  type Carried = { id: CommitId, tree: Tree, ancestors: Set[CommitId] }
+
+  /// The plan so far on `base`, with `dropped` dropped.
+  pure def builtOn(b: Bucket, base: CommitId, dropped: Set[CommitId]): Built = {
+    ok: true,
+    tip: base,
+    tree: treeOf(b, base),
+    ancestors: ancestorsOf(b, base),
+    successors: Map(),
+    dropped: dropped,
+    made: Set(),
+  }
+
+  /// Pick commit `x` onto the plan so far: kept as it is if it still sits there and is not
+  /// reworded; otherwise its change from its parent, which must apply, written over the
+  /// tree so far; dropped if that changes nothing.
+  pure def pick(b: Bucket, c: str, x: CommitId, rewords: bool, a: Built): Built =
+    if (not(a.ok)) a
+    else if (not(rewords) and parentOf(b, x) == a.tip)
+      { ...a, tip: x, tree: treeOf(b, x), ancestors: ancestorsOf(b, x) }
+    else Set(parentOf(b, x)).fold(a, (n0, p) =>
+      Set(deltaOf(b, x, p)).fold(a, (n1, d) =>
+        if (conflicts(d, treeOf(b, p), a.tree)) { ...a, ok: false }
+        else if (overlay(a.tree, d) == a.tree) { ...a, dropped: a.dropped.union(Set(x)) }
+        else Set(remade(c, x, a.tip)).fold(a, (n2, id) => {
+          ...a,
+          tip: id,
+          tree: overlay(a.tree, d),
+          ancestors: a.ancestors.union(Set(a.tip)),
+          successors: a.successors.put(x, id),
+          made: a.made.union(Set({ id: id, tree: overlay(a.tree, d), ancestors: a.ancestors.union(Set(a.tip)) })),
+        })
+      )
+    )
+
+  /// `plan` carried out by `c` on the history at `t` (its tip `t`, parent `p`, grandparent
+  /// `g`): `reword` t; `dropParent` (p dropped, t picked onto g); `dropTip` (p kept, t
+  /// dropped); `reorder` (t, then p, onto g).
+  pure def planned(b: Bucket, c: str, plan: str, t: CommitId): Built =
+    Set(parentOf(b, t)).fold(builtOn(b, t, Set()), (n0, p) =>
+      Set(parentOf(b, p)).fold(n0, (n1, g) =>
+        if (plan == "reword") pick(b, c, t, true, builtOn(b, p, Set()))
+        else if (plan == "dropParent") pick(b, c, t, false, builtOn(b, g, Set(p)))
+        else if (plan == "dropTip") pick(b, c, p, false, builtOn(b, g, Set(t)))
+        else pick(b, c, p, false, pick(b, c, t, false, builtOn(b, g, Set())))
+      )
+    )
+
+  pure val PLANS: Set[str] = Set("dropParent", "dropTip", "reorder")
+
+  /// Read the ref and carry out `plan` on its tip's commits (the reword needs one, the
+  /// others two), unleased, as `pail rebase` builds before taking its lease. A commit that
+  /// does not apply fails it there: a conflict, nothing leased or stored.
+  pure def beginRebaseCan(s: State, c: str, plan: str): bool = and {
+    client(s, c).phase == Idle,
+    tip(s.bucket).commit != ROOT,
+    plan == "reword" or parentOf(s.bucket, tip(s.bucket).commit) != ROOT,
+  }
+
+  pure def beginRebaseNext(s: State, c: str, plan: str): State = {
     val expected = tip(s.bucket).commit
-    val new = remade(c, expected, parentOf(s.bucket, expected))
-    withClient(s, c, {
+    val built = planned(s.bucket, c, plan, expected)
+    if (not(built.ok))
+      withClient(s, c, {
+        ...IDLE,
+        phase: Done,
+        outcome: Conflicted,
+        rw: { ...NO_RW, op: "rebase", plan: plan, expected: expected },
+      })
+    else withClient(s, c, {
       ...IDLE,
       phase: Leasing,
-      rw: { ...NO_RW, op: "rebase", expected: expected, new: new, successors: Map(expected -> new) },
+      rw: {
+        ...NO_RW,
+        op: "rebase",
+        plan: plan,
+        expected: expected,
+        new: built.tip,
+        successors: built.successors,
+        dropped: built.dropped,
+        made: built.made.map(m => m.id),
+      },
     })
   }
+
+  /// Reword the tip (the root has none to keep).
+  pure def beginRewriteCan(s: State, c: str): bool = beginRebaseCan(s, c, "reword")
+
+  pure def beginRewriteNext(s: State, c: str): State = beginRebaseNext(s, c, "reword")
 
   /// Read the ref, then the record its lineage names (a branch never rewritten has none
   /// to undo): from that record's new tip back to its old one.
@@ -89,20 +180,20 @@ module rewrite {
     })
   }
 
-  /// Store the new commit (and its page: the tip's), under the lease.
+  /// Store the plan's new commits (and their pages) in one wave, under the lease. The
+  /// history the plan was made from cannot have changed: commits are immutable.
   pure def rwStoreCan(s: State, c: str): bool = client(s, c).phase == RwStoring
 
   pure def rwStoreNext(s: State, c: str): State = {
     val rw = client(s, c).rw
     {
       ...s,
-      bucket: stored(s.bucket, rw.new, treeOf(s.bucket, rw.expected), ancestorsOf(s.bucket, rw.expected)),
+      bucket: planned(s.bucket, c, rw.plan, rw.expected).made.fold(s.bucket, (acc, m) =>
+        stored(acc, m.id, m.tree, m.ancestors)
+      ),
       clients: s.clients.set(c, { ...client(s, c), phase: RwReading }),
     }
   }
-
-  /// A commit carried onto the new history, known before it is stored.
-  type Carried = { id: CommitId, tree: Tree, ancestors: Set[CommitId] }
 
   /// Carrying commits onto the new history: the tip so far, its tree and ancestors, each
   /// rewritten commit's successor, the commits made, and whether each carried so far
@@ -182,6 +273,7 @@ module rewrite {
             prev: lineageOf(s.bucket).rewrite,
             by: c,
             successors: a.successors,
+            dropped: rw.dropped,
           }),
           clients: s.clients.set(c, {
             ...client(s, c),

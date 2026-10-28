@@ -42,7 +42,8 @@ module bucket {
   /// A rewrite's record (`reflog/<branch>/<id>`, ids here numbered in creation order):
   /// what rewrote it (`rebase`, `undo` or `reset`), the tip it replaced and the one it
   /// moved to, the epoch the branch entered, the previous record (0: none), who rewrote
-  /// it, and each rewritten commit's successor (pail's `map`).
+  /// it, each rewritten commit's successor, and the commits it dropped (pail's `map`, its
+  /// `None` entries apart).
   type Rewrite = {
     op: str,
     old: CommitId,
@@ -51,6 +52,7 @@ module bucket {
     prev: int,
     by: str,
     successors: CommitId -> CommitId,
+    dropped: Set[CommitId],
   }
 
   /// A ref object's body.
