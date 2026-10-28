@@ -165,6 +165,26 @@ pub struct RewriteRequest {
     pub map: BTreeMap<Hash, Option<Hash>>,
 }
 
+impl RewriteRequest {
+    /// Undo `rec` (`pail rebase --undo`): from its new tip back to its old one, each
+    /// successor mapped back to the commit it replaced.
+    pub fn undo(branch: &str, rec: &Rewrite, committer: String, date: String) -> Self {
+        RewriteRequest {
+            branch: branch.to_string(),
+            expected: rec.new,
+            new: rec.old,
+            op: "undo".into(),
+            committer,
+            date,
+            map: rec
+                .map
+                .iter()
+                .filter_map(|(old, new)| new.map(|n| (n, Some(*old))))
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RewriteOutcome {
     /// The tip that was replaced (`expected`, or a descendant whose commits were carried).
@@ -410,8 +430,9 @@ impl Repo {
     }
 
     /// Move a branch to any commit (not necessarily a descendant): a rewrite with no map, so
-    /// each dropped commit's successor is its nearest kept ancestor.
-    pub async fn force_ref(&self, name: &str, commit: Hash) -> Result<()> {
+    /// each dropped commit's successor is its nearest kept ancestor. `committer` is who the
+    /// record names, and the committer of any commit carried.
+    pub async fn force_ref(&self, name: &str, commit: Hash, committer: &str) -> Result<()> {
         let (old, _) = self
             .read_ref(name)
             .await?
@@ -422,7 +443,7 @@ impl Repo {
                 expected: old,
                 new: commit,
                 op: "reset".into(),
-                committer: String::new(),
+                committer: committer.to_string(),
                 date: crate::objects::now_date(),
                 map: BTreeMap::new(),
             },

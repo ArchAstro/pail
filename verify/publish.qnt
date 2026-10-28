@@ -53,7 +53,10 @@ module publish {
     if (leasedByOthers(s.bucket, c, Set(Exclusive)))
       { ...s, bucket: unleased(s.bucket, c), clients: s.clients.set(c, { ...client(s, c), phase: Leasing }) }
     else
-      withClient(s, c, { ...client(s, c), phase: if (client(s, c).rw == NO_RW) Reading else RwStoring })
+      withClient(s, c, { ...client(s, c), phase:
+        if (client(s, c).rw == NO_RW) Reading
+        else if (client(s, c).rw.op == "rebase") RwStoring
+        else RwReading })
 
   /// Read the ref. A head past the base replays the delta onto it, unless a path the delta
   /// writes changed in between (`check_disjoint`).

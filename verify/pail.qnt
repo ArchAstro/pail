@@ -96,6 +96,16 @@ module pail {
     state' = beginRewriteNext(state, c),
   }
 
+  action beginUndo(c: str): bool = all {
+    beginUndoCan(state, c),
+    state' = beginUndoNext(state, c),
+  }
+
+  action beginReset(c: str): bool = all {
+    beginResetCan(state, c),
+    state' = beginResetNext(state, c),
+  }
+
   action rwStore(c: str): bool = all { rwStoreCan(state, c), state' = rwStoreNext(state, c) }
 
   action rwRead(c: str): bool = all { rwReadCan(state, c), state' = rwReadNext(state, c) }
@@ -181,6 +191,8 @@ module pail {
       batchRecheck(c),
       withdraw(c),
       beginRewrite(c),
+      beginUndo(c),
+      beginReset(c),
       rwStore(c),
       rwRead(c),
       rwSwap(c, d),
@@ -228,6 +240,8 @@ module pail {
       batchRecheck(c),
       withdraw(c),
       beginRewrite(c),
+      beginUndo(c),
+      beginReset(c),
       rwStore(c),
       rwRead(c),
       rwSwap(c, d),
@@ -252,21 +266,40 @@ module pail {
       }),
     })
 
+  /// Whether `c`'s change was taken off the branch by an undo or reset (on purpose: a
+  /// rebase keeps every change).
+  def dropped(c: str): bool =
+    state.bucket.reflog.keys().exists(id => and {
+      recordOf(state.bucket, id).op != "rebase",
+      droppedBy(state.bucket, recordOf(state.bucket, id)).contains(c),
+    })
+
   /// A client told its commit was published finds it on the branch, now and later: its
-  /// own commit, or the one a combining round made of its intent.
+  /// own commit, or the one a combining round made of its intent (unless an undo or reset
+  /// took it off since).
   val publishedIsOnBranch: bool =
     CLIENTS.forall(c =>
       client(state, c).outcome == Published
-        implies branch(state.bucket).exists(id => author(id) == c)
+        implies (branch(state.bucket).exists(id => author(id) == c) or dropped(c))
     )
 
   /// The ref's `recent` names, for each landed intent, a commit made of it, and the
-  /// branch has it (that commit, or what a rewrite made of it).
+  /// branch has it (that commit, or what a rewrite made of it), unless an undo or reset
+  /// took it off since.
   val recentIsTruthful: bool =
     recentOf(state.bucket).keys().forall(w => and {
       author(recentOf(state.bucket).get(w)) == w,
-      branch(state.bucket).exists(id => author(id) == w),
+      branch(state.bucket).exists(id => author(id) == w) or dropped(w),
     })
+
+  /// A rebase takes no change off the branch; an undo or reset takes off at most one (the
+  /// tip it drops, or the one the record it undoes added back): every change landed on
+  /// top meanwhile is carried.
+  val rewritesDropOnlyTheirTarget: bool =
+    state.bucket.reflog.keys().forall(id =>
+      if (recordOf(state.bucket, id).op == "rebase") droppedBy(state.bucket, recordOf(state.bucket, id)) == Set()
+      else droppedBy(state.bucket, recordOf(state.bucket, id)).size() <= 1
+    )
 
   /// A client told it conflicted has nothing on the branch: it can retry without
   /// publishing its change twice.
@@ -304,12 +337,13 @@ module pail {
   val reflogIsStored: bool = allStored(state.bucket, reflogReaches(state.bucket))
 
   /// A client told its rewrite landed finds its record in the ref's chain; one told the
-  /// branch moved, so nothing was rewritten, finds none.
+  /// branch moved, or that a commit landed since does not apply, so nothing was
+  /// rewritten, finds none.
   val rewriteOutcomeIsTruthful: bool =
     CLIENTS.forall(c => and {
       client(state, c).outcome == Rewritten
         implies chain(state.bucket).exists(id => recordOf(state.bucket, id).by == c),
-      client(state, c).outcome == Moved
+      Set(Moved, Conflicted).contains(client(state, c).outcome)
         implies chain(state.bucket).forall(id => recordOf(state.bucket, id).by != c),
     })
 
@@ -330,5 +364,6 @@ module pail {
     recordsAreChained,
     reflogIsStored,
     rewriteOutcomeIsTruthful,
+    rewritesDropOnlyTheirTarget,
   }
 }

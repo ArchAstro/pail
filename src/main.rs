@@ -2147,22 +2147,9 @@ async fn rebase(ctx: &Ctx, a: RebaseArgs) -> Result<()> {
             );
             return Ok(());
         }
-        let inverse = rec
-            .map
-            .iter()
-            .filter_map(|(old, new)| new.map(|n| (n, Some(*old))))
-            .collect();
         let out = repo
             .rewrite_ref(
-                pail::repo::RewriteRequest {
-                    branch: branch.clone(),
-                    expected: rec.new,
-                    new: rec.old,
-                    op: "undo".into(),
-                    committer,
-                    date,
-                    map: inverse,
-                },
+                pail::repo::RewriteRequest::undo(&branch, &rec, committer, date),
                 check,
             )
             .await?;

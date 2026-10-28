@@ -1,24 +1,32 @@
 // -*- mode: Bluespec; -*-
-/// Rewriting a branch (`pail rebase` publishing through `Repo::rewrite_ref`), racing the
-/// writers that keep landing on it. The rewrite here rewords the tip: one new commit with
-/// the tip's change, on the tip's parent. Each step is one store request (or one wave):
+/// Rewriting a branch (`Repo::rewrite_ref`), racing the writers that keep landing on it.
+/// Three rewrites, each its record's `op`:
+///
+/// 1. `rebase` (`pail rebase`) rewords the tip: one new commit with the tip's change, on
+///    the tip's parent.
+/// 2. `undo` (`pail rebase --undo`) reverses the ref's last record: from its new tip back
+///    to its old one, each successor mapped back.
+/// 3. `reset` (`Repo::force_ref`) moves the branch to the tip's parent, dropping the tip.
+///
+/// Each step is one store request (or one wave):
 ///
 /// ```text
-///   beginRewrite (reads the ref: the tip to reword) ─▶ Leasing ─▶ CheckingLeases ─▶ RwStoring
-///   RwStoring ─rwStore (the new commit)─▶ RwReading
+///   begin* (reads the ref, and the record to undo) ─▶ Leasing ─▶ CheckingLeases
+///   CheckingLeases ─▶ RwStoring (rebase) ─rwStore (the new commit)─▶ RwReading
+///                  ─▶ RwReading (undo, reset: the new tip is stored already)
 ///   RwReading ─rwRead─▶ RwSwapping                (carried what landed since, wrote the record)
 ///             ─rwRead─▶ Done (Moved)               (the tip is gone from the branch)
+///             ─rwRead─▶ Done (Conflicted)          (a commit landed since does not apply)
 ///   RwSwapping ─answered, won─▶ Done (Rewritten)
 ///              ─answered, lost─▶ RwReading
 ///              ─unanswered─▶ RwRechecking ─rwRecheck─▶ Done (Rewritten: my lineage) or RwReading
 /// ```
 ///
 /// `rwRead` is `rewrite_ref`'s attempt up to its swap: read the ref; if it moved past the
-/// tip, carry each commit landed since onto the new tip, in order; write the record
-/// (`reflog/<branch>/<id>`, naming the ref's last record), then the swap bumps the epoch
-/// and names it. Nothing another actor does between the read and the record changes them
-/// (the commits are immutable, gc waits for the lease). A reword keeps the tip's tree, so
-/// every carried commit applies (`check_applies` always passes here).
+/// tip, carry each commit landed since onto the new tip, in order, each checked to apply
+/// and stored; write the record (`reflog/<branch>/<id>`, naming the ref's last record),
+/// then the swap bumps the epoch and names it. Nothing another actor does between the read
+/// and the record changes them (the commits are immutable, gc waits for the lease).
 module rewrite {
   import store.* from "./store"
   import bucket.* from "./bucket"
@@ -30,20 +38,47 @@ module rewrite {
       if (ancestorsOf(b, a).size() + 1 == ancestorsOf(b, id).size()) a else p
     )
 
+  /// Each rewritten commit's successor in `m`, mapped back.
+  pure def inverse(m: CommitId -> CommitId): CommitId -> CommitId =
+    m.keys().fold(Map(), (acc, k) => acc.put(m.get(k), k))
+
   /// Read the ref: its tip is the commit to reword (the root has none to keep).
   pure def beginRewriteCan(s: State, c: str): bool =
     client(s, c).phase == Idle and tip(s.bucket).commit != ROOT
 
   pure def beginRewriteNext(s: State, c: str): State = {
     val expected = tip(s.bucket).commit
+    val new = remade(c, expected, parentOf(s.bucket, expected))
     withClient(s, c, {
       ...IDLE,
       phase: Leasing,
-      rw: {
-        ...NO_RW,
-        expected: expected,
-        new: remade(c, expected, parentOf(s.bucket, expected)),
-      },
+      rw: { ...NO_RW, op: "rebase", expected: expected, new: new, successors: Map(expected -> new) },
+    })
+  }
+
+  /// Read the ref, then the record its lineage names (a branch never rewritten has none
+  /// to undo): from that record's new tip back to its old one.
+  pure def beginUndoCan(s: State, c: str): bool =
+    client(s, c).phase == Idle and lineageOf(s.bucket).rewrite != 0
+
+  pure def beginUndoNext(s: State, c: str): State = {
+    val r = recordOf(s.bucket, lineageOf(s.bucket).rewrite)
+    withClient(s, c, {
+      ...IDLE,
+      phase: Leasing,
+      rw: { ...NO_RW, op: "undo", expected: r.new, new: r.old, successors: inverse(r.successors) },
+    })
+  }
+
+  /// Read the ref: its tip is the commit to drop.
+  pure def beginResetCan(s: State, c: str): bool = beginRewriteCan(s, c)
+
+  pure def beginResetNext(s: State, c: str): State = {
+    val expected = tip(s.bucket).commit
+    withClient(s, c, {
+      ...IDLE,
+      phase: Leasing,
+      rw: { ...NO_RW, op: "reset", expected: expected, new: parentOf(s.bucket, expected) },
     })
   }
 
@@ -62,20 +97,36 @@ module rewrite {
   /// A commit carried onto the new history, known before it is stored.
   type Carried = { id: CommitId, tree: Tree, ancestors: Set[CommitId] }
 
-  /// Carrying commits onto the new history: the tip so far and its ancestors, each
-  /// rewritten commit's successor, and the commits made.
-  type Carrying = { tip: CommitId, ancestors: Set[CommitId], successors: CommitId -> CommitId, made: Set[Carried] }
+  /// Carrying commits onto the new history: the tip so far, its tree and ancestors, each
+  /// rewritten commit's successor, the commits made, and whether each carried so far
+  /// applied (the first that does not ends the attempt).
+  type Carrying = {
+    tip: CommitId,
+    tree: Tree,
+    ancestors: Set[CommitId],
+    successors: CommitId -> CommitId,
+    made: Set[Carried],
+    ok: bool,
+  }
 
-  /// Carry the commit `k` past the rewritten tip, if any, onto the tip so far. It keeps
-  /// its tree: the reword kept the tree under it.
+  /// Carry the commit `k` past the rewritten tip, if any, onto the tip so far: its change
+  /// from its parent, written over the tip's tree, if it applies there.
   pure def carryStep(b: Bucket, c: str, extra: Set[CommitId], depth: int, k: int, a: Carrying): Carrying =
     extra.filter(x => ancestorsOf(b, x).size() == depth + k).fold(a, (acc, x) =>
-      Set(remade(c, x, acc.tip)).fold(acc, (none, id) => {
-        tip: id,
-        ancestors: acc.ancestors.union(Set(acc.tip)),
-        successors: acc.successors.put(x, id),
-        made: acc.made.union(Set({ id: id, tree: treeOf(b, x), ancestors: acc.ancestors.union(Set(acc.tip)) })),
-      })
+      Set(parentOf(b, x)).fold(acc, (n0, p) =>
+        Set(deltaOf(b, x, p)).fold(acc, (n1, d) =>
+          if (not(acc.ok)) acc
+          else if (conflicts(d, treeOf(b, p), acc.tree)) { ...acc, ok: false }
+          else Set(remade(c, x, acc.tip)).fold(acc, (n2, id) => {
+            tip: id,
+            tree: overlay(acc.tree, d),
+            ancestors: acc.ancestors.union(Set(acc.tip)),
+            successors: acc.successors.put(x, id),
+            made: acc.made.union(Set({ id: id, tree: overlay(acc.tree, d), ancestors: acc.ancestors.union(Set(acc.tip)) })),
+            ok: true,
+          })
+        )
+      )
     )
 
   /// The new history with every commit landed on the reworded tip since (up to `cur`)
@@ -83,7 +134,14 @@ module rewrite {
   pure def carried(b: Bucket, c: str, rw: Rw, cur: CommitId): Carrying = {
     val extra = ancestorsOf(b, cur).union(Set(cur)).exclude(ancestorsOf(b, rw.expected).union(Set(rw.expected)))
     val depth = ancestorsOf(b, rw.expected).size() + 1
-    val start = { tip: rw.new, ancestors: ancestorsOf(b, rw.new), successors: Map(rw.expected -> rw.new), made: Set() }
+    val start = {
+      tip: rw.new,
+      tree: treeOf(b, rw.new),
+      ancestors: ancestorsOf(b, rw.new),
+      successors: rw.successors,
+      made: Set(),
+      ok: true,
+    }
     Set(carryStep(b, c, extra, depth, 0, start)).fold(start, (n0, a0) =>
       Set(carryStep(b, c, extra, depth, 1, a0)).fold(a0, (n1, a1) =>
         Set(carryStep(b, c, extra, depth, 2, a1)).fold(a1, (n2, a2) => carryStep(b, c, extra, depth, 3, a2))
@@ -91,8 +149,9 @@ module rewrite {
     )
   }
 
-  /// Read the ref. Moved off the reworded tip (it is not under the head): fail. Otherwise
-  /// carry what landed since onto the new tip, storing each, and write the record.
+  /// Read the ref. Moved off the tip the rewrite was made from (it is not under the head):
+  /// fail. Otherwise carry what landed since onto the new tip, storing each; one that does
+  /// not apply fails the attempt (those before it stay stored); else write the record.
   pure def rwReadCan(s: State, c: str): bool = client(s, c).phase == RwReading
 
   pure def rwReadNext(s: State, c: str): State = {
@@ -100,25 +159,28 @@ module rewrite {
     val cur = tip(s.bucket)
     if (cur.commit != rw.expected and not(ancestorsOf(s.bucket, cur.commit).contains(rw.expected)))
       finished(s, c, { ...client(s, c), phase: Done, outcome: Moved })
-    else Set(carried(s.bucket, c, rw, cur.commit)).fold(s, (none, a) => {
-      ...s,
-      bucket: recorded(
-        a.made.fold(s.bucket, (acc, m) => stored(acc, m.id, m.tree, m.ancestors)),
-        {
-          old: cur.commit,
-          new: a.tip,
-          epoch: lineageOf(s.bucket).epoch + 1,
-          prev: lineageOf(s.bucket).rewrite,
-          by: c,
-          successors: a.successors,
-        },
-      ),
-      clients: s.clients.set(c, {
-        ...client(s, c),
-        phase: RwSwapping,
-        rw: { ...rw, version: cur.version, tip: a.tip, id: nextRecord(s.bucket) },
-      }),
-    })
+    else Set(carried(s.bucket, c, rw, cur.commit)).fold(s, (none, a) =>
+      Set(a.made.fold(s.bucket, (acc, m) => stored(acc, m.id, m.tree, m.ancestors))).fold(s, (n, b) =>
+        if (not(a.ok)) finished({ ...s, bucket: b }, c, { ...client(s, c), phase: Done, outcome: Conflicted })
+        else {
+          ...s,
+          bucket: recorded(b, {
+            op: rw.op,
+            old: cur.commit,
+            new: a.tip,
+            epoch: lineageOf(s.bucket).epoch + 1,
+            prev: lineageOf(s.bucket).rewrite,
+            by: c,
+            successors: a.successors,
+          }),
+          clients: s.clients.set(c, {
+            ...client(s, c),
+            phase: RwSwapping,
+            rw: { ...rw, version: cur.version, tip: a.tip, id: nextRecord(s.bucket) },
+          }),
+        }
+      )
+    )
   }
 
   /// CAS the ref from the version read to the new tip, keeping `recent`, with the epoch

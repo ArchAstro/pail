@@ -40,9 +40,11 @@ module bucket {
   type Lineage = { epoch: int, rewrite: int }
 
   /// A rewrite's record (`reflog/<branch>/<id>`, ids here numbered in creation order):
-  /// the tip it replaced and the one it moved to, the epoch the branch entered, the
-  /// previous record (0: none), who rewrote it, and each rewritten commit's successor (pail's `map`).
+  /// what rewrote it (`rebase`, `undo` or `reset`), the tip it replaced and the one it
+  /// moved to, the epoch the branch entered, the previous record (0: none), who rewrote
+  /// it, and each rewritten commit's successor (pail's `map`).
   type Rewrite = {
+    op: str,
     old: CommitId,
     new: CommitId,
     epoch: int,
@@ -128,6 +130,16 @@ module bucket {
   /// `t` with `d` written over it.
   pure def overlay(t: Tree, d: Delta): Tree =
     d.keys().fold(t, (acc, p) => acc.put(p, d.get(p)))
+
+  /// The paths commit `id` changes from its parent `p`, each to its new content (pail's
+  /// change list: no-op edits are not in it).
+  pure def deltaOf(b: Bucket, id: CommitId, p: CommitId): Delta =
+    PATHS.filter(q => treeOf(b, id).get(q) != treeOf(b, p).get(q)).mapBy(q => treeOf(b, id).get(q))
+
+  /// Whether `d`, made on `from`, does not apply on `onto` (`Repo::check_applies`): a path
+  /// it writes is neither as `from` had it nor as `d` leaves it.
+  pure def conflicts(d: Delta, from: Tree, onto: Tree): bool =
+    d.keys().exists(p => from.get(p) != onto.get(p) and onto.get(p) != d.get(p))
 
   /// Whether `d` writes a path that differs between `from` and `onto`.
   pure def overlaps(d: Delta, from: Tree, onto: Tree): bool =
