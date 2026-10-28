@@ -2149,7 +2149,13 @@ async fn rebase(ctx: &Ctx, a: RebaseArgs) -> Result<()> {
         }
         let out = repo
             .rewrite_ref(
-                pail::repo::RewriteRequest::undo(&branch, &rec, committer, date),
+                pail::repo::RewriteRequest::undo(
+                    &branch,
+                    &rec,
+                    tip_ref.lineage.clone(),
+                    committer,
+                    date,
+                ),
                 check,
             )
             .await?;
@@ -2333,6 +2339,7 @@ async fn rebase(ctx: &Ctx, a: RebaseArgs) -> Result<()> {
                 committer,
                 date,
                 map: built.map.clone(),
+                since: None,
             },
             check,
         )

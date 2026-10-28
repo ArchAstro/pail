@@ -42,7 +42,8 @@ module world {
 
   /// A rewrite in progress: what it is (its record's `op`: `rebase` rewords the tip,
   /// `undo` reverses the ref's last record, `reset` drops the tip), the tip it was made
-  /// from, the commit replacing it and the successors it starts from; then, as its last
+  /// from, the commit replacing it, the successors it starts from and, for an undo, the
+  /// lineage that named its record (another rewrite since fails it); then, as its last
   /// attempt read the ref, the version its swap expects, the tip it moves to (with any
   /// commits landed since carried onto it) and the record it wrote.
   type Rw = {
@@ -50,6 +51,7 @@ module world {
     expected: CommitId,
     new: CommitId,
     successors: CommitId -> CommitId,
+    since: Lineage,
     version: int,
     tip: CommitId,
     id: int,
@@ -135,7 +137,7 @@ module world {
   pure val MARK: str -> str =
     Map("alice" -> "~alice", "bob" -> "~bob", "carol" -> "~carol", "dave" -> "~dave")
 
-  pure val NO_RW: Rw = { op: "", expected: ROOT, new: ROOT, successors: Map(), version: 0, tip: ROOT, id: 0 }
+  pure val NO_RW: Rw = { op: "", expected: ROOT, new: ROOT, successors: Map(), since: NO_LINEAGE, version: 0, tip: ROOT, id: 0 }
 
   pure val NO_COMB: Comb = {
     polledRef: false,

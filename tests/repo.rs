@@ -702,6 +702,7 @@ async fn rebase(repo: &Repo, plan: &pail::rebase::Plan) -> pail::repo::RewriteOu
             committer: "R <r@x>".into(),
             date: "2 +0000".into(),
             map: built.map,
+            since: None,
         },
         None,
     )
@@ -876,6 +877,7 @@ async fn rewrite_carries_concurrent_commits_or_refuses() {
         committer: "R <r@x>".into(),
         date: "2 +0000".into(),
         map: built.map.clone(),
+        since: None,
     };
     let err = repo.rewrite_ref(rq.clone(), None).await.unwrap_err();
     assert_eq!(

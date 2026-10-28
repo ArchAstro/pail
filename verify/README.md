@@ -221,8 +221,16 @@ objects map to `store.qnt` tombstones.
    before carol rechecks. The ref's lineage is dave's, so carol retried, found her tip gone
    and returned `MovedError` for a rewrite that landed: `rewriteOutcomeIsTruthful`. Fixed in
    `rewrite_ref` (`in_chain`: its record is in the ref's chain).
+5. `undoTwiceRun`: alice resets carol's commit off the branch; dave and bob both undo the
+   reset, dave first. Bob's undo found the reset's new tip (the root) still under the head,
+   took carol's restored commit for one landed since and carried it onto itself: carol's
+   change twice, `landsAtMostOnce`. Found by CI's `npm run simulate`. Fixed in
+   `rewrite_ref`: an undo carries the lineage it read (`RewriteRequest::since`), and any
+   other rewrite since fails it with `MovedError`.
+6. `force_ref` named no one, in its record or as committer of the commits it carried. It
+   now takes the committer.
 
-Both scenarios diverge from the unfixed code at the recheck.
+Scenarios 3 and 4 diverge from the unfixed code at the recheck, 5 at bob's read.
 
 ## Combining (`combine.qnt`)
 
@@ -249,12 +257,12 @@ Three rewrites, each its record's `op`, all published by `rewrite_ref`:
    commit, as `pail rebase` builds before taking its lease), leases and stores it.
 2. `undo` (`pail rebase --undo`): `beginUndo` reads the ref and the record its lineage
    names; `RewriteRequest::undo` goes from that record's new tip back to its old one, each
-   successor mapped back.
+   successor mapped back, and fails if the branch was rewritten since (its lineage moved).
 3. `reset` (`Repo::force_ref`): `beginReset` moves the branch to the tip's parent, dropping
    the tip; no map.
 
 `rewrite_ref` then reads the ref; moved off the tip it was made from: `MovedError`;
-otherwise carries each commit landed since onto the new tip (its change from its parent,
+an undo whose lineage moved: `MovedError` too; otherwise carries each commit landed since onto the new tip (its change from its parent,
 checked to apply there: `check_applies`, else `ConflictError`), writes the record
 (`reflog/<branch>/<id>`: op, old, new, epoch, prev, map) and swaps with the epoch bumped.
 Moving the ref forward keeps its lineage. gc marks every record's old and new tips (and
@@ -275,23 +283,21 @@ what is under them).
   a commit landed since carried), `resetAfterLostSwapRun` (a lost-reply publish the reset
   dropped still reports published; the undo brings it back), `resetCarriesRun` (a carried
   commit's change written over the new tip's tree), `resetConflictRun` (a commit landed
-  since does not apply: nothing published).
+  since does not apply: nothing published), `undoTwiceRun` (an undo of a reset already
+  undone moves).
 - `contendStep` interleaves rewriters with writers. 100,000 contended runs and 50,000
   `step` runs: no violation.
-- Fifteen mutants of the rewrite code each fail a scenario: no carrying, epoch not bumped,
+- Sixteen mutants of the rewrite code each fail a scenario: no carrying, epoch not bumped,
   no `prev`, gc ignoring the reflog, a publish resetting the lineage, the moved check
   skipped, either recheck fix undone, the record's map missing carried commits, `recent`
   dropped; the undo's map not reversed, the undo expecting the old tip, a reset naming no
-  one, carried commits unchecked, a carried commit keeping its own tree. The map mutant
+  one, carried commits unchecked, a carried commit keeping its own tree, an undo ignoring a
+  rewrite since. The map mutant
   passed until quint-refinements#25 (the runtime filled a map entry the snapshot lacked in
   from the model).
-- Found: `force_ref` named no one, in its record or as committer of the commits it
-  carried. It now takes the committer.
 - Simplifications: a rebase only rewords the tip and a reset only drops it; each client
   rewrites at most once, so a chain has at most four records; nothing maps to `None`
-  (dropped by a plan); `rewrites_between`'s `REWRITE_CHAIN_MAX` is never reached. An undo
-  whose record is no longer the ref's last (another rewrite landed on top of its new tip
-  in between) still undoes it, carrying the later one's commits.
+  (dropped by a plan); `rewrites_between`'s `REWRITE_CHAIN_MAX` is never reached.
 
 ## Not modelled yet
 
