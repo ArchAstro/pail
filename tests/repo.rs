@@ -1060,3 +1060,104 @@ async fn gc_waits_for_a_commit_reusing_an_old_page() {
         .await
         .expect("the landed commit's tree is still stored");
 }
+
+fn content(i: usize) -> Vec<u8> {
+    let mut rng = StdRng::seed_from_u64(i as u64);
+    let n = 100 + rng.random_range(0..3000);
+    (0..n).map(|_| rng.random::<u8>() % 32 + b'a').collect()
+}
+
+/// Files spread over several packs, read as a sparse subset: every wanted file arrives once,
+/// verified, whatever the gaps between them.
+#[tokio::test]
+async fn read_stream_yields_each_wanted_file_once() {
+    use futures::StreamExt;
+    let (_d, repo) = temp_repo();
+    let mut all = vec![];
+    for batch in 0..4 {
+        let inputs: Vec<FileInput> = (0..200)
+            .map(|i| FileInput {
+                path: format!("d{batch}/f{i:03}"),
+                kind: Kind::File,
+                data: Bytes::from(content(batch * 1000 + i)),
+            })
+            .collect();
+        let entries = repo.write_files(&inputs, &HashMap::new()).await.unwrap();
+        all.extend(inputs.into_iter().zip(entries));
+    }
+    let wanted: Vec<(FileInput, Entry)> = all
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % 3 != 1)
+        .map(|(_, x)| x)
+        .collect();
+    let entries: Vec<Entry> = wanted.iter().map(|(_, e)| e.clone()).collect();
+    let mut seen = vec![0; entries.len()];
+    let mut s = std::pin::pin!(repo.read_stream(&entries));
+    while let Some(b) = s.next().await {
+        for (i, data, _) in b.unwrap().items {
+            seen[i] += 1;
+            assert_eq!(wanted[i].0.data, data, "{}", wanted[i].0.path);
+        }
+    }
+    assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+}
+
+/// Streaming checkout writes every path (including duplicate contents and executables) and
+/// leaves the blob cache populated, so a second checkout fetches nothing.
+#[tokio::test]
+async fn materialize_streams_to_disk_and_fills_the_cache() {
+    let d = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", d.path().join("bucket").display());
+    let repo = Repo::with_local(Store::open(&url).unwrap(), &d.path().join("repo"));
+    let mut inputs: Vec<FileInput> = (0..300)
+        .map(|i| FileInput {
+            path: format!("src/m{}/f{i:03}.txt", i % 7),
+            kind: if i % 50 == 0 { Kind::Exec } else { Kind::File },
+            data: Bytes::from(content(i)),
+        })
+        .collect();
+    inputs.push(FileInput {
+        path: "copy/of/f001.txt".into(),
+        kind: Kind::File,
+        data: Bytes::from(content(1)),
+    });
+    let entries = repo.write_files(&inputs, &HashMap::new()).await.unwrap();
+    let co = pail::worktree::Checkout::for_repo(&repo);
+    let wt = d.path().join("wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    co.materialize(&repo, &wt, &entries).await.unwrap();
+    for f in &inputs {
+        assert_eq!(
+            std::fs::read(wt.join(&f.path)).unwrap(),
+            f.data,
+            "{}",
+            f.path
+        );
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &str| std::fs::metadata(wt.join(p)).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode("src/m0/f000.txt"), 0o755);
+    assert_eq!(mode("src/m1/f001.txt"), 0o644);
+    assert_eq!(mode("copy/of/f001.txt"), 0o644);
+    // The cache has everything: a second checkout elsewhere reads no bucket objects.
+    let before = repo
+        .store
+        .stats
+        .gets
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let wt2 = d.path().join("wt2");
+    std::fs::create_dir_all(&wt2).unwrap();
+    co.materialize(&repo, &wt2, &entries).await.unwrap();
+    assert_eq!(
+        repo.store
+            .stats
+            .gets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        before
+    );
+    assert_eq!(
+        std::fs::read(wt2.join("copy/of/f001.txt")).unwrap(),
+        content(1)
+    );
+}
