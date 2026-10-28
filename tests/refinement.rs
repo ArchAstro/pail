@@ -59,7 +59,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        19,
+        23,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -176,6 +176,16 @@ impl fmt::Debug for Gate {
 impl fmt::Display for Gate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "gate for {}", self.actor)
+    }
+}
+
+/// What a rewrite returned, as the model's `Outcome`.
+fn rewrite_outcome(result: anyhow::Result<()>) -> &'static str {
+    match result {
+        Ok(()) => "Rewritten",
+        Err(e) if e.downcast_ref::<MovedError>().is_some() => "Moved",
+        Err(e) if e.downcast_ref::<ConflictError>().is_some() => "Conflicted",
+        Err(_) => "Unknown",
     }
 }
 
@@ -590,9 +600,13 @@ struct Round {
 /// A client rewriting the branch: `Rw` in `world.qnt`.
 #[derive(Clone, Default)]
 struct Rewriter {
-    /// The tip it rewords, and the commit replacing it (empty until its first read).
+    /// Its record's `op`: `rebase`, `undo` or `reset`.
+    op: &'static str,
+    /// The tip it was made from, the commit replacing it, and the successors it starts
+    /// from (empty until its first read).
     expected: Id,
     new: Id,
+    successors: BTreeMap<Id, Id>,
     /// The version its last attempt read; `version` once that attempt wrote its record.
     read: i64,
     version: i64,
@@ -1031,8 +1045,19 @@ impl Harness {
         Ok(())
     }
 
-    /// A rewriter's ref read: its first is `beginRewrite`'s, fixing the tip to reword;
-    /// a recheck learns nothing the model keeps; any other begins an attempt.
+    /// A rewriter spawned: it is one from now on, and its first ref read is its begin.
+    fn began_rewrite(&mut self, name: &str, op: &'static str) -> Result<(), String> {
+        let w = self.writer(name)?;
+        w.base = Some(vec!["root".to_owned()]);
+        w.rw = Some(Rewriter {
+            op,
+            ..Rewriter::default()
+        });
+        self.release(name, Request::ReadRef, None, Delivery::Answered)
+    }
+
+    /// A rewriter's ref read: its first is the one its `begin*` makes, fixing what it
+    /// rewrites; a recheck learns nothing the model keeps; any other begins an attempt.
     fn rewriter_read(&mut self, actor: &str, seen: Option<(Hash, i64)>) -> Result<(), String> {
         let (commit, version) = seen.ok_or(format!("{actor}'s ref read failed"))?;
         let w = self.writer(actor)?;
@@ -1040,21 +1065,52 @@ impl Harness {
             w.rechecking = false;
             return Ok(());
         }
-        if !w.rw.as_ref().is_some_and(|rw| rw.expected.is_empty()) {
+        let rw = w.rw.as_ref().ok_or("not a rewriter")?;
+        if !rw.expected.is_empty() {
             w.rw.as_mut().unwrap().read = version;
             return Ok(());
         }
-        let expected = self.name(&commit)?;
-        let parent = self
-            .rt()
-            .block_on(self.observer.commit_obj(&commit))
-            .map_err(|e| e.to_string())?
-            .parent
-            .ok_or("rewording the root")?;
-        let mut new = self.name(&parent)?;
-        new.extend([tag(&expected), format!("~{actor}")]);
+        let op = rw.op;
+        let parent = || -> Result<Id, String> {
+            let c = self
+                .rt()
+                .block_on(self.observer.commit_obj(&commit))
+                .map_err(|e| e.to_string())?;
+            self.name(&c.parent.ok_or("rewriting the root")?)
+        };
+        let (expected, new, successors) = match op {
+            "rebase" => {
+                let expected = self.name(&commit)?;
+                let mut new = parent()?;
+                new.extend([tag(&expected), format!("~{actor}")]);
+                (
+                    expected.clone(),
+                    new.clone(),
+                    BTreeMap::from([(expected, new)]),
+                )
+            }
+            "reset" => (self.name(&commit)?, parent()?, BTreeMap::new()),
+            _ => {
+                // The record the version read names, as the undo read it next.
+                let value = self.ref_values.lock().unwrap()[version as usize - 1].clone();
+                let id = value
+                    .lineage
+                    .rewrite
+                    .ok_or("undoing a branch never rewritten")?;
+                let r = self
+                    .rt()
+                    .block_on(self.observer.read_rewrite(BRANCH, &id))
+                    .map_err(|e| e.to_string())?;
+                let mut successors = BTreeMap::new();
+                for (old, new) in &r.map {
+                    let new = new.ok_or("the model's rewrites drop nothing")?;
+                    successors.insert(self.name(&new)?, self.name(old)?);
+                }
+                (self.name(&r.new)?, self.name(&r.old)?, successors)
+            }
+        };
         let rw = self.writer(actor)?.rw.as_mut().unwrap();
-        (rw.expected, rw.new) = (expected, new);
+        (rw.expected, rw.new, rw.successors) = (expected, new, successors);
         Ok(())
     }
 
@@ -1493,6 +1549,7 @@ impl Harness {
             })
             .collect::<Result<_, String>>()?;
         Ok(record([
+            ("op", RuntimeValue::Text(r.op.clone())),
             ("old", id_value(&self.name(&r.old)?)),
             ("new", id_value(&self.name(&r.new)?)),
             ("epoch", RuntimeValue::Int(r.epoch as i64)),
@@ -1627,8 +1684,18 @@ impl Harness {
         let rw = w.rw.clone().unwrap_or_default();
         let or_root = |id: Id| if id.is_empty() { root.clone() } else { id };
         record([
+            ("op", RuntimeValue::Text(rw.op.to_owned())),
             ("expected", id_value(&or_root(rw.expected))),
             ("new", id_value(&or_root(rw.new))),
+            (
+                "successors",
+                RuntimeValue::Map(
+                    rw.successors
+                        .iter()
+                        .map(|(k, v)| (id_value(k), id_value(v)))
+                        .collect(),
+                ),
+            ),
             ("version", RuntimeValue::Int(rw.version)),
             ("tip", id_value(&rw.tip.unwrap_or(root.clone()))),
             ("id", RuntimeValue::Int(rw.id)),
@@ -2023,17 +2090,61 @@ impl generated::Implementation for Harness {
                 out.map(|_| ())
             }
             .await;
-            let outcome = match result {
-                Ok(()) => "Rewritten",
-                Err(e) if e.downcast_ref::<MovedError>().is_some() => "Moved",
-                Err(_) => "Unknown",
-            };
-            let _ = events.send(Event::Finished { actor, outcome });
+            let _ = events.send(Event::Finished {
+                actor,
+                outcome: rewrite_outcome(result),
+            });
         });
-        let w = self.writer(&name)?;
-        w.base = Some(vec!["root".to_owned()]);
-        w.rw = Some(Rewriter::default());
-        self.release(&name, Request::ReadRef, None, Delivery::Answered)
+        self.began_rewrite(&name, "rebase")
+    }
+
+    /// Read the ref, then the record its lineage names, and publish the undo of it
+    /// (`pail rebase --undo`).
+    fn begin_undo(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = Harness::actor_arg(arguments)?;
+        let repo = Repo::with_store(self.gate(&name), None);
+        let events = self.sender.clone();
+        let actor = name.clone();
+        let committer = format!("{name} <{name}@example.com>");
+        self.rt().spawn(async move {
+            let result: anyhow::Result<()> = async {
+                let (cur, _) = repo.read_ref_value(BRANCH).await?.context("no branch")?;
+                let id = cur.lineage.rewrite.context("never rewritten")?;
+                let rec = repo.read_rewrite(BRANCH, &id).await?;
+                let req = RewriteRequest::undo(BRANCH, &rec, committer, DATE.to_owned());
+                repo.rewrite_ref(req, None).await.map(|_| ())
+            }
+            .await;
+            let _ = events.send(Event::Finished {
+                actor,
+                outcome: rewrite_outcome(result),
+            });
+        });
+        self.began_rewrite(&name, "undo")
+    }
+
+    /// Move the branch to its tip's parent with `force_ref`, which reads the ref itself.
+    fn begin_reset(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = Harness::actor_arg(arguments)?;
+        let (tip, _) = Harness::read_ref(self)?;
+        let parent = self
+            .rt()
+            .block_on(self.observer.commit_obj(&tip))
+            .map_err(|e| e.to_string())?
+            .parent
+            .ok_or("resetting the root")?;
+        let repo = Repo::with_store(self.gate(&name), None);
+        let events = self.sender.clone();
+        let actor = name.clone();
+        let committer = format!("{name} <{name}@example.com>");
+        self.rt().spawn(async move {
+            let result = repo.force_ref(BRANCH, parent, &committer).await;
+            let _ = events.send(Event::Finished {
+                actor,
+                outcome: rewrite_outcome(result),
+            });
+        });
+        self.began_rewrite(&name, "reset")
     }
 
     fn rw_store(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {

@@ -889,7 +889,7 @@ async fn rewrite_carries_concurrent_commits_or_refuses() {
     );
 
     // Reset elsewhere: the planned tip is no longer in the branch's history.
-    repo.force_ref("f", c0).await.unwrap();
+    repo.force_ref("f", c0, "t <t@example.com>").await.unwrap();
     let err = repo.rewrite_ref(rq, None).await.unwrap_err();
     assert!(
         err.downcast_ref::<pail::repo::MovedError>().is_some(),

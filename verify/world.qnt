@@ -36,13 +36,24 @@ module world {
 
   /// What `commit` returned: nothing yet, Ok, a ConflictError, or another error (its
   /// outcome unknown to the caller). What `rewrite_ref` returned: Ok (`Rewritten`), a
-  /// MovedError (`Moved`), or another error (`Unknown`).
+  /// MovedError (`Moved`), a ConflictError (a commit it carried does not apply), or
+  /// another error (`Unknown`).
   type Outcome = Pending | Published | Conflicted | Unknown | Rewritten | Moved
 
-  /// A rewrite in progress: the tip it was made from and the commit replacing it; then,
-  /// as its last attempt read the ref, the version its swap expects, the tip it moves to
-  /// (with any commits landed since carried onto it) and the record it wrote.
-  type Rw = { expected: CommitId, new: CommitId, version: int, tip: CommitId, id: int }
+  /// A rewrite in progress: what it is (its record's `op`: `rebase` rewords the tip,
+  /// `undo` reverses the ref's last record, `reset` drops the tip), the tip it was made
+  /// from, the commit replacing it and the successors it starts from; then, as its last
+  /// attempt read the ref, the version its swap expects, the tip it moves to (with any
+  /// commits landed since carried onto it) and the record it wrote.
+  type Rw = {
+    op: str,
+    expected: CommitId,
+    new: CommitId,
+    successors: CommitId -> CommitId,
+    version: int,
+    tip: CommitId,
+    id: int,
+  }
 
   /// A combining writer's round: what its poll read (the ref and the intents listed, in
   /// either order), the batch it built, and what it returns once its intent is withdrawn.
@@ -124,7 +135,7 @@ module world {
   pure val MARK: str -> str =
     Map("alice" -> "~alice", "bob" -> "~bob", "carol" -> "~carol", "dave" -> "~dave")
 
-  pure val NO_RW: Rw = { expected: ROOT, new: ROOT, version: 0, tip: ROOT, id: 0 }
+  pure val NO_RW: Rw = { op: "", expected: ROOT, new: ROOT, successors: Map(), version: 0, tip: ROOT, id: 0 }
 
   pure val NO_COMB: Comb = {
     polledRef: false,
@@ -198,4 +209,12 @@ module world {
     val last = tagOf(id)
     CLIENTS.fold(last, (a, c) => if (INTENT_NAME.get(c) == last) c else a)
   }
+
+  /// The writers whose changes the history at `id` has.
+  pure def authorsAt(b: Bucket, id: CommitId): Set[str] =
+    ancestorsOf(b, id).union(Set(id)).exclude(Set(ROOT)).map(x => author(x))
+
+  /// The writers whose changes record `r` took off the branch.
+  pure def droppedBy(b: Bucket, r: Rewrite): Set[str] =
+    authorsAt(b, r.old).exclude(authorsAt(b, r.new))
 }

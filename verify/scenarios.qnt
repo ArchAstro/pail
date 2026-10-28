@@ -490,6 +490,7 @@ module scenarios {
         tip(state.bucket) == { commit: BOB_CARRIED, version: 4 },
         lineageOf(state.bucket) == { epoch: 1, rewrite: 1 },
         recordOf(state.bucket, 1) == {
+          op: "rebase",
           old: BOB_ON_ALICE,
           new: BOB_CARRIED,
           epoch: 1,
@@ -716,6 +717,183 @@ module scenarios {
         recentOf(state.bucket) == Map("alice" -> ALICE_C),
         lineageOf(state.bucket) == { epoch: 1, rewrite: 1 },
         client(state, "dave").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+  // ---------- undo and reset ----------
+
+  pure val BOB_ON_RW: CommitId = ALICE_RW.append("bob")
+  pure val BOB_UNDONE: CommitId = ["root", "alice", "bob", "~dave"]
+
+  /// Carol rewords alice's commit; dave sets out to undo it, and bob lands on the reworded
+  /// tip first. Dave's undo goes back to alice's commit and carries bob's onto it: its
+  /// record maps carol's commit back to alice's, and bob's to its carried copy.
+  /// @conformance
+  run undoCarriesRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(beginUndo("dave"))
+    .then(begin("bob", ALICE_RW, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: BOB_UNDONE, version: 5 },
+        lineageOf(state.bucket) == { epoch: 2, rewrite: 2 },
+        recordOf(state.bucket, 2) == {
+          op: "undo",
+          old: BOB_ON_RW,
+          new: BOB_UNDONE,
+          epoch: 2,
+          prev: 1,
+          by: "dave",
+          successors: Map(ALICE_RW -> ALICE_1, BOB_ON_RW -> BOB_UNDONE),
+        },
+        ancestorsOf(state.bucket, BOB_UNDONE) == Set(ROOT, ALICE_1),
+        client(state, "dave").outcome == Rewritten,
+        client(state, "bob").outcome == Published,
+      }),
+      state' = state,
+    })
+
+  /// Bob's swap lands unanswered; carol resets the branch to alice's commit, dropping
+  /// bob's, before bob looks. The reset's record replaced a tip that had bob's commit: bob
+  /// published. Dave then undoes the reset, and bob's commit is back.
+  /// @conformance
+  run resetAfterLostSwapRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Lost))
+    .then(beginReset("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(recheck("bob"))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ALICE_1, version: 4 },
+        recordOf(state.bucket, 1) == {
+          op: "reset",
+          old: BOB_ON_ALICE,
+          new: ALICE_1,
+          epoch: 1,
+          prev: 0,
+          by: "carol",
+          successors: Map(),
+        },
+        client(state, "bob").outcome == Published,
+      }),
+      state' = state,
+    })
+    .then(beginUndo("dave"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: BOB_ON_ALICE, version: 5 },
+        lineageOf(state.bucket) == { epoch: 2, rewrite: 2 },
+        recordOf(state.bucket, 2).op == "undo",
+        client(state, "dave").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+  /// Carol resets the branch to alice's commit, dropping bob's, while dave lands on bob's.
+  /// Dave's change applies on alice's commit (it writes `a`, which bob left alone): carol
+  /// carries it, writing it over alice's tree.
+  /// @conformance
+  run resetCarriesRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginReset("carol"))
+    .then(begin("dave", BOB_ON_ALICE, DAVE_A))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "alice", "dave", "~carol"],
+        treeOf(state.bucket, ["root", "alice", "dave", "~carol"]) == Map("a" -> "2", "b" -> "0"),
+        recordOf(state.bucket, 1).successors == Map(BOB_ON_ALICE.append("dave") -> ["root", "alice", "dave", "~carol"]),
+        not(branch(state.bucket).exists(id => author(id) == "bob")),
+        client(state, "carol").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+  /// Carol sets out to reset the branch to the root, dropping alice's commit, while bob
+  /// lands on it. Bob's change rewrites `a` from alice's content: on the root it does not
+  /// apply, so carol's reset fails and publishes nothing.
+  /// @conformance
+  run resetConflictRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginReset("carol"))
+    .then(begin("bob", ALICE_1, BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwRead("carol"))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: BOB_ON_ALICE, version: 3 },
+        state.bucket.reflog.keys() == Set(),
+        client(state, "carol").outcome == Conflicted,
+        liveKeys(state.bucket.locks) == Set(),
       }),
       state' = state,
     })

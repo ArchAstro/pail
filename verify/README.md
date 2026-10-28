@@ -20,7 +20,7 @@ world.qnt     the shared state: bucket, writers, the collector, ghosts
    ▲
 publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, expiry)
 combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
-rewrite.qnt   rewrite_ref steps (read the tip, lease, store, read + carry + record, swap, recheck)
+rewrite.qnt   rewrite_ref steps for rebase, undo, reset (read, lease, store, read + carry + record, swap, recheck)
 gc.qnt        gc steps (exclusive lease, drain, mark, list, delete, release)
    ▲
 pail.qnt      the steps as actions, any interleaving (`step`), the properties
@@ -49,7 +49,7 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `world.qnt` | The state every feature acts on (`State`, `Client`, `Collector`) |
 | `publish.qnt` | Writers running `commit_opts`, one store request per step |
 | `combine.qnt` | Writers that lost their direct attempts, running `commit_combining` |
-| `rewrite.qnt` | A client rewording the branch's tip, running `rewrite_ref` |
+| `rewrite.qnt` | A client rewording the tip, undoing the last rewrite or resetting the tip, running `rewrite_ref` |
 | `gc.qnt` | The collector running `gc::gc_with`, one store request per step |
 | `pail.qnt` | Actions, `step`, and the properties (`safety`) |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
@@ -83,14 +83,15 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 1. `branchIsComplete`: every commit the branch reaches, and its page, is stored.
 2. `refOnlyMovesForward`: every move of the ref keeps what it named before, unless a
    rewrite's record names the move.
-3. `publishedIsOnBranch`: a client told "published" finds its commit on the branch.
+3. `publishedIsOnBranch`: a client told "published" finds its commit on the branch (unless
+   an undo or reset took it off since).
 4. `conflictedHasNothingOnBranch`: a client told "conflict" landed nothing.
 5. `landsAtMostOnce`: one `commit` call lands at most one commit.
 6. `gcRunsAlone`: while gc marks and deletes, no writer is between its first read and its
    return.
 7. `recentIsTruthful`, and the rewrite properties `lineageNamesItsRecord`,
-   `recordsAreChained`, `reflogIsStored`, `rewriteOutcomeIsTruthful`: see the combining and
-   rewrite sections.
+   `recordsAreChained`, `reflogIsStored`, `rewriteOutcomeIsTruthful`,
+   `rewritesDropOnlyTheirTarget`: see the combining and rewrite sections.
 
 `npm run simulate` checks them over random interleavings of three writers and gc,
 including crashes, expired leases and the grace period passing at any moment (simulation,
@@ -165,6 +166,8 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `batchRecheck(c)` | the ref read after an unanswered batch swap |
 | action `withdraw(c)` | `c`'s DELETE of its own intent |
 | action `beginRewrite(c)` | `c`'s `GET refs/main`; it then builds the reworded tip unleased (as `pail rebase` builds) |
+| action `beginUndo(c)` | `c`'s `GET refs/main` (then the record its lineage names, not held); `RewriteRequest::undo` |
+| action `beginReset(c)` | `force_ref`'s `GET refs/main`, to the tip's parent |
 | action `rwStore(c)` | under `writing()`'s lease, the new commit's `PUT commits/<hash>` |
 | action `rwRead(c)` | `rewrite_ref`'s `GET refs/main`, then each carried commit's upload and the `PUT reflog/main/<id>` |
 | action `rwSwap(c, d)` / `rwRecheck(c)` | its conditional `PUT refs/main`; the ref read after an unanswered one |
@@ -183,7 +186,7 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | `Versioned.version` | writes and deletes the gates saw per key (ETag order for the ref) |
 | `young` | objects created since the last `graceElapses` |
 | `phase`, collector `phase` | the request the actor is held at (or that it returned) |
-| `outcome` | what `commit` returned: Ok, `ConflictError`, another error; what `rewrite_ref` returned: Ok, `MovedError`, another error |
+| `outcome` | what `commit` returned: Ok, `ConflictError`, another error; what `rewrite_ref` returned: Ok, `MovedError`, `ConflictError`, another error |
 
 Every actor is a real `Repo` behind a gate (`Gate` in `tests/refinement.rs`) that holds the
 requests above until the scenario releases them; everything else (commit and page reads,
@@ -240,36 +243,59 @@ now cover combined commits.
 
 ## Rewrites (`rewrite.qnt`)
 
-A client rewords the branch's tip (`beginRewrite` reads it and builds the new commit, as
-`pail rebase` builds before taking its lease), leases, stores it, then runs `rewrite_ref`:
-read the ref; moved off the tip: `MovedError`; otherwise carry each commit landed since onto
-the new tip, write the record (`reflog/<branch>/<id>`: old, new, epoch, prev, map) and swap
-with the epoch bumped. Moving the ref forward keeps its lineage. gc marks every record's old
-and new tips (and what is under them).
+Three rewrites, each its record's `op`, all published by `rewrite_ref`:
+
+1. `rebase`: a client rewords the branch's tip (`beginRewrite` reads it and builds the new
+   commit, as `pail rebase` builds before taking its lease), leases and stores it.
+2. `undo` (`pail rebase --undo`): `beginUndo` reads the ref and the record its lineage
+   names; `RewriteRequest::undo` goes from that record's new tip back to its old one, each
+   successor mapped back.
+3. `reset` (`Repo::force_ref`): `beginReset` moves the branch to the tip's parent, dropping
+   the tip; no map.
+
+`rewrite_ref` then reads the ref; moved off the tip it was made from: `MovedError`;
+otherwise carries each commit landed since onto the new tip (its change from its parent,
+checked to apply there: `check_applies`, else `ConflictError`), writes the record
+(`reflog/<branch>/<id>`: op, old, new, epoch, prev, map) and swaps with the epoch bumped.
+Moving the ref forward keeps its lineage. gc marks every record's old and new tips (and
+what is under them).
 
 - Properties: `lineageNamesItsRecord` (the ref's lineage names a record of its epoch whose
   new tip the branch has), `recordsAreChained` (each record's epoch is its prev's plus one),
   `reflogIsStored` (every commit a record reaches stays stored, for successor walks and
-  undo), `rewriteOutcomeIsTruthful` (Ok: its record is in the ref's chain; `MovedError`: none
-  is). `refOnlyMovesForward` allows moves a record names; `recentIsTruthful` asks only that
-  the branch has each landed intent's change (a rewrite keeps `recent` as it was).
+  undo), `rewriteOutcomeIsTruthful` (Ok: its record is in the ref's chain; `MovedError` or
+  `ConflictError`: none is), `rewritesDropOnlyTheirTarget` (a rebase takes no change off
+  the branch; an undo or reset at most one: every change landed meanwhile is carried).
+  `refOnlyMovesForward` allows moves a record names; `recentIsTruthful` asks only that the
+  branch has each landed intent's change (a rewrite keeps `recent` as it was), and with
+  `publishedIsOnBranch` excuses a change an undo or reset took off.
 - Scenarios: `rewordCarriesRun`, `rewordAfterLostSwapRun`, `rewriteMovedRun`,
   `rewriteLostThenRewrittenRun`, `rewriteSwapDroppedRun`, `gcKeepsRewrittenHistoryRun`,
-  `rewordKeepsRecentRun` (a rewrite keeps `recent`).
-- `contendStep` interleaves rewriters with writers. 100,000 contended runs: no violation.
-- Ten mutants of the rewrite code (no carrying, epoch not bumped, no `prev`, gc ignoring
-  the reflog, a publish resetting the lineage, the moved check skipped, either recheck fix
-  undone, the record's map missing carried commits, `recent` dropped) each fail a scenario.
-  The map mutant passed until quint-refinements#25 (the runtime filled a map entry the
-  snapshot lacked in from the model).
-- Simplifications: the only rewrite is a reword (the tree stays, so every carried commit
-  applies: `check_applies` is not exercised); each client rewrites at most once, so a chain
-  has at most four records; no undo, reset or drops (`None` successors); `rewrites_between`'s
-  `REWRITE_CHAIN_MAX` is never reached.
+  `rewordKeepsRecentRun` (a rewrite keeps `recent`); `undoCarriesRun` (the map reversed,
+  a commit landed since carried), `resetAfterLostSwapRun` (a lost-reply publish the reset
+  dropped still reports published; the undo brings it back), `resetCarriesRun` (a carried
+  commit's change written over the new tip's tree), `resetConflictRun` (a commit landed
+  since does not apply: nothing published).
+- `contendStep` interleaves rewriters with writers. 100,000 contended runs and 50,000
+  `step` runs: no violation.
+- Fifteen mutants of the rewrite code each fail a scenario: no carrying, epoch not bumped,
+  no `prev`, gc ignoring the reflog, a publish resetting the lineage, the moved check
+  skipped, either recheck fix undone, the record's map missing carried commits, `recent`
+  dropped; the undo's map not reversed, the undo expecting the old tip, a reset naming no
+  one, carried commits unchecked, a carried commit keeping its own tree. The map mutant
+  passed until quint-refinements#25 (the runtime filled a map entry the snapshot lacked in
+  from the model).
+- Found: `force_ref` named no one, in its record or as committer of the commits it
+  carried. It now takes the committer.
+- Simplifications: a rebase only rewords the tip and a reset only drops it; each client
+  rewrites at most once, so a chain has at most four records; nothing maps to `None`
+  (dropped by a plan); `rewrites_between`'s `REWRITE_CHAIN_MAX` is never reached. An undo
+  whose record is no longer the ref's last (another rewrite landed on top of its new tip
+  in between) still undoes it, carrying the later one's commits.
 
 ## Not modelled yet
 
-1. `land --stack`; `rebase --undo` and `force_ref` (reset); successor walks
+1. `land --stack`; rebase plans beyond a reword (reorder, squash, drop); successor walks
    (`Repo::successor`, `fork_point`) beyond the record's map.
 2. Packs and chunks (files are inline in the model's trees).
 3. Known heads (the fast path that skips the first ref read).

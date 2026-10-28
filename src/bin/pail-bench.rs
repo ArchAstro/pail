@@ -228,7 +228,9 @@ impl Bench {
     async fn fresh_branch(&self, name: &str) -> Result<String> {
         let b = self.branch(name);
         if self.repo.read_ref(&b).await?.is_some() {
-            self.repo.force_ref(&b, self.base).await?;
+            self.repo
+                .force_ref(&b, self.base, "Bench <bench@pail>")
+                .await?;
         } else {
             self.repo.create_branch(&b, self.base).await?;
         }
@@ -603,7 +605,7 @@ impl Bench {
         let mut chain = vec![];
         for k in 0..3 {
             let b = self.fresh_branch(&format!("chain{k}")).await?;
-            self.repo.force_ref(&b, prev).await?;
+            self.repo.force_ref(&b, prev, "Bench <bench@pail>").await?;
             let mut h = Some(prev);
             for j in 0..4 {
                 let paths = vec![format!("bench_chain/b{k}/c{j}.txt")];
