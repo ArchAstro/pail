@@ -15,7 +15,7 @@
 ///   CheckingLeases ─▶ RwStoring (rebase) ─rwStore (the new commit)─▶ RwReading
 ///                  ─▶ RwReading (undo, reset: the new tip is stored already)
 ///   RwReading ─rwRead─▶ RwSwapping                (carried what landed since, wrote the record)
-///             ─rwRead─▶ Done (Moved)               (the tip is gone from the branch)
+///             ─rwRead─▶ Done (Moved)               (the tip is gone, or an undo's record is not the last)
 ///             ─rwRead─▶ Done (Conflicted)          (a commit landed since does not apply)
 ///   RwSwapping ─answered, won─▶ Done (Rewritten)
 ///              ─answered, lost─▶ RwReading
@@ -66,7 +66,14 @@ module rewrite {
     withClient(s, c, {
       ...IDLE,
       phase: Leasing,
-      rw: { ...NO_RW, op: "undo", expected: r.new, new: r.old, successors: inverse(r.successors) },
+      rw: {
+        ...NO_RW,
+        op: "undo",
+        expected: r.new,
+        new: r.old,
+        successors: inverse(r.successors),
+        since: lineageOf(s.bucket),
+      },
     })
   }
 
@@ -149,15 +156,18 @@ module rewrite {
     )
   }
 
-  /// Read the ref. Moved off the tip the rewrite was made from (it is not under the head):
-  /// fail. Otherwise carry what landed since onto the new tip, storing each; one that does
+  /// Read the ref. Moved off the tip the rewrite was made from (it is not under the head),
+  /// or, for an undo, rewritten since (its record is no longer the ref's last): fail. Otherwise carry what landed since onto the new tip, storing each; one that does
   /// not apply fails the attempt (those before it stay stored); else write the record.
   pure def rwReadCan(s: State, c: str): bool = client(s, c).phase == RwReading
 
   pure def rwReadNext(s: State, c: str): State = {
     val rw = client(s, c).rw
     val cur = tip(s.bucket)
-    if (cur.commit != rw.expected and not(ancestorsOf(s.bucket, cur.commit).contains(rw.expected)))
+    if (or {
+      cur.commit != rw.expected and not(ancestorsOf(s.bucket, cur.commit).contains(rw.expected)),
+      rw.op == "undo" and lineageOf(s.bucket) != rw.since,
+    })
       finished(s, c, { ...client(s, c), phase: Done, outcome: Moved })
     else Set(carried(s.bucket, c, rw, cur.commit)).fold(s, (none, a) =>
       Set(a.made.fold(s.bucket, (acc, m) => stored(acc, m.id, m.tree, m.ancestors))).fold(s, (n, b) =>

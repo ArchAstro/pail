@@ -897,4 +897,42 @@ module scenarios {
       }),
       state' = state,
     })
+
+  /// Alice resets carol's commit off the branch; dave and bob both set out to undo the
+  /// reset, and dave lands first. Bob's undo finds the branch rewritten since he read it:
+  /// it moved, and he publishes nothing. (Comparing tips alone, bob found the reset's new
+  /// tip still under the head, carried carol's commit onto itself, and landed her change
+  /// twice.)
+  /// @conformance
+  run undoTwiceRun = init
+    .then(begin("carol", ROOT, BOB_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(beginReset("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(rwRead("alice"))
+    .then(rwSwap("alice", Answered))
+    .then(beginUndo("dave"))
+    .then(beginUndo("bob"))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(rwRead("dave"))
+    .then(rwSwap("dave", Answered))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(rwRead("bob"))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ["root", "carol"], version: 4 },
+        lineageOf(state.bucket) == { epoch: 2, rewrite: 2 },
+        state.bucket.reflog.keys() == Set(1, 2),
+        client(state, "bob").outcome == Moved,
+        client(state, "dave").outcome == Rewritten,
+      }),
+      state' = state,
+    })
 }

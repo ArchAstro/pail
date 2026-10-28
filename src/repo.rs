@@ -163,12 +163,24 @@ pub struct RewriteRequest {
     pub date: String,
     /// Each rewritten commit of the old history to its successor (None: dropped).
     pub map: BTreeMap<Hash, Option<Hash>>,
+    /// The lineage the request was made at, when another rewrite since must fail it with
+    /// [`MovedError`] (an undo: its record must still be the branch's last).
+    pub since: Option<Lineage>,
 }
 
 impl RewriteRequest {
-    /// Undo `rec` (`pail rebase --undo`): from its new tip back to its old one, each
-    /// successor mapped back to the commit it replaced.
-    pub fn undo(branch: &str, rec: &Rewrite, committer: String, date: String) -> Self {
+    /// Undo `rec`, the record `since` names (`pail rebase --undo`): from its new tip back to
+    /// its old one, each successor mapped back to the commit it replaced. Commits landed
+    /// since are carried; another rewrite since fails it (verify/scenarios.qnt,
+    /// undoTwiceRun: an undo of a reset already undone carried the restored commits onto
+    /// themselves).
+    pub fn undo(
+        branch: &str,
+        rec: &Rewrite,
+        since: Lineage,
+        committer: String,
+        date: String,
+    ) -> Self {
         RewriteRequest {
             branch: branch.to_string(),
             expected: rec.new,
@@ -181,6 +193,7 @@ impl RewriteRequest {
                 .iter()
                 .filter_map(|(old, new)| new.map(|n| (n, Some(*old))))
                 .collect(),
+            since: Some(since),
         }
     }
 }
@@ -446,6 +459,7 @@ impl Repo {
                 committer: committer.to_string(),
                 date: crate::objects::now_date(),
                 map: BTreeMap::new(),
+                since: None,
             },
             None,
         )
@@ -484,6 +498,14 @@ impl Repo {
             let mut tip = req.new;
             let mut map = req.map.clone();
             let mut carried = vec![];
+            if req.since.as_ref().is_some_and(|l| *l != cur.lineage) {
+                return Err(MovedError {
+                    branch: req.branch.clone(),
+                    expected: req.expected,
+                    now: cur.commit,
+                }
+                .into());
+            }
             if cur.commit != req.expected {
                 if !self.is_ancestor(req.expected, cur.commit).await? {
                     return Err(MovedError {

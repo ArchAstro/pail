@@ -59,7 +59,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        23,
+        24,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -607,6 +607,8 @@ struct Rewriter {
     expected: Id,
     new: Id,
     successors: BTreeMap<Id, Id>,
+    /// For an undo, the lineage that named its record.
+    since: Lineage,
     /// The version its last attempt read; `version` once that attempt wrote its record.
     read: i64,
     version: i64,
@@ -1078,6 +1080,7 @@ impl Harness {
                 .map_err(|e| e.to_string())?;
             self.name(&c.parent.ok_or("rewriting the root")?)
         };
+        let mut since = Lineage::default();
         let (expected, new, successors) = match op {
             "rebase" => {
                 let expected = self.name(&commit)?;
@@ -1096,7 +1099,9 @@ impl Harness {
                 let id = value
                     .lineage
                     .rewrite
+                    .clone()
                     .ok_or("undoing a branch never rewritten")?;
+                since = value.lineage;
                 let r = self
                     .rt()
                     .block_on(self.observer.read_rewrite(BRANCH, &id))
@@ -1110,7 +1115,7 @@ impl Harness {
             }
         };
         let rw = self.writer(actor)?.rw.as_mut().unwrap();
-        (rw.expected, rw.new, rw.successors) = (expected, new, successors);
+        (rw.expected, rw.new, rw.successors, rw.since) = (expected, new, successors, since);
         Ok(())
     }
 
@@ -1679,11 +1684,11 @@ impl Harness {
         ]))
     }
 
-    fn rw_value(&self, w: &Writer) -> RuntimeValue {
+    fn rw_value(&self, w: &Writer) -> Result<RuntimeValue, String> {
         let root: Id = vec!["root".to_owned()];
         let rw = w.rw.clone().unwrap_or_default();
         let or_root = |id: Id| if id.is_empty() { root.clone() } else { id };
-        record([
+        Ok(record([
             ("op", RuntimeValue::Text(rw.op.to_owned())),
             ("expected", id_value(&or_root(rw.expected))),
             ("new", id_value(&or_root(rw.new))),
@@ -1696,10 +1701,11 @@ impl Harness {
                         .collect(),
                 ),
             ),
+            ("since", self.lineage_value(&rw.since)?),
             ("version", RuntimeValue::Int(rw.version)),
             ("tip", id_value(&rw.tip.unwrap_or(root.clone()))),
             ("id", RuntimeValue::Int(rw.id)),
-        ])
+        ]))
     }
 
     fn writer_value(&self, name: &str, w: &Writer) -> Result<RuntimeValue, String> {
@@ -1747,7 +1753,7 @@ impl Harness {
             ("seenLineage", self.lineage_value(&w.seen_lineage)?),
             ("attempt", RuntimeValue::Int(w.attempts.max(1))),
             ("comb", self.comb_value(name, w)?),
-            ("rw", self.rw_value(w)),
+            ("rw", self.rw_value(w)?),
             ("outcome", RuntimeValue::Text(outcome.to_owned())),
         ]))
     }
@@ -2082,6 +2088,7 @@ impl generated::Implementation for Harness {
                         committer: committer.clone(),
                         date: DATE.to_owned(),
                         map: BTreeMap::from([(x, Some(new))]),
+                        since: None,
                     };
                     repo.rewrite_ref(req, None).await
                 }
@@ -2109,9 +2116,15 @@ impl generated::Implementation for Harness {
         self.rt().spawn(async move {
             let result: anyhow::Result<()> = async {
                 let (cur, _) = repo.read_ref_value(BRANCH).await?.context("no branch")?;
-                let id = cur.lineage.rewrite.context("never rewritten")?;
+                let id = cur.lineage.rewrite.clone().context("never rewritten")?;
                 let rec = repo.read_rewrite(BRANCH, &id).await?;
-                let req = RewriteRequest::undo(BRANCH, &rec, committer, DATE.to_owned());
+                let req = RewriteRequest::undo(
+                    BRANCH,
+                    &rec,
+                    cur.lineage.clone(),
+                    committer,
+                    DATE.to_owned(),
+                );
                 repo.rewrite_ref(req, None).await.map(|_| ())
             }
             .await;
