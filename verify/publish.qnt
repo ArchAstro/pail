@@ -54,7 +54,8 @@ module publish {
       { ...s, bucket: unleased(s.bucket, c), clients: s.clients.set(c, { ...client(s, c), phase: Leasing }) }
     else
       withClient(s, c, { ...client(s, c), phase:
-        if (client(s, c).rw == NO_RW) Reading
+        if (client(s, c).ld.calls > 0) LdReading
+        else if (client(s, c).rw == NO_RW) Reading
         else if (client(s, c).rw.op == "rebase") RwStoring
         else RwReading })
 
@@ -141,7 +142,7 @@ module publish {
   // ---------- failures ----------
 
   /// The process dies mid-call: it makes no more requests and leaves its lease behind.
-  pure def crashCan(s: State, c: str): bool = not(Set(Idle, Done).contains(client(s, c).phase))
+  pure def crashCan(s: State, c: str): bool = not(Set(Idle, Stacked, Done).contains(client(s, c).phase))
 
   pure def crashNext(s: State, c: str): State =
     withClient(s, c, { ...client(s, c), phase: Done, outcome: Unknown })

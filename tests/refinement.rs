@@ -32,7 +32,7 @@ use pail::hash::Hash;
 use pail::manifest::{Kind, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
 use pail::repo::{
-    CommitRequest, ConflictError, Delta, FileInput, MovedError, Repo, RewriteRequest,
+    CommitFields, CommitRequest, ConflictError, Delta, FileInput, MovedError, Repo, RewriteRequest,
     rewritten_fields,
 };
 use pail::store::Store;
@@ -59,7 +59,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        24,
+        30,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -165,6 +165,8 @@ struct Gate {
     events: mpsc::Sender<Event>,
     book: Arc<Mutex<Book>>,
     uploads: Arc<Mutex<Uploads>>,
+    /// Holds nothing: a step the model takes whole (making a stack).
+    free: bool,
 }
 
 impl fmt::Debug for Gate {
@@ -240,6 +242,9 @@ impl Gate {
     }
 
     async fn hold(&self, request: Request, key: &str) -> Delivery {
+        if self.free {
+            return Delivery::Answered;
+        }
         if request != Request::PutCommit {
             self.uploads.lock().unwrap().open = false;
         }
@@ -273,6 +278,9 @@ impl Gate {
         etag: Option<String>,
         listed: Vec<String>,
     ) {
+        if self.free {
+            return;
+        }
         let _ = self.events.send(Event::Answered {
             actor: self.actor.clone(),
             request,
@@ -335,7 +343,7 @@ impl ObjectStore for Gate {
         opts: PutOptions,
     ) -> StoreResult<PutResult> {
         let key = location.as_ref();
-        if key.starts_with("pages/") {
+        if key.starts_with("pages/") && !self.free {
             let wait = {
                 let mut u = self.uploads.lock().unwrap();
                 if u.open {
@@ -617,6 +625,22 @@ struct Rewriter {
     id: i64,
 }
 
+/// A client landing its stack: `Ld` in `world.qnt`.
+#[derive(Clone, Default)]
+struct Lander {
+    /// Land calls begun.
+    calls: i64,
+    /// Its stack's commit.
+    stack: Id,
+    /// What its last attempt read of the branch: version and lineage.
+    version: i64,
+    lineage: Lineage,
+    /// The commit that attempt copied onto the branch, if any, and the tip its swap moves
+    /// the branch to.
+    stored: Option<Id>,
+    tip: Option<Id>,
+}
+
 #[derive(Default)]
 struct Writer {
     base: Option<Id>,
@@ -632,6 +656,9 @@ struct Writer {
     seen_lineage: Lineage,
     /// Set once it begins a rewrite instead of a commit.
     rw: Option<Rewriter>,
+    /// Set once it has made a stack; `ld` once it lands it.
+    stacked: bool,
+    ld: Option<Lander>,
     /// Where it is on the combining path (`Intending` ..), once it has written its intent.
     combining: Option<&'static str>,
     /// Its intent's id and the time the scenario gave it.
@@ -694,12 +721,17 @@ impl Harness {
     }
 
     fn gate(&self, actor: &str) -> Store {
+        self.gate_with(actor, false)
+    }
+
+    fn gate_with(&self, actor: &str, free: bool) -> Store {
         let gate = Gate {
             inner: self.bucket.clone(),
             actor: actor.to_owned(),
             events: self.sender.clone(),
             book: self.book.clone(),
             uploads: Arc::default(),
+            free,
         };
         Store::from_object_store("memory://bucket", Arc::new(gate))
     }
@@ -832,8 +864,14 @@ impl Harness {
                         && !w.rechecking
                         && w.combining.is_none()
                         && w.rw.is_none()
+                        && w.ld.is_none()
                     {
                         w.attempts += 1;
+                    }
+                    if request == Request::Swap
+                        && let Some(ld) = w.ld.as_mut()
+                    {
+                        ld.tip = Some(ld.stored.take().unwrap_or_else(|| ld.stack.clone()));
                     }
                     if request == Request::PutIntent {
                         w.combining = Some("Intending");
@@ -895,6 +933,16 @@ impl Harness {
                     let (commit, _) = seen.ok_or("gc's ref read failed")?;
                     // Then the reflog: every record's old and new tips are roots too.
                     let (mut ids, mut trees) = self.reach(commit)?;
+                    // Every stack too (read past the gate: nothing moves them).
+                    for (branch, data) in self.live("refs/")? {
+                        if branch != BRANCH {
+                            let v: RefValue =
+                                serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                            let (i, t) = self.reach(v.commit)?;
+                            ids.extend(i);
+                            trees.extend(t);
+                        }
+                    }
                     for (_, data) in self.live("reflog/")? {
                         let r: Rewrite =
                             serde_json::from_slice(&data).map_err(|e| e.to_string())?;
@@ -909,6 +957,9 @@ impl Harness {
                 }
                 if self.writer(actor)?.rw.is_some() {
                     return self.rewriter_read(actor, seen);
+                }
+                if self.writer(actor)?.ld.is_some() {
+                    return self.lander_read(actor, seen);
                 }
                 // The ref as read: the version names the body, which only that version had.
                 let seen = match seen {
@@ -984,9 +1035,13 @@ impl Harness {
                     self.names.insert(h, id.clone());
                     self.hashes.insert(id, h);
                 }
+                let id = self.name(&h)?;
                 let w = self.writer(actor)?;
                 if w.combining.is_some() && !w.round.batch.contains(&h) {
                     w.round.batch.push(h);
+                }
+                if let Some(ld) = w.ld.as_mut() {
+                    ld.stored = Some(id);
                 }
             }
             Request::PutRewrite => {
@@ -1044,6 +1099,23 @@ impl Harness {
             | Request::ListLeases
             | Request::DeleteLease => {}
         }
+        Ok(())
+    }
+
+    /// A lander's read of the branch: a recheck learns nothing the model keeps; any other
+    /// begins an attempt.
+    fn lander_read(&mut self, actor: &str, seen: Option<(Hash, i64)>) -> Result<(), String> {
+        let (_, version) = seen.ok_or(format!("{actor}'s ref read failed"))?;
+        let lineage = self.ref_values.lock().unwrap()[version as usize - 1]
+            .lineage
+            .clone();
+        let w = self.writer(actor)?;
+        if w.rechecking {
+            w.rechecking = false;
+            return Ok(());
+        }
+        let ld = w.ld.as_mut().ok_or("not a lander")?;
+        (ld.version, ld.lineage, ld.stored) = (version, lineage, None);
         Ok(())
     }
 
@@ -1212,8 +1284,12 @@ impl Harness {
                 p.outcome
             ));
         };
-        if actor != GC && expected == Request::Swap && !matches!(how, Delivery::Answered) {
-            self.writer(actor)?.rechecking = true;
+        if actor != GC && expected == Request::Swap {
+            // A lander rereads the branch after any swap it did not win, answered or not.
+            let w = self.writer(actor)?;
+            if !matches!(how, Delivery::Answered) || w.ld.is_some() {
+                w.rechecking = true;
+            }
         }
         self.send(actor, i, how)
     }
@@ -1486,10 +1562,13 @@ impl Harness {
                 ("recent", self.recent_value(&self.recent(&value)?)),
                 ("lineage", self.lineage_value(&value.lineage)?),
             ]);
-            refs.insert(
-                RuntimeValue::Text(branch),
-                versioned(body, self.ref_version(&etag, None), true),
-            );
+            // The branch's versions are its ETags in order; a stack is written once.
+            let version = if branch == BRANCH {
+                self.ref_version(&etag, None)
+            } else {
+                self.book.lock().unwrap().versions[&format!("refs/{branch}")]
+            };
+            refs.insert(RuntimeValue::Text(branch), versioned(body, version, true));
         }
         let intents = self.space(&format!("intents/{BRANCH}/"), |name, data| {
             let writer = self.intent_writer(name)?;
@@ -1708,10 +1787,22 @@ impl Harness {
         ]))
     }
 
+    fn ld_value(&self, w: &Writer) -> Result<RuntimeValue, String> {
+        let root: Id = vec!["root".to_owned()];
+        let ld = w.ld.clone().unwrap_or_default();
+        Ok(record([
+            ("calls", RuntimeValue::Int(ld.calls)),
+            ("tip", id_value(&ld.tip.unwrap_or(root))),
+            ("version", RuntimeValue::Int(ld.version)),
+            ("lineage", self.lineage_value(&ld.lineage)?),
+        ]))
+    }
+
     fn writer_value(&self, name: &str, w: &Writer) -> Result<RuntimeValue, String> {
         let root: Id = vec!["root".to_owned()];
         let p = &w.progress;
         let phase = match (&p.outcome, w.combining, w.base.is_some()) {
+            (_, _, false) if w.stacked => "Stacked",
             (_, _, false) => "Idle",
             (Some(_), _, _) => "Done",
             (None, _, true) if w.rw.is_some() => match p.held.first().map(|(r, _, _)| *r) {
@@ -1722,6 +1813,14 @@ impl Harness {
                 Some(Request::ReadRef) => "RwReading",
                 Some(Request::Swap) => "RwSwapping",
                 other => return Err(format!("{name} is between rewrite requests ({other:?})")),
+            },
+            (None, _, true) if w.ld.is_some() => match p.held.first().map(|(r, _, _)| *r) {
+                Some(Request::PutLease) => "Leasing",
+                Some(Request::ListLeases) => "CheckingLeases",
+                Some(Request::ReadRef) if w.rechecking => "LdRechecking",
+                Some(Request::ReadRef) => "LdReading",
+                Some(Request::Swap) => "LdSwapping",
+                other => return Err(format!("{name} is between landing requests ({other:?})")),
             },
             (None, Some(phase), _) => phase,
             (None, None, true) if p.holds(Request::PutLease) => "Leasing",
@@ -1754,6 +1853,7 @@ impl Harness {
             ("attempt", RuntimeValue::Int(w.attempts.max(1))),
             ("comb", self.comb_value(name, w)?),
             ("rw", self.rw_value(w)?),
+            ("ld", self.ld_value(w)?),
             ("outcome", RuntimeValue::Text(outcome.to_owned())),
         ]))
     }
@@ -2182,6 +2282,98 @@ impl generated::Implementation for Harness {
         let c = Harness::actor_arg(arguments)?;
         if !self.writer(&c)?.rechecking {
             return Err(format!("{c} has no unanswered rewrite swap to recheck"));
+        }
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)
+    }
+
+    /// Make `c`'s stack whole, past every gate: its commit on the branch's tip, then the
+    /// branch `c` naming it.
+    fn stack(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let [c, delta] = arguments else {
+            return Err(format!("stack takes 2 arguments: {arguments:?}"));
+        };
+        let name = text(c)?.to_owned();
+        let delta = tree_of(delta)?;
+        let (tip, _) = Harness::read_ref(self)?;
+        let req = self.request(&name, Some(tip), self.files(&delta)?);
+        let fields = CommitFields {
+            author: req.author,
+            author_date: req.author_date,
+            committer: req.committer,
+            committer_date: req.committer_date,
+            message: req.message,
+            meta: req.meta,
+        };
+        let repo = Repo::with_store(self.gate_with(&name, true), None);
+        let h = self
+            .rt()
+            .block_on(async {
+                let h = repo
+                    .write_commit(Some(tip), &req.delta, &fields)
+                    .await?
+                    .commit;
+                repo.create_branch(&name, h).await?;
+                anyhow::Ok(h)
+            })
+            .map_err(|e| e.to_string())?;
+        let mut id = self.name(&tip)?;
+        id.push(name.clone());
+        self.names.insert(h, id.clone());
+        self.hashes.insert(id, h);
+        self.writer(&name)?.stacked = true;
+        Ok(())
+    }
+
+    /// `land_stack` of `c`'s stack onto the branch: it leases first.
+    fn begin_land(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = Harness::actor_arg(arguments)?;
+        let (data, _) = self
+            .object(&format!("refs/{name}"))?
+            .ok_or(format!("{name} has no stack"))?;
+        let v: RefValue = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+        let stack = self.name(&v.commit)?;
+        let repo = Repo::with_store(self.gate(&name), None);
+        let events = self.sender.clone();
+        let actor = name.clone();
+        let committer = format!("{name} <{name}@example.com>");
+        self.rt().spawn(async move {
+            let outcome = match repo.land_stack(&actor, BRANCH, &committer, DATE).await {
+                Ok(_) => "Published",
+                Err(e) if e.downcast_ref::<ConflictError>().is_some() => "Conflicted",
+                Err(_) => "Unknown",
+            };
+            let _ = events.send(Event::Finished { actor, outcome });
+        });
+        let w = self.writer(&name)?;
+        w.base = Some(vec!["root".to_owned()]);
+        w.rechecking = false;
+        w.progress = Progress::default();
+        let calls = w.ld.as_ref().map_or(0, |ld| ld.calls) + 1;
+        w.ld = Some(Lander {
+            calls,
+            stack,
+            ..Lander::default()
+        });
+        self.settle(&name)
+    }
+
+    /// The branch read, then the copy's upload if it makes one, up to its swap.
+    fn ld_read(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        self.release(&c, Request::ReadRef, None, Delivery::Answered)?;
+        self.drain(&c, &[Request::PutCommit])
+    }
+
+    fn ld_swap(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        let how = Delivery::of(arguments.get(1).ok_or("ldSwap takes a Delivery")?)?;
+        self.release(&c, Request::Swap, None, how)
+    }
+
+    fn ld_recheck(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        if !self.writer(&c)?.rechecking {
+            return Err(format!("{c} has no swap to recheck"));
         }
         self.release(&c, Request::ReadRef, None, Delivery::Answered)
     }

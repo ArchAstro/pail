@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
 /// Pail as a whole: every feature's steps (`publish.qnt`, `combine.qnt`, `rewrite.qnt`,
-/// `gc.qnt`) as actions on one
+/// `land.qnt`, `gc.qnt`) as actions on one
 /// state, a `step` that interleaves them freely, and the properties that must hold in
 /// every reachable state. `npm run simulate` checks them; `scenarios.qnt` holds runs the
 /// real code is checked against.
@@ -11,6 +11,7 @@ module pail {
   import publish.* from "./publish"
   import combine.* from "./combine"
   import rewrite.* from "./rewrite"
+  import land.* from "./land"
   import gc.* from "./gc"
 
   var state: State
@@ -120,6 +121,18 @@ module pail {
     state' = rwRecheckNext(state, c),
   }
 
+  // ---------- landing a stack ----------
+
+  action stack(c: str, delta: Delta): bool = all { stackCan(state, c), state' = stackNext(state, c, delta) }
+
+  action beginLand(c: str): bool = all { beginLandCan(state, c), state' = beginLandNext(state, c) }
+
+  action ldRead(c: str): bool = all { ldReadCan(state, c), state' = ldReadNext(state, c) }
+
+  action ldSwap(c: str, d: Delivery): bool = all { ldSwapCan(state, c), state' = ldSwapNext(state, c, d) }
+
+  action ldRecheck(c: str): bool = all { ldRecheckCan(state, c), state' = ldRecheckNext(state, c) }
+
   // ---------- the collector ----------
 
   action gcLease: bool = all { gcLeaseCan(state), state' = gcLeaseNext(state) }
@@ -197,6 +210,11 @@ module pail {
       rwRead(c),
       rwSwap(c, d),
       rwRecheck(c),
+      stack(c, delta),
+      beginLand(c),
+      ldRead(c),
+      ldSwap(c, d),
+      ldRecheck(c),
       gcLease,
       gcCheckLeases,
       gcMark,
@@ -246,12 +264,17 @@ module pail {
       rwRead(c),
       rwSwap(c, d),
       rwRecheck(c),
+      stack(c, delta),
+      beginLand(c),
+      ldRead(c),
+      ldSwap(c, d),
+      ldRecheck(c),
     }
   }
 
   // ---------- properties ----------
 
-  /// Every commit the branch reaches, and its page, is stored: no ref dangles.
+  /// Every commit a ref reaches, and its page, is stored: no ref dangles.
   val branchIsComplete: bool = branchIsStored(state.bucket)
 
   /// Every move of the ref keeps what it named before, unless a rewrite's record names
@@ -281,6 +304,22 @@ module pail {
     CLIENTS.forall(c =>
       client(state, c).outcome == Published
         implies (branch(state.bucket).exists(id => author(id) == c) or dropped(c))
+    )
+
+  /// Each call publishes a client's change at most once (a move no record names enters
+  /// it): once landed, taken off by an undo or reset, it comes back only by a rewrite, or
+  /// by landing the stack again.
+  val publishedOnce: bool =
+    CLIENTS.forall(c =>
+      state.history.indices().filter(i => and {
+        i > 0,
+        not(state.bucket.reflog.keys().exists(id => and {
+          recordOf(state.bucket, id).old == state.history[i - 1],
+          recordOf(state.bucket, id).new == state.history[i],
+        })),
+        not(authorsAt(state.bucket, state.history[i - 1]).contains(c)),
+        authorsAt(state.bucket, state.history[i]).contains(c),
+      }).size() <= (if (client(state, c).ld.calls > 1) client(state, c).ld.calls else 1)
     )
 
   /// The ref's `recent` names, for each landed intent, a commit made of it, and the
@@ -350,7 +389,7 @@ module pail {
   /// While gc marks and deletes, no writer is between its first read and its return.
   val gcRunsAlone: bool =
     Set(GcLocked, GcMarked, GcSweepingCommits, GcSweepingPages).contains(state.collector.phase)
-      implies CLIENTS.forall(c => Set(Idle, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
+      implies CLIENTS.forall(c => Set(Idle, Stacked, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
 
   val safety: bool = and {
     gcRunsAlone,
@@ -365,5 +404,6 @@ module pail {
     reflogIsStored,
     rewriteOutcomeIsTruthful,
     rewritesDropOnlyTheirTarget,
+    publishedOnce,
   }
 }

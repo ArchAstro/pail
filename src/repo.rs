@@ -1781,9 +1781,15 @@ impl Repo {
                         attempts,
                     });
                 }
+                // Landed if the new tip is on `onto`, or under the tip the first rewrite since
+                // replaced: comparing tips alone, a lost reply whose landing a reset then
+                // dropped landed it again (verify/scenarios.qnt, landAfterResetRun).
                 Ok(Cas::Conflict) | Err(_) => {
-                    if let Some((now, _)) = self.read_ref(onto).await? {
-                        if now == new_tip {
+                    if let Some((now, _)) = self.read_ref_value(onto).await? {
+                        if self
+                            .landed_since(onto, new_tip, &onto_ref.lineage, &now)
+                            .await?
+                        {
                             return Ok(LandOutcome {
                                 tip: new_tip,
                                 landed,
