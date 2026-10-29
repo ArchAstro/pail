@@ -22,7 +22,7 @@ const int = (v: unknown, d: number) => (Number.isFinite(Number(v)) && v !== unde
 export function createApp(cfg: Config, registry = new Registry(cfg)) {
   const app = express();
   app.disable("x-powered-by");
-  app.use(express.json({ limit: "64kb" }));
+  app.use(express.json({ limit: "160kb" }));
 
   const repoOf = async (req: Request): Promise<Repo> => {
     const r = await registry.get(req.params.repo);
@@ -125,10 +125,49 @@ export function createApp(cfg: Config, registry = new Registry(cfg)) {
     res.set("Cache-Control", "no-cache").json(await r.prDiff(int(req.params.n, -1)));
   }));
 
+  app.get("/api/repos/:repo/compare", wrap(async (req, res) => {
+    const r = await repoOf(req);
+    res.set("Cache-Control", "no-cache").json(await r.compare(str(req.query.base), str(req.query.head)));
+  }));
+
+  app.post("/api/repos/:repo/prs", wrap(async (req, res) => {
+    const r = await repoOf(req);
+    res.status(201).json({ ok: true, pr: await r.createPr(req.body ?? {}) });
+  }));
+
+  app.patch("/api/repos/:repo/prs/:n", wrap(async (req, res) => {
+    const r = await repoOf(req);
+    await r.edit(int(req.params.n, -1), { title: req.body?.title, body: req.body?.body });
+    res.json({ ok: true });
+  }));
+
+  app.post("/api/repos/:repo/prs/:n/comments", wrap(async (req, res) => {
+    const r = await repoOf(req);
+    res.status(201).json({ ok: true, comment: await r.comment(int(req.params.n, -1), req.body?.body) });
+  }));
+
+  app.post("/api/repos/:repo/prs/:n/close", wrap(async (req, res) => {
+    const r = await repoOf(req);
+    await r.close(int(req.params.n, -1));
+    res.json({ ok: true });
+  }));
+
+  app.post("/api/repos/:repo/prs/:n/reopen", wrap(async (req, res) => {
+    const r = await repoOf(req);
+    await r.reopen(int(req.params.n, -1));
+    res.json({ ok: true });
+  }));
+
+  app.post("/api/repos/:repo/prs/:n/draft", wrap(async (req, res) => {
+    const r = await repoOf(req);
+    await r.setDraft(int(req.params.n, -1), req.body?.draft === true);
+    res.json({ ok: true });
+  }));
+
   app.post("/api/repos/:repo/prs/:n/review", wrap(async (req, res) => {
     const r = await repoOf(req);
     const verdict = req.body?.verdict === "changes" ? "changes" : "approve";
-    await r.review(int(req.params.n, -1), verdict, str(req.body?.comment).slice(0, 4000));
+    await r.review(int(req.params.n, -1), verdict, str(req.body?.comment));
     res.json({ ok: true });
   }));
 
@@ -173,7 +212,9 @@ export function createApp(cfg: Config, registry = new Registry(cfg)) {
   }
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const status = err instanceof HttpError ? err.status : err instanceof PailError ? 502 : 500;
+    // body-parser errors (bad JSON, too large) carry their own 4xx status.
+    const own = (err as { status?: unknown; statusCode?: unknown } | null)?.status;
+    const status = err instanceof HttpError ? err.status : err instanceof PailError ? 502 : typeof own === "number" && own >= 400 && own < 500 ? own : 500;
     res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
   });
 

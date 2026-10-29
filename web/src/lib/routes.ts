@@ -29,3 +29,10 @@ export const pullPath = (repo: string, n: number) => `${repoPath(repo)}/pull/${n
 export const checksPath = (repo: string) => `${repoPath(repo)}/checks`;
 export const rawUrl = (repo: string, ref: string, path: string, download = false) =>
   `/api/repos/${encodeURIComponent(repo)}/raw?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`;
+export const comparePath = (repo: string, base?: string, head?: string) => {
+  const p = new URLSearchParams();
+  if (base) p.set("base", base);
+  if (head) p.set("head", head);
+  const qs = p.toString();
+  return `${repoPath(repo)}/compare${qs ? "?" + qs : ""}`;
+};

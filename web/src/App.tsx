@@ -12,6 +12,7 @@ const CommitPage = lazy(() => import("./pages/CommitPage"));
 const BranchesPage = lazy(() => import("./pages/BranchesPage"));
 const PullsPage = lazy(() => import("./pages/PullsPage"));
 const PullPage = lazy(() => import("./pages/PullPage"));
+const ComparePage = lazy(() => import("./pages/ComparePage"));
 const ChecksPage = lazy(() => import("./pages/ChecksPage"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
@@ -30,6 +31,7 @@ export function App() {
             <Route path="branches" element={<BranchesPage />} />
             <Route path="pulls" element={<PullsPage />} />
             <Route path="pull/:n" element={<PullPage />} />
+            <Route path="compare" element={<ComparePage />} />
             <Route path="checks" element={<ChecksPage />} />
             <Route path="*" element={<NotFound />} />
           </Route>

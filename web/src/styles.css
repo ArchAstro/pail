@@ -98,7 +98,7 @@ kbd { background: var(--surface-2); border: 1px solid var(--line); border-bottom
 .icon-btn:hover { background: var(--surface-2); color: var(--ink); }
 .icon-btn:active { transform: scale(0.92); }
 .field { display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); }
-textarea, .pop__input { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; }
+textarea, .input, .select, .pop__input { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; }
 .switch { display: inline-flex; align-items: center; gap: 9px; color: var(--ink-2); cursor: pointer; font-size: 14px; }
 .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .switch__track { width: 32px; height: 18px; border-radius: 99px; background: var(--line); position: relative; transition: background-color 160ms; }
@@ -116,6 +116,7 @@ textarea, .pop__input { width: 100%; background: var(--bg); border: 1px solid va
 .pill--open { background: var(--ok-soft); color: var(--ok); }
 .pill--merged { background: var(--merged-soft); color: var(--merged); }
 .pill--closed { background: var(--bad-soft); color: var(--bad); }
+.pill--draft { background: var(--surface-2); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line); }
 .pill--req { background: var(--accent-soft); color: var(--accent); }
 .pill--quiet { font-weight: 500; }
 .ref { justify-self: start; font-family: var(--mono); font-size: 12.5px; background: var(--accent-soft); color: var(--accent); padding: 1px 7px; border-radius: 5px; white-space: nowrap; }
@@ -403,3 +404,25 @@ a.file__path { color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
+
+/* ---- compare and pull request forms ------------------------------------------------------ */
+.input, .select { display: block; }
+.select { width: auto; max-width: 100%; font-family: var(--mono); font-size: 13.5px; padding: 5px 8px; }
+.compare__arrow { color: var(--ink-3); font-size: 18px; line-height: 1; margin-bottom: 8px; }
+.page .note[role=status] { margin-bottom: 14px; }
+.compare__bar { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.compare__sum { color: var(--ink-2); font-size: 14px; margin: 0 0 14px; }
+.compare__form { border: 1px solid var(--line); border-radius: 12px; padding: 16px; background: var(--surface); display: grid; gap: 12px; margin-bottom: 22px; max-width: 860px; }
+.compare__form textarea { min-height: 120px; resize: vertical; }
+.tickbox { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink-2); }
+.pr__title-edit { display: grid; gap: 10px; max-width: 860px; }
+.pr__edit { margin-left: 8px; vertical-align: middle; }
+.comments { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 12px; }
+.comment { display: flex; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.comment > div { min-width: 0; flex: 1; }
+.comment__who { margin: 0 0 2px; color: var(--ink-2); }
+.comment .md > :first-child { margin-top: 0; } .comment .md > :last-child { margin-bottom: 0; }
+.commentbox { display: grid; gap: 8px; }
+.commentbox textarea { min-height: 84px; resize: vertical; }
+.actions__row--end { justify-content: flex-end; }
+.btn--danger { color: var(--bad); }

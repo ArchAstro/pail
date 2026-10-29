@@ -174,11 +174,14 @@ const prs = [
   { id: 1, title: "Retry failed jobs with capped, jittered backoff", body: "Jobs that fail now back off exponentially, capped at five minutes, with jitter so a burst of failures does not come back as a burst.\n\n- \`retry::backoff\` caps at 300s\n- \`retry::with_jitter\` spreads the retries\n\nSquashed on landing.", head: "feature/retry", base: "main", author: "chen", state: "merged", created: at(400), merged_commit: retryLanded, merged_by: "ada", merged_at: at(380) },
   { id: 2, title: "Heartbeat claims so slow jobs keep their lease", body: "A worker running a long job loses its claim when the lease expires, and a second worker picks the job up.\n\nThis adds \`Lease::heartbeat\`, to be called every ttl / 3.\n\n### Not in this PR\n\n- Wiring the heartbeat into the claim loop (next PR)\n- A cancellation signal when the lease is lost", head: "pr/lease-heartbeat", base: "main", author: "chen", state: "open", created: at(30) },
   { id: 3, title: "Explain claims in the README", body: "Adds a short section on how a claim works, since it is the first thing people ask.", head: "pr/claims-docs", base: "main", author: "bo", state: "open", created: at(20) },
-  { id: 4, title: "Fix typo in design notes", body: "", head: "fix/typo-in-design", base: "main", author: "chen", state: "closed", created: at(60) },
+  { id: 4, title: "Fix typo in design notes", body: "", head: "fix/typo-in-design", base: "main", author: "chen", state: "closed", created: at(60), updated: at(50), closed_at: at(50), closed_by: "chen" },
   { id: 5, title: "Move exhausted jobs to dead/", body: "After eight attempts a job moves to \`dead/\` and is listed by the client.", head: "pr/dead-letter", base: "main", author: "bo", state: "merged", created: at(300), merged_commit: deadLanded, merged_by: "ada", merged_at: at(250) },
 ];
 for (const pr of prs) meta(`prs/${pr.id}.json`, pr, `Open PR ${pr.id}: ${pr.title}`, { ifAbsent: true });
 
+const comment = (n, who, body, h) => meta(`prs/${n}/comments/${String((at(h)) * 1000).padStart(13, "0")}-${who}.json`, { who, body, at: at(h) }, `Comment on PR ${n}`, { ifAbsent: true });
+comment(2, "bo", "Nice and small. Is `ttl / 3` a hard rule, or just what we call it in the docs?", 14);
+comment(2, "chen", "Just the docs for now. I will enforce it in the claim loop next, as a separate PR so this one stays reviewable.", 13);
 meta("prs/2/reviews/ada.json", { verdict: "approve", comment: "Looks right. Please wire it into the claim loop next.", at: at(12) }, "Review PR 2: approve");
 meta("prs/2/reviews/bo.json", { verdict: "changes", comment: "The heartbeat interval is documented but not enforced anywhere.", at: at(18) }, "Review PR 2: changes");
 meta("prs/3/reviews/ada.json", { verdict: "approve", comment: "", at: at(5) }, "Review PR 3: approve");
