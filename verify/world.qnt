@@ -277,8 +277,17 @@ module world {
 
   pure def client(s: State, c: str): Client = s.clients.get(c)
 
+  /// `c` moves on to `cl`. Arriving at `Leasing`, it takes the instant before its put
+  /// (`Lease::write`), which its lease will count from.
   pure def withClient(s: State, c: str, cl: Client): State =
-    { ...s, clients: s.clients.set(c, cl) }
+    {
+      ...s,
+      clients: s.clients.set(c, cl),
+      timing:
+        if (cl.phase == Leasing and client(s, c).phase != Leasing)
+          s.timing.set(c, { ...s.timing.get(c), sent: s.now })
+        else s.timing,
+    }
 
   /// `c` moves on to `cl`. If that is a return, it releases its lease first.
   pure def finished(s: State, c: str, cl: Client): State =
@@ -293,9 +302,18 @@ module world {
 
   /// `h` has listed the leases and found none in its way (`Lease::held`): the lease is its,
   /// its refresher starts, and its age is counted from the start of the put that wrote it,
-  /// taken before the put (`Lease::write`) and so no later than its LastModified.
+  /// taken before the put (`Lease::write`) and so no later than its LastModified. (gc starts
+  /// with its put: the instant is its LastModified.)
   pure def holding(s: State, h: str): State =
-    { ...s, timing: s.timing.set(h, { ...NO_TIMING, running: true, refreshed: leasedAt(s.bucket, h), done: s.now }) }
+    {
+      ...s,
+      timing: s.timing.set(h, {
+        ...NO_TIMING,
+        running: true,
+        refreshed: if (h == GC) leasedAt(s.bucket, h) else s.timing.get(h).sent,
+        done: s.now,
+      }),
+    }
 
   /// `h`'s lease is gone (released, or its holder died): its refresher stops.
   pure def notHolding(s: State, h: str): State = { ...s, timing: s.timing.set(h, NO_TIMING) }

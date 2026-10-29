@@ -28,6 +28,7 @@ use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as StoreResult,
 };
+use pail::clock::Clock;
 use pail::hash::Hash;
 use pail::manifest::{Kind, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
@@ -35,7 +36,6 @@ use pail::repo::{
     CommitFields, CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead,
     MovedError, Repo, RewriteRequest,
 };
-use pail::clock::Clock;
 use pail::store::Store;
 use quint_refinements::{NormalizedRuntimeEvidence, RuntimeValue};
 use tokio::sync::oneshot;
@@ -104,7 +104,10 @@ impl Clock for TestClock {
         EPOCH + self.inner.lock().unwrap().secs + SKEW * TICK_SECS
     }
 
-    fn sleep(&self, d: Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    fn sleep(
+        &self,
+        d: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let (tx, rx) = oneshot::channel();
         let mut c = self.inner.lock().unwrap();
         let at = c.secs + d.as_secs() as i64;
@@ -126,7 +129,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        53,
+        54,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -429,10 +432,13 @@ impl Gate {
     /// only makes a lease look younger, so the real lister is the more cautious.)
     fn stamped(&self, mut meta: ObjectMeta, waited: i64) -> ObjectMeta {
         let b = self.book.lock().unwrap();
-        let at = b.leased_at.get(meta.location.as_ref()).copied().unwrap_or(0);
-        meta.last_modified =
-            chrono::DateTime::from_timestamp(EPOCH + (at - waited) * TICK_SECS, 0)
-                .expect("a timestamp");
+        let at = b
+            .leased_at
+            .get(meta.location.as_ref())
+            .copied()
+            .unwrap_or(0);
+        meta.last_modified = chrono::DateTime::from_timestamp(EPOCH + (at - waited) * TICK_SECS, 0)
+            .expect("a timestamp");
         meta
     }
 
@@ -906,6 +912,9 @@ struct Harness {
     refreshers: Mutex<HashMap<String, Refresher>>,
     /// Refresh requests refreshers have made (and the harness has seen).
     refresh_requests: usize,
+    /// The tick each writer's lease put arrived at the gate (`Timing.sent` until it holds
+    /// the lease): `Lease::write` takes its instant before the put.
+    lease_sent: Mutex<HashMap<String, i64>>,
 }
 
 impl Drop for Harness {
@@ -957,10 +966,12 @@ impl Harness {
         let running = self.probe(actor).is_some();
         let mut refreshers = self.refreshers.lock().unwrap();
         if running {
-            refreshers.entry(actor.to_owned()).or_insert_with(|| Refresher {
-                done: self.clock.ticks(),
-                ..Refresher::default()
-            });
+            refreshers
+                .entry(actor.to_owned())
+                .or_insert_with(|| Refresher {
+                    done: self.clock.ticks(),
+                    ..Refresher::default()
+                });
         } else {
             refreshers.remove(actor);
         }
@@ -1096,6 +1107,9 @@ impl Harness {
             } => {
                 self.note_running(&actor);
                 let now = self.clock.ticks();
+                if request == Request::PutLease && actor != GC {
+                    self.lease_sent.lock().unwrap().insert(actor.clone(), now);
+                }
                 if matches!(request, Request::RefreshLease | Request::AckLease) {
                     if request == Request::RefreshLease {
                         let mut r = self.refreshers.lock().unwrap();
@@ -1177,6 +1191,7 @@ impl Harness {
                     let p = &mut self.writer(&actor)?.progress;
                     p.outcome = Some(outcome);
                     p.refresh.clear();
+                    self.lease_sent.lock().unwrap().remove(&actor);
                 }
                 self.note_running(&actor);
             }
@@ -1792,7 +1807,6 @@ impl Harness {
         }
         Ok(())
     }
-
 
     /// Process requests until `h`'s refresher waits at `request`.
     fn refresher_waits(&mut self, h: &str, request: Request) -> Result<(), String> {
@@ -2517,12 +2531,22 @@ impl Harness {
             .get(holder)
             .cloned()
             .unwrap_or_default();
+        let sent = match refreshed {
+            Some(_) => r.sent,
+            None => self
+                .lease_sent
+                .lock()
+                .unwrap()
+                .get(holder)
+                .copied()
+                .unwrap_or(0),
+        };
         record([
             ("running", RuntimeValue::Bool(refreshed.is_some())),
             ("refreshed", RuntimeValue::Int(refreshed.unwrap_or(0))),
             ("done", RuntimeValue::Int(r.done)),
             ("inflight", RuntimeValue::Bool(r.inflight)),
-            ("sent", RuntimeValue::Int(r.sent)),
+            ("sent", RuntimeValue::Int(sent)),
             ("landed", RuntimeValue::Bool(r.landed)),
             ("checked", RuntimeValue::Int(r.checked)),
         ])
@@ -2578,6 +2602,7 @@ impl generated::Implementation for Harness {
             repos: Mutex::default(),
             refreshers: Mutex::default(),
             refresh_requests: 0,
+            lease_sent: Mutex::default(),
         };
         let bucket = field(initial, "bucket")?;
         let RuntimeValue::Map(refs) = field(bucket, "refs")? else {
@@ -3101,10 +3126,12 @@ impl generated::Implementation for Harness {
         let before = self.refresh_requests;
         let woke = self.clock.advance();
         while self.refresh_requests - before < woke {
-            let event = self
-                .events
-                .recv_timeout(SETTLE)
-                .map_err(|_| format!("{woke} refreshers woke, {} asked", self.refresh_requests - before))?;
+            let event = self.events.recv_timeout(SETTLE).map_err(|_| {
+                format!(
+                    "{woke} refreshers woke, {} asked",
+                    self.refresh_requests - before
+                )
+            })?;
             self.handle(event)?;
         }
         Ok(())
@@ -3144,4 +3171,3 @@ impl generated::Implementation for Harness {
         Ok(())
     }
 }
-

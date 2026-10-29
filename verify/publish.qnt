@@ -72,7 +72,7 @@ module publish {
 
   pure def checkLeasesNext(s: State, c: str): State =
     if (leasedByOthers(s.bucket, c, Set(Exclusive), s.now))
-      { ...s, bucket: unleased(s.bucket, c), clients: s.clients.set(c, { ...client(s, c), phase: Leasing }) }
+      withClient({ ...s, bucket: unleased(s.bucket, c) }, c, { ...client(s, c), phase: Leasing })
     else
       holding(
         withClient(s, c, { ...client(s, c), phase:

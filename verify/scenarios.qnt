@@ -1719,6 +1719,28 @@ module scenarios {
       state' = state,
     })
 
+  /// A lease counts from when its put started, not when the put (or the listing after it)
+  /// returned: alice's put takes two ticks to land, so at tick 4 she is 4 old, not 2.
+  /// @conformance
+  run leaseCountsFromItsPutRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(tick)
+    .then(tick)
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(all { assert(state.timing.get("alice").refreshed == 0), state' = state })
+    .then(readRef("alice"))
+    .then(tick)
+    .then(tick)
+    .then(upload("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == Rechecking,
+        tip(state.bucket) == { commit: ROOT, version: 1 },
+      }),
+      state' = state,
+    })
+
   /// A swap is allowed at exactly `MAX_AGE`: alice's refresh landed at tick 2 (it counts
   /// from tick 2, when it was sent), so at tick 5 she is 3 old and passes; her swap lands
   /// a tick later, within `LATENCY` of the check.

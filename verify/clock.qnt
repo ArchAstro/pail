@@ -20,14 +20,10 @@ module clock {
   import bucket.* from "./bucket"
   import world.* from "./world"
 
-  /// Time can pass, except that
-  /// 1. a lease put lands the instant it is sent, so a writer waiting to lease holds time
-  ///    still (its local stamp is taken before the put: it is the put's time), and
-  /// 2. a request a passed check allowed lands within `LATENCY` ticks of the check: the
-  ///    assumption D. A process stalled longer between its check and its request is what no
-  ///    margin protects against.
+  /// Time can pass, except that a request a passed check allowed lands within `LATENCY`
+  /// ticks of the check: the assumption D. A process stalled longer between its check and
+  /// its request is what no margin protects against.
   pure def tickCan(s: State): bool = and {
-    CLIENTS.forall(c => client(s, c).phase != Leasing),
     CLIENTS.forall(c => not(swapping(client(s, c))) or s.now - s.timing.get(c).checked < LATENCY),
     not(deleting(s.collector)) or s.now - s.timing.get(GC).checked < LATENCY,
   }
