@@ -34,8 +34,8 @@ use pail::manifest::{Kind, Loc, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
 use pail::pack::decode_blob;
 use pail::repo::{
-    CommitFields, CommitOptions, CommitRequest, ConflictError, Delta, FileInput, MovedError, Repo,
-    RewriteRequest, Upload,
+    CommitFields, CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead,
+    MovedError, Repo, RewriteRequest, Upload,
 };
 use pail::store::Store;
 use quint_refinements::{NormalizedRuntimeEvidence, RuntimeValue};
@@ -61,7 +61,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        44,
+        48,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -137,6 +137,12 @@ enum Event {
     Finished {
         actor: String,
         outcome: &'static str,
+    },
+    /// The head a writer's publish left it, sent before its `Finished`: kept, as
+    /// `Worktree::commit` keeps it, only when its commit is the ref's tip.
+    Known {
+        actor: String,
+        known: Option<KnownHead>,
     },
     /// What a rebase built, before it leases.
     Planned {
@@ -678,6 +684,8 @@ type Recent = BTreeMap<String, Id>;
 struct Round {
     /// The ref as the poll read it: commit, version, landed intents.
     head: Option<(Id, i64, Recent)>,
+    /// The lineage in that read.
+    lineage: Lineage,
     /// The writers whose intents the poll listed.
     listed: Option<BTreeSet<String>>,
     /// The commits the round stored, in the order stored.
@@ -744,6 +752,8 @@ struct Writer {
     ld: Option<Lander>,
     /// Where it found the commit it read (`Repo::successor`), and the lineage it looked at.
     found: Option<(Id, Lineage)>,
+    /// The head its last publish left it (`Event::Known`).
+    known: Option<KnownHead>,
     /// Where it is on the combining path (`Intending` ..), once it has written its intent.
     combining: Option<&'static str>,
     /// Its intent's id and the time the scenario gave it.
@@ -953,11 +963,7 @@ impl Harness {
 
     /// A ref's landed intents as the model's `Recent`.
     fn recent(&self, value: &RefValue) -> Result<Recent, String> {
-        value
-            .recent
-            .iter()
-            .map(|l| Ok((self.intent_writer(&l.intent)?, self.name(&l.commit)?)))
-            .collect()
+        self.landed(&value.recent)
     }
 
     fn handle(&mut self, event: Event) -> Result<(), String> {
@@ -1015,6 +1021,7 @@ impl Harness {
                 map,
                 commits,
             } => self.planned(&actor, tip, map, commits)?,
+            Event::Known { actor, known } => self.writer(&actor)?.known = known,
             Event::Finished { actor, outcome } => {
                 if actor == GC {
                     self.collector = Collector::default();
@@ -1097,6 +1104,7 @@ impl Harness {
                     w.rechecking = false;
                 } else if w.combining.is_some() {
                     w.round.head = seen;
+                    w.round.lineage = lineage;
                 } else {
                     w.seen = seen;
                     w.seen_lineage = lineage;
@@ -1386,6 +1394,45 @@ impl Harness {
     }
 
     /// A rewriter spawned: it is one from now on, and its first ref read is its begin.
+    /// `commit_opts` by `name`, reporting the head its publish leaves (`Event::Known`), then
+    /// its outcome.
+    fn spawn_commit(
+        &self,
+        name: &str,
+        req: CommitRequest,
+        uploads: Vec<Upload>,
+        known_head: Option<KnownHead>,
+    ) {
+        let repo = Repo::with_store(self.gate(name), None);
+        let events = self.sender.clone();
+        let actor = name.to_owned();
+        self.rt().spawn(async move {
+            let opts = CommitOptions {
+                uploads,
+                known_head,
+                ..CommitOptions::default()
+            };
+            let outcome = match repo.commit_opts(req, opts).await {
+                Ok(out) => {
+                    let known = (out.head == out.commit).then(|| KnownHead {
+                        commit: out.commit,
+                        version: out.version,
+                        recent: out.recent,
+                        lineage: out.lineage,
+                    });
+                    let _ = events.send(Event::Known {
+                        actor: actor.clone(),
+                        known,
+                    });
+                    "Published"
+                }
+                Err(e) if e.downcast_ref::<ConflictError>().is_some() => "Conflicted",
+                Err(_) => "Unknown",
+            };
+            let _ = events.send(Event::Finished { actor, outcome });
+        });
+    }
+
     fn began_rewrite(&mut self, name: &str, op: &'static str) -> Result<(), String> {
         let w = self.writer(name)?;
         w.base = Some(vec!["root".to_owned()]);
@@ -2090,6 +2137,49 @@ impl Harness {
         ])
     }
 
+    /// A known head as the model's `Known`.
+    fn known_value(&self, k: Option<&KnownHead>) -> Result<RuntimeValue, String> {
+        let Some(k) = k else {
+            return Ok(record([
+                ("has", RuntimeValue::Bool(false)),
+                ("head", self.ref_seen_value(&None, &vec!["root".to_owned()])),
+                ("recent", self.recent_value(&Recent::new())),
+                ("lineage", self.lineage_value(&Lineage::default())?),
+            ]));
+        };
+        let recent = self.landed(&k.recent)?;
+        Ok(record([
+            ("has", RuntimeValue::Bool(true)),
+            (
+                "head",
+                self.ref_seen_value(&Some(self.known_seen(k)?), &vec![]),
+            ),
+            ("recent", self.recent_value(&recent)),
+            ("lineage", self.lineage_value(&k.lineage)?),
+        ]))
+    }
+
+    /// A known head as a writer's read of the ref: commit, version, landed intents.
+    fn known_seen(&self, k: &KnownHead) -> Result<(Id, i64, Recent), String> {
+        let etag = k
+            .version
+            .etag
+            .as_deref()
+            .ok_or("a known head has no ETag")?;
+        Ok((
+            self.name(&k.commit)?,
+            self.ref_version(etag, None),
+            self.landed(&k.recent)?,
+        ))
+    }
+
+    fn landed(&self, recent: &[pail::objects::Landed]) -> Result<Recent, String> {
+        recent
+            .iter()
+            .map(|l| Ok((self.intent_writer(&l.intent)?, self.name(&l.commit)?)))
+            .collect()
+    }
+
     /// A combining writer's round as the model's `Comb`.
     fn comb_value(&self, name: &str, w: &Writer) -> Result<RuntimeValue, String> {
         let root: Id = vec!["root".to_owned()];
@@ -2151,6 +2241,7 @@ impl Harness {
             ("batch", set(entries)),
             ("tip", id_value(&tip)),
             ("then", RuntimeValue::Text(then.to_owned())),
+            ("lineage", self.lineage_value(&r.lineage)?),
         ]))
     }
 
@@ -2254,6 +2345,7 @@ impl Harness {
                 "found",
                 id_value(w.found.as_ref().map_or(&root, |(id, _)| id)),
             ),
+            ("known", self.known_value(w.known.as_ref())?),
             (
                 "foundAt",
                 self.lineage_value(w.found.as_ref().map_or(&Lineage::default(), |(_, l)| l))?,
@@ -2446,25 +2538,37 @@ impl generated::Implementation for Harness {
             .ok_or_else(|| format!("no commit {base:?}"))?;
         let (files, uploads) = self.files(&delta, &name)?;
         let req = self.request(&name, Some(base_hash), files);
-        let repo = Repo::with_store(self.gate(&name), None);
-        let events = self.sender.clone();
-        let actor = name.clone();
-        self.rt().spawn(async move {
-            let opts = CommitOptions {
-                uploads,
-                ..Default::default()
-            };
-            let outcome = match repo.commit_opts(req, opts).await {
-                Ok(_) => "Published",
-                Err(e) if e.downcast_ref::<ConflictError>().is_some() => "Conflicted",
-                Err(_) => "Unknown",
-            };
-            let _ = events.send(Event::Finished { actor, outcome });
-        });
+        self.spawn_commit(&name, req, uploads, None);
         let w = self.writer(&name)?;
         w.base = Some(base);
         w.delta = delta;
         w.found = None;
+        self.settle(&name)
+    }
+
+    /// `commit` by `c` on the head `from`'s publish left it: the model's `seen` is that
+    /// head from the start, and its first attempt reads nothing.
+    fn begin_known(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let [c, from, delta] = arguments else {
+            return Err(format!("beginKnown takes 3 arguments: {arguments:?}"));
+        };
+        let (name, from) = (text(c)?.to_owned(), text(from)?.to_owned());
+        let delta = tree_of(delta)?;
+        let k = self
+            .writer(&from)?
+            .known
+            .clone()
+            .ok_or(format!("{from} has no known head"))?;
+        let (files, uploads) = self.files(&delta, &name)?;
+        let req = self.request(&name, Some(k.commit), files);
+        let seen = self.known_seen(&k)?;
+        self.spawn_commit(&name, req, uploads, Some(k.clone()));
+        let w = self.writer(&name)?;
+        w.base = Some(seen.0.clone());
+        w.delta = delta;
+        w.seen = Some(seen);
+        w.seen_lineage = k.lineage;
+        w.attempts = 1;
         self.settle(&name)
     }
 

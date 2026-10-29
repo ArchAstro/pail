@@ -87,6 +87,7 @@ module scenarios {
       assert(all {
         tip(state.bucket) == { commit: ALICE_1, version: 2 },
         client(state, "alice").outcome == Published,
+        client(state, "alice").known.head == { commit: ALICE_1, version: 2 },
       }),
       state' = state,
     })
@@ -136,6 +137,8 @@ module scenarios {
         tip(state.bucket) == { commit: ALICE_2, version: 3 },
         client(state, "bob").outcome == Published,
         onBranch(state.bucket, BOB_1),
+        // The ref's version is alice's commit's, not bob's: bob keeps no known head.
+        client(state, "bob").known == NO_KNOWN,
       }),
       state' = state,
     })
@@ -359,6 +362,9 @@ module scenarios {
         liveKeys(state.bucket.intents) == Set(),
         client(state, "alice").outcome == Published,
         client(state, "dave").outcome == Published,
+        // Alice's commit is under dave's in the batch: only dave keeps a known head.
+        client(state, "alice").known == NO_KNOWN,
+        client(state, "dave").known.head == { commit: ALICE_C.append("dave+"), version: 4 },
       }),
       state' = state,
     })
@@ -1446,6 +1452,166 @@ module scenarios {
       assert(all {
         lineageOf(state.bucket) == { epoch: 2, rewrite: 2 },
         client(state, "bob").found == ALICE_RW,
+      }),
+      state' = state,
+    })
+
+  // ---------- known heads ----------
+
+  /// Bob commits on the head alice's publish left her (`KnownHead`): his first attempt
+  /// swaps from it without reading the ref.
+  /// @conformance
+  run knownHeadRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginKnown("bob", "alice", BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(all { assert(client(state, "bob").phase == Uploading), state' = state })
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ALICE_1.append("bob"), version: 3 },
+        client(state, "bob").outcome == Published,
+        client(state, "bob").attempt == 1,
+        client(state, "bob").known == {
+          has: true,
+          head: { commit: ALICE_1.append("bob"), version: 3 },
+          recent: Map(),
+          lineage: NO_LINEAGE,
+        },
+      }),
+      state' = state,
+    })
+
+  /// Carol lands after alice, so the head alice's publish left her is stale: bob's swap
+  /// from it loses, and his second attempt reads the ref and replays onto carol's.
+  /// @conformance
+  run knownHeadStaleRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("carol", ALICE_1, CAROL_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(beginKnown("bob", "alice", BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all { assert(client(state, "bob").phase == Reading), state' = state })
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: ALICE_1.append("carol").append("bob"), version: 4 },
+        treeOf(state.bucket, ALICE_1.append("carol").append("bob")) == Map("a" -> "2", "b" -> "2"),
+        client(state, "bob").outcome == Published,
+        client(state, "bob").attempt == 2,
+      }),
+      state' = state,
+    })
+
+  /// Alice combines alone (as in `combineAloneRun`); her commit is the batch's tip, so her
+  /// publish leaves her a known head, with the ref's `recent`. Dave commits on it: his
+  /// swap from it carries that `recent` forward.
+  /// @conformance
+  run knownHeadAfterCombineRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(begin("bob", ROOT, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(readRef("alice"))
+    .then(begin("carol", BOB_1, CAROL_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(intend("alice", 1))
+    .then(pollRef("alice"))
+    .then(pollList("alice"))
+    .then(gather("alice", Set()))
+    .then(batchSwap("alice", Answered))
+    .then(cleanup("alice"))
+    .then(beginKnown("dave", "alice", DAVE_A))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(all {
+      assert(all {
+        client(state, "alice").known == {
+          has: true,
+          head: { commit: ALICE_C, version: 4 },
+          recent: Map("alice" -> ALICE_C),
+          lineage: NO_LINEAGE,
+        },
+        tip(state.bucket) == { commit: ALICE_C.append("dave"), version: 5 },
+        recentOf(state.bucket) == Map("alice" -> ALICE_C),
+        client(state, "dave").outcome == Published,
+        client(state, "dave").attempt == 1,
+      }),
+      state' = state,
+    })
+
+  /// Carol rewords alice's commit, so the branch is at a new lineage; dave lands on the
+  /// reword and keeps that lineage in his known head. Bob commits on it: his swap from it
+  /// carries the lineage forward, as a read would have.
+  /// @conformance
+  run knownHeadAfterRewriteRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(begin("dave", ALICE_RW, DAVE_B))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(beginKnown("bob", "dave", BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all {
+      assert(all {
+        client(state, "dave").known.lineage == { epoch: 1, rewrite: 1 },
+        tip(state.bucket).commit == ALICE_RW.append("dave").append("bob"),
+        lineageOf(state.bucket) == { epoch: 1, rewrite: 1 },
+        client(state, "bob").outcome == Published,
+        client(state, "bob").attempt == 1,
       }),
       state' = state,
     })
