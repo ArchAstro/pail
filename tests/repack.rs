@@ -583,3 +583,40 @@ fn prepare_files_packs_in_path_order() {
     sorted.sort();
     assert_eq!(by_offset.iter().map(|x| x.1).collect::<Vec<_>>(), sorted);
 }
+
+#[test]
+fn advice_counts_small_packs_by_their_live_bytes() {
+    let entry = |path: &str, pack: u8, off: u64, len: u64| Entry {
+        path: path.into(),
+        kind: Kind::File,
+        size: len,
+        hash: Hash([off as u8; 32]),
+        loc: Loc::Pack {
+            pack: Hash([pack; 32]),
+            off,
+            len,
+        },
+    };
+    let mut entries = vec![
+        entry("a", 1, 0, 100),
+        entry("b", 2, 0, 100),
+        // The same blob under two paths is counted once.
+        entry("c", 3, 0, 100),
+        entry("d", 3, 0, 100),
+        // A pack with plenty of live bytes is not small.
+        entry("e", 4, 0, 300 << 10),
+    ];
+    let a = pail::repack::advice(&entries, 3).unwrap();
+    assert_eq!((a.small_packs, a.packs, a.small_files), (3, 4, 4));
+    assert!(a.message().contains("3 of this tip's 4 packs"));
+    assert!(pail::repack::advice(&entries, 4).is_none());
+    assert!(
+        pail::repack::advice(&entries, 0).is_none(),
+        "0 turns it off"
+    );
+    entries.push(Entry {
+        loc: Loc::Inline(vec![1]),
+        ..entry("f", 9, 0, 1)
+    });
+    assert_eq!(pail::repack::advice(&entries, 3).unwrap().packs, 4);
+}
