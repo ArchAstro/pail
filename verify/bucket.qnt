@@ -10,13 +10,17 @@
 ///   intents/<b>/<id> a combining writer's change, until it lands   Space[str, Intent]
 ///   reflog/<b>/<id>  a rewrite's record, created once, kept         Space[int, Rewrite]
 ///   packs/<hash>     file contents, created once, named by content   Space[PackId, Set[str]]
+///   chunks/<hash>    a piece of a huge file, created once, named by content   Space[str, str]
 /// ```
 ///
 /// A tree here is small enough for one page (as a real one of a few files is). File
 /// contents are inline, except the `BIG` ones, which live in a pack: a writer prepares one
 /// pack for the big files it writes (or relocates), stores it with its first commit and
 /// reuses it in any retry, and the commit's page names it per path (`Commit.locs`, the
-/// page's `Loc::Pack`). Not laid out yet: chunks.
+/// page's `Loc::Pack`). The `HUGE` ones are split into chunks, each its own object named by
+/// its content, so equal pieces of two files (or two versions of one) are one object; the
+/// page lists a file's chunks (`Loc::Chunks`), which the file's content fixes (`CHUNKS`), so
+/// a page's identity is not changed by them.
 module bucket {
   import store.* from "./store"
 
@@ -95,7 +99,7 @@ module bucket {
 
   /// Objects written since the gc grace period last elapsed (by their LastModified).
   /// Creating an object that exists already does not write it, so does not make it young.
-  type Young = { pages: Set[Page], commits: Set[CommitId], packs: Set[PackId] }
+  type Young = { pages: Set[Page], commits: Set[CommitId], packs: Set[PackId], chunks: Set[str] }
 
   type Bucket = {
     pages: Space[Page, bool],
@@ -105,6 +109,9 @@ module bucket {
     intents: Space[str, Intent],
     reflog: Space[int, Rewrite],
     packs: Space[PackId, Set[str]],
+    // A chunk's name (its hash) to its bytes, named by what they hash to: a chunk stored
+    // without its bytes has none.
+    chunks: Space[str, str],
     young: Young,
   }
 
@@ -139,6 +146,14 @@ module bucket {
   pure val BIG: Set[str] = Set("p1", "p2", "p3")
   pure def isBig(content: str): bool = BIG.contains(content)
 
+  /// Contents of `CHUNK_THRESHOLD` and more: stored as chunks, not in a pack.
+  pure val HUGE: Set[str] = Set("h1", "h2")
+  pure def isHuge(content: str): bool = HUGE.contains(content)
+
+  /// The chunks each huge content splits into (`chunk_spans`: content-defined, so a
+  /// content's chunks are fixed by it). `h1` and `h2` start the same, and share `k1`.
+  pure val CHUNKS: str -> Set[str] = Map("h1" -> Set("k1", "k2"), "h2" -> Set("k1", "k3"))
+
   /// A branch created with one commit holding every path, long enough ago to be old.
   pure val ROOT_BUCKET: Bucket = {
     pages: created(Map(), ROOT_PAGE, true),
@@ -148,7 +163,8 @@ module bucket {
     intents: Map(),
     reflog: Map(),
     packs: Map(),
-    young: { pages: Set(), commits: Set(), packs: Set() },
+    chunks: Map(),
+    young: { pages: Set(), commits: Set(), packs: Set(), chunks: Set() },
   }
 
   /// The branch ref as a client reads it.
@@ -201,9 +217,31 @@ module bucket {
   /// files it writes: creates, each a no-op if the object is there already
   /// (`Store::put_new`), and so not making it young. Every path of `d` is written, even
   /// to the content it has: that is a relocation (`pail maintenance repack`), which moves
-  /// the file into this commit's pack and changes no content.
-  pure def uploaded(b: Bucket, id: CommitId, parent: CommitId, d: Delta): Bucket =
-    storedWith(b, id, overlay(treeOf(b, parent), d), ancestorsOf(b, parent).union(Set(parent)), d.keys())
+  /// the file into this commit's pack and changes no content. The paths of `reuse` are
+  /// written as an object already stored (the writer's base has the content: the loc is
+  /// that one, and no pack or chunk is stored for it).
+  pure def uploaded(b: Bucket, id: CommitId, parent: CommitId, d: Delta, reuse: str -> PackId): Bucket =
+    storedWith(b, id, overlay(treeOf(b, parent), d), ancestorsOf(b, parent).union(Set(parent)), d.keys(), reuse)
+
+  /// What a writer with base `base` reuses for `d` (`Worktree::commit`'s `reuse`: content
+  /// the base's tree has at another path, found by its hash): for each big or huge path
+  /// `d` changes to content another path of `base` holds, the pack that path's page names
+  /// (a huge file's chunks are named by its content: its entry is the other's). A base
+  /// the branch's history (or a record) does not reach is not one a working copy has read,
+  /// so nothing is reused from it. A relocation (a path written to the content it has) is
+  /// not a reuse: the repack writes with nothing to reuse.
+  pure def reuseOf(b: Bucket, base: CommitId, d: Delta): str -> PackId =
+    Set(d.keys().filter(p => and {
+      isBig(d.get(p)) or isHuge(d.get(p)),
+      PATHS.exists(q => q != p and treeOf(b, base).get(q) == d.get(p)),
+      d.get(p) != treeOf(b, base).get(p),
+    })).fold(Map(), (none, reusing) =>
+      if (reusing == Set() or not(refsReach(b).union(reflogReaches(b)).contains(base))) Map()
+      else reusing.mapBy(p =>
+        if (isHuge(d.get(p))) ROOT
+        else body(b.commits, base).locs.get(PATHS.filter(q => q != p and treeOf(b, base).get(q) == d.get(p)).fold("", (a, q) => q))
+      )
+    )
 
   /// The pack commit `id` stores for the big files it writes. A client's own commit uses
   /// the pack the client prepared once, whichever head its retries land on; a commit
@@ -222,31 +260,43 @@ module bucket {
       b, id, tree, ancestors,
       if (ancestors == Set()) PATHS
       else PATHS.filter(p => tree.get(p) != treeOf(b, newest(ancestors)).get(p)),
+      Map(),
     )
 
   /// Commit `id` with its page, whose big files at `wrote` go in its pack (stored with
-  /// it, in the real upload's one wave), the others where its parent's page has them.
-  pure def storedWith(b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId], wrote: Set[str]): Bucket =
+  /// it, in the real upload's one wave), the others where its parent's page has them, and
+  /// the huge ones at `wrote` as chunks (each stored with it unless it exists: content
+  /// addressed, so shared by every file and commit that has it). Paths in `reuse` write
+  /// nothing: their loc is the one given.
+  pure def storedWith(
+    b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId], wrote: Set[str], reuse: str -> PackId
+  ): Bucket =
     Set(if (ancestors == Set()) Map() else body(b.commits, newest(ancestors)).locs).fold(b, (n0, inherited) =>
       Set(PATHS.filter(p => isBig(tree.get(p)))).fold(b, (n1, bigs) =>
-        Set(bigs.mapBy(p => if (wrote.contains(p)) packOf(id) else inherited.get(p))).fold(b, (n2, locs) =>
-          Set(bigs.filter(p => wrote.contains(p)).map(p => tree.get(p))).fold(b, (n3, contents) =>
-            Set({ tree: tree, locs: locs }).fold(b, (n4, page) => {
-              ...b,
-              pages: created(b.pages, page, true),
-              commits: created(b.commits, id, { tree: tree, ancestors: ancestors, locs: locs }),
-              packs: if (contents == Set()) b.packs else created(b.packs, packOf(id), contents),
-              young: {
-                pages: if (createApplies(b.pages, page)) b.young.pages.union(Set(page)) else b.young.pages,
-                commits:
-                  if (createApplies(b.commits, id)) b.young.commits.union(Set(id))
-                  else b.young.commits,
-                packs:
-                  if (contents != Set() and createApplies(b.packs, packOf(id)))
-                    b.young.packs.union(Set(packOf(id)))
-                  else b.young.packs,
-              },
-            })
+        Set(wrote.filter(p => not(reuse.keys().contains(p)))).fold(b, (nw, stores) =>
+          Set(bigs.mapBy(p => if (reuse.keys().contains(p)) reuse.get(p) else if (wrote.contains(p)) packOf(id) else inherited.get(p))).fold(b, (n2, locs) =>
+            Set(bigs.filter(p => stores.contains(p)).map(p => tree.get(p))).fold(b, (n3, contents) =>
+              Set(stores.filter(p => isHuge(tree.get(p))).fold(Set(), (acc, p) => acc.union(CHUNKS.get(tree.get(p))))).fold(b, (nc, pieces) =>
+                Set({ tree: tree, locs: locs }).fold(b, (n4, page) => {
+                  ...b,
+                  pages: created(b.pages, page, true),
+                  commits: created(b.commits, id, { tree: tree, ancestors: ancestors, locs: locs }),
+                  packs: if (contents == Set()) b.packs else created(b.packs, packOf(id), contents),
+                  chunks: pieces.fold(b.chunks, (acc, k) => created(acc, k, k)),
+                  young: {
+                    pages: if (createApplies(b.pages, page)) b.young.pages.union(Set(page)) else b.young.pages,
+                    commits:
+                      if (createApplies(b.commits, id)) b.young.commits.union(Set(id))
+                      else b.young.commits,
+                    packs:
+                      if (contents != Set() and createApplies(b.packs, packOf(id)))
+                        b.young.packs.union(Set(packOf(id)))
+                      else b.young.packs,
+                    chunks: b.young.chunks.union(pieces.filter(k => createApplies(b.chunks, k))),
+                  },
+                })
+              )
+            )
           )
         )
       )
@@ -380,4 +430,21 @@ module bucket {
       isLive(b.packs, body(b.commits, id).locs.get(p))
         and body(b.packs, body(b.commits, id).locs.get(p)).contains(treeOf(b, id).get(p))
     ))
+
+  /// The chunks commit `id`'s page names: those of each huge file of its tree.
+  pure def chunksOf(b: Bucket, id: CommitId): Set[str] =
+    PATHS.filter(p => isHuge(treeOf(b, id).get(p))).fold(Set(), (acc, p) => acc.union(CHUNKS.get(treeOf(b, id).get(p))))
+
+  /// Every chunk some commit in `ids` names.
+  pure def chunksNamedBy(b: Bucket, ids: Set[CommitId]): Set[str] =
+    ids.fold(Set(), (acc, id) => acc.union(chunksOf(b, id)))
+
+  /// Whether each chunk the pages of `ids` name is stored.
+  pure def chunksStored(b: Bucket, ids: Set[CommitId]): bool =
+    chunksNamedBy(b, ids).forall(k => isLive(b.chunks, k))
+
+  /// Whether each huge file of `ids` reads back its content: every chunk it names is
+  /// stored with its bytes (a chunk's body is the bytes its name is the hash of).
+  pure def chunksHold(b: Bucket, ids: Set[CommitId]): bool =
+    chunksNamedBy(b, ids).forall(k => isLive(b.chunks, k) and body(b.chunks, k) == k)
 }

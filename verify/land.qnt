@@ -39,7 +39,7 @@ module land {
   pure def stackNext(s: State, c: str, delta: Delta): State = {
     val on = tip(s.bucket).commit
     val id = on.append(c)
-    val stored = unleased(uploaded(leased(s.bucket, c, Shared, s.now), id, on, delta), c)
+    val stored = unleased(uploaded(leased(s.bucket, c, Shared, s.now), id, on, delta, Map()), c)
     val b = unleased(leased(stored, c, Shared, s.now), c)
     {
       ...s,
@@ -102,7 +102,7 @@ module land {
       else Set(remade(c, t, cur.commit)).fold(s, (n2, id) => {
         val after = {
           ...s,
-          bucket: uploaded(s.bucket, id, cur.commit, d),
+          bucket: uploaded(s.bucket, id, cur.commit, d, Map()),
           clients: s.clients.set(c, { ...client(s, c), phase: LdSwapping, ld: { ...seen, tip: id } }),
         }
         guarded(after, c, ldSwapNext(after, c, Dropped))

@@ -14,7 +14,7 @@ may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new
 ```text
 store.qnt     any object store: versioned objects, create / CAS / put / delete, lost requests
    ▲
-bucket.qnt    pail's layout in it: pages/, commits/ (create-once), packs/, refs/ (CAS, lineage),
+bucket.qnt    pail's layout in it: pages/, commits/ (create-once), packs/, chunks/, refs/ (CAS, lineage),
               locks/, intents/, reflog/
    ▲
 world.qnt     the shared state: bucket, writers, the collector, ghosts
@@ -23,7 +23,7 @@ publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, exp
 combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
 rewrite.qnt   rewrite_ref steps for rebase, undo, reset (read, lease, store, read + carry + record, swap, recheck)
 land.qnt      land_stack steps (make the stack; lease, read + fork point + copy, swap, recheck)
-gc.qnt        gc steps (exclusive lease, drain, mark, list, check, delete commits, pages, packs, release)
+gc.qnt        gc steps (exclusive lease, drain, mark, list, check, delete commits, pages, packs, chunks, release)
 clock.qnt     time: the tick, the refreshers that keep leases alive
    ▲
 pail.qnt      the steps as actions, any interleaving (`step`), the properties
@@ -106,6 +106,7 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 9. `locatedOnBranch`, `locateKeepsChanges`: see the successor walks section.
 10. `knownHeadsAreTrue`: see the known heads section.
 11. `packsAreStored`, `relocateKeepsContent`, `gcSparesNamedPacks`: see the packs section.
+12. `chunksAreStored`, `chunkedFilesReadBack`, `gcSparesNamedChunks`: see the chunks section.
 
 `npm run simulate` checks them over random interleavings of four clients and gc,
 including crashes, the clock ticking, stalled refreshers and the grace period passing at any
@@ -114,7 +115,14 @@ and its stalls are enabled in a fraction of the draws (`SLOW` in `pail.qnt`): a 
 as any step let leases go stale before writers reached combining, rewrites or gc's deletes
 (`contendStep` then ran 30x faster than before the clock, a sign of runs that stopped
 mattering). Witness invariants (negations of: a combined commit, a rewrite, a gc delete, a
-lease expiring under a live holder) are found within seconds of `step` / `contendStep`. Two mutations confirm it is
+lease expiring under a live holder) are found within seconds of `step` / `contendStep`; `npm run witness`
+(CI) checks that `step`, at CI's 100 steps, reaches gc deleting a pack (`gcNeverDeletesAPack`),
+gc deleting a chunk (`gcNeverDeletesAChunk`) and a branch with a huge file
+(`branchHasNoHugeFile`), each a witness invariant that must be violated. They are rare: about
+one run in 10,000 to 20,000 at 100 steps, one in 150,000 at 60 (the old `--max-steps`, with
+20,000 runs gc deleted nothing) and none in 200,000 at 40, so the script samples up to
+200,000 and stops at the first (seconds). A commit that reused a base's pack
+(`nobodyPublishesAReuse`) is rarer still (one in about 200,000): the reuse scenarios cover it. Two mutations confirm it is
 not vacuous: gc ignoring writers' leases, or writers ignoring gc's, each break
 `branchIsComplete` within seconds.
 
@@ -202,6 +210,9 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | `Comb` | the poll's ref read and listing, and the commits the round stored |
 | action `recheck(c)` | the ref read after an unanswered swap |
 | `gcListCommits` / `gcListPages` | gc's listing of `commits/` / `pages/` |
+| action `gcListChunks` / `gcDeleteChunk(k)` | gc's listing of `chunks/`; its next DELETE, which must be of that chunk |
+| `chunks` | `chunks/<hash>`, named by the model's `k1`.. (the harness knows each chunk's bytes), holding the name of the bytes it stores (none if they are no chunk's) |
+| `Client.reuse` | the paths whose content the base has elsewhere (`prepare_files`' `reuse`), each to the pack the base's page names (`root` for a huge file) |
 | action `gcDeleteCommit(id)` / `gcDeletePage(t)` / `gcDeletePack(k)` | gc's next DELETE, which must be of that object |
 | action `gcListPacks` | gc's listing of `packs/` |
 | `Commit.locs`, `Page.locs` | for each big file of the tree, the pack its page's `Loc::Pack` names |
@@ -521,13 +532,104 @@ path with the content it has, and the new page names a new pack.
   the real code points the copy at the original's pack), but refined against the real code
   only in direct commits and gc; `simulate` samples the rest. A pack's name is its
   writer's, not its content hash (the harness adds a decoy blob so two writers' packs of
-  one content differ). Content already stored (`reuse`) is not modelled. Chunks (files of
-  1 MiB and more) are not laid out. A repack's retry (recompute from the new tip) is a new
+  one content differ). Content already stored (`reuse`) is modelled for direct commits
+  only (below). A repack's retry (recompute from the new tip) is a new
   `commit` call, played by another client in the model.
+
+## Chunks (`bucket.qnt`, `gc.qnt`)
+
+A file of `CHUNK_THRESHOLD` (1 MiB) or more is not packed. `prepare_files` splits it with
+`chunk_spans` (content-defined, FastCDC), stores each piece as `chunks/<hash of the piece>`
+and the leaf page names them (`Loc::Chunks`). Equal pieces are one object, whichever file or
+commit has them, so an edited large file mostly stores nothing: its upload asks first (`HEAD`,
+`check_first`) and a `put_new` of an existing chunk writes nothing, leaving its LastModified
+old. gc marks the chunks every marked page names and, after packs, lists `chunks/` and
+deletes the unmarked, old ones, in the same loop as every other prefix (`GcSweepingChunks`).
+
+```text
+  h1 = [k1 k2]   alice  a = h1 ──▶ chunks/k1, chunks/k2         (young)
+  h2 = [k1 k3]   bob    b = h2 ──▶ chunks/k3                    k1 exists: nothing written, k1 stays old
+  page of bob's commit names k1 k2 k3 (a: h1, b: h2)             gc: k1 is marked by bob's page, whatever its age
+```
+
+- Model: contents in `HUGE` (`h1`, `h2`) are chunked, `CHUNKS` says into what (`k1`..`k3`, `k1`
+  shared). A chunk is `chunks: Space[str, str]`, its name to the bytes it holds (a chunk
+  stored without its bytes holds none). A commit that writes a huge path stores the chunks of
+  its content that are not stored yet (`storedWith`, every protocol: a combined intent or a
+  rewrite's copy stores them too, which the real code does not need, as the writer already
+  has; `create` is a no-op there). The chunks a page names are fixed by its tree's contents,
+  so a page's identity (tree and pack locs) does not change.
+  gc's `Young`, `spared` and `liveChunks` cover chunks like packs; the phase is
+  `GcSweepingChunks`, after packs, and listing and every delete are guarded by `Lease::check`
+  (`gcGuarded`), `deleting()` covers it, so `gcRunsAlone` and the `LATENCY` bound of `tickCan`
+  hold for chunk deletes as for the others.
+- Properties:
+  1. `chunksAreStored`: every chunk the pages of the commits a ref (or a record) reaches name
+     is stored.
+  2. `chunkedFilesReadBack`: each of them is stored with its bytes, so a chunked file reads
+     back its content.
+  3. `gcSparesNamedChunks`: while gc sweeps chunks, none it has doomed is named by a commit a
+     ref reaches.
+- Scenarios (the chunks of a gc's list are deleted in key order, which a scenario's
+  `gcDeleteChunk` order must follow): `chunksAreSharedRun` (a chunk shared by two files: the second writer stores
+  one chunk, and the shared one stays old and not young), `gcSparesAYoungChunkRun` (an
+  abandoned commit's chunks are spared young, deleted once old), `gcKeepsASharedChunkRun`
+  (the abandoned commit's own chunk goes, the one a live commit shares stays),
+  `gcWaitsForAWriterReusingAnOldChunkRun` (the lease race: a writer reuses an old,
+  unreferenced chunk, so writes nothing and its age says it is garbage; gc, started between
+  the upload and the swap, waits for the writer's lease and then marks it),
+  `staleGcRefusesToDeleteChunkRun` (a stale gc gives up before a chunk delete).
+- Refined against the real code in direct commits and gc. The harness gives each model chunk
+  its bytes (`chunk_bytes`: constant bytes, which the chunker only cuts at its maximum size
+  or the file's end, so `k1` is a 4 MiB chunk and `k2`, `k3` 1 MiB tails; `check_chunking`
+  fails if the chunker ever cuts them otherwise) and maps a chunk object to its name by the
+  hash of the bytes it decodes to.
+- Mutants of `src/`, each failing a scenario (undone after the run): gc marking no chunks,
+  gc ignoring the grace period for chunks, a chunk stored without its bytes
+  (`prepare_files`; `chunksAreSharedRun`: the chunk's body), `store_commit` skipping the chunk
+  uploads (`chunksAreSharedRun`: the chunk is missing), no `Lease::check` before a chunk
+  delete (`staleGcRefusesToDeleteChunkRun`), and gc not waiting for the writers' leases
+  (`gcWaitsForAWriterReusingAnOldChunkRun`: the page and pack scenarios fail too). A
+  `prepare_files` that ignores `reuse` fails the reuse scenarios (`reuseNamesTheBasePackRun`).
+- Simplifications: a huge file is two chunks (`k1` shared; the model has no chunk common to
+  every version); whether the real chunker cuts two real files the same way is not modelled
+  (the harness's bytes are chosen so it does); `INLINE_MAX` and `PACK_MAX` splitting is not
+  modelled.
+
+## Reuse (`bucket.qnt`, `publish.qnt`)
+
+`Worktree::commit` passes `prepare_files` the locations of its base's entries by content
+hash (`reuse`): a staged file whose content the base has at another path (a move, a copy, a
+revert) is not stored again, and its entry gets that path's location, a pack range or a
+chunk list. Nothing else reuses: `write_files` (the repack, `pail-mirror`) passes an empty
+map, and a rewrite's copy of a commit keeps the original's locations as a matter of course.
+
+- Model: a client that begins on a base the branch (or a record) reaches fixes `Client.reuse`
+  before any lease (`reuseOf`): each big or huge path its delta changes to content another
+  path of the base holds, to the pack the base's page names for that path (a huge file's
+  chunks are named by content, so the value is only a marker). Its upload then stores no
+  pack for that path, no chunks for it, and its page names the base's pack. A relocation (a
+  path written to the content it has) never reuses. Combining, rewrites and landing give
+  their commits packs of their own and store their chunks, as before.
+- Why only a reachable base: a working copy's base is what it read from the branch, which
+  gc marks (the ref's history, and every record's tips), so its packs and chunks stay. A
+  stored but unreachable base (a writer's abandoned commit) could in principle be young while
+  the older pack or chunk its page names is gone, and reusing from it would name a missing
+  object. No working copy has such a base, and the restriction is not needed for the
+  properties as far as simulation shows (20,000 runs of 100 steps without it: no violation).
+  The harness applies it by marking, as gc does.
+- Checked by `packsAreStored`, `relocateKeepsContent`, `chunksAreStored` and the scenarios:
+  `reuseNamesTheBasePackRun` (a copy of a big file names the base's pack and stores none),
+  `reuseSurvivesAReplayRun` (the writer's replay on a newer head keeps the base's pack for
+  the path it reused and the head's for the rest).
+- Refined against the real `commit_opts` with the real `Repo::prepare_files(inputs, reuse)`,
+  the harness building `reuse` as the worktree does.
+- Simplifications: reuse is of a path other than the one written; rewrites, combined intents
+  and landed stacks are not given reuse (their commits' packs are the model's, above).
 
 ## Not modelled yet
 
-1. Chunks (files of 1 MiB and more). Packs are refined for direct commits and gc only.
+1. Packs are refined for direct commits and gc only.
 
 ## Lease timing (`clock.qnt`)
 
@@ -590,7 +692,7 @@ is not in the bound: a lease counts from before its put.
   `staleLanderRefusesRun`, `staleCombinerRefusesRun` (each swap site refuses a stale
   holder), `swapAtTheEdgeOfTheMarginRun` (age `MAX_AGE` passes), `refreshCountsFromItsSendRun`,
   `leaseCountsFromItsPutRun`, `gcLeaseCountsFromItsWriteRun`, `lateRefreshDoesNotReviveRun`,
-  `staleGcRefusesToDeleteRun`, `staleGcRefusesToDeletePackRun` (pack deletes are guarded like commit and page deletes).
+  `staleGcRefusesToDeleteRun`, `staleGcRefusesToDeletePackRun` and `staleGcRefusesToDeleteChunkRun` (pack and chunk deletes are guarded like commit and page deletes).
 - Mutants of `src/lease.rs`, `src/gc.rs` and `src/repo.rs`: fourteen, each undone after the run. Thirteen fail a scenario: gc without its check
   (`staleGcRefusesToDeleteRun`), a lease counting from after its put (`leaseCountsFromItsPutRun`)
   or from after its listing (`expiredLeaseIsIgnoredRun`), a refresh counting from its reply
