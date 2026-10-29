@@ -78,7 +78,14 @@ module world {
     // The batch's last commit: what its swap moves the ref to.
     tip: CommitId,
     then: Outcome,
+    // The lineage in the ref as polled.
+    lineage: Lineage,
   }
+
+  /// A head a published commit leaves its caller (`pail commit` keeps it in the working
+  /// copy for the next commit's `KnownHead`): the ref's version, `recent` and lineage as
+  /// the commit's publish left them, kept only when the commit is the ref's tip then.
+  type Known = { has: bool, head: Ref, recent: Recent, lineage: Lineage }
 
   /// A landing in progress: how many land calls the client has begun, what its last
   /// attempt read of the branch (version, lineage) and the tip its swap moves it to.
@@ -105,6 +112,8 @@ module world {
     located: bool,
     found: CommitId,
     foundAt: Lineage,
+    // The head its last publish left it (`Known`), if any.
+    known: Known,
   }
 
   // ---------- the collector (`pail gc`) ----------
@@ -181,7 +190,16 @@ module world {
     batch: Set(),
     tip: ROOT,
     then: Pending,
+    lineage: NO_LINEAGE,
   }
+
+  pure val NO_KNOWN: Known = { has: false, head: { commit: ROOT, version: 0 }, recent: Map(), lineage: NO_LINEAGE }
+
+  /// What a publish of commit `id` leaves its caller when the ref, as the publish last
+  /// had it, is at `at` with `recent` and `lineage`: a known head only if `id` is the tip
+  /// (`Worktree::commit`: a version belongs to the ref's commit, not to one under it).
+  pure def knownOf(id: CommitId, at: Ref, recent: Recent, lineage: Lineage): Known =
+    if (id == at.commit) { has: true, head: at, recent: recent, lineage: lineage } else NO_KNOWN
 
   pure val IDLE: Client = {
     base: ROOT,
@@ -198,6 +216,7 @@ module world {
     located: false,
     found: ROOT,
     foundAt: NO_LINEAGE,
+    known: NO_KNOWN,
   }
 
   pure val GC_IDLE: Collector = {
