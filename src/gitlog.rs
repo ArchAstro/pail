@@ -80,6 +80,8 @@ pub struct LogOpts {
     pub full_diff: bool,
     /// Show maintenance commits (repacks), which are hidden by default.
     pub maintenance: bool,
+    /// Print one JSON object per commit (pail ids, `meta` included) instead of Git's format.
+    pub json: bool,
 }
 
 impl Default for LogOpts {
@@ -113,6 +115,7 @@ impl Default for LogOpts {
             diff: DiffOpts::default(),
             full_diff: false,
             maintenance: false,
+            json: false,
         }
     }
 }
@@ -321,6 +324,7 @@ impl LogOpts {
                     "--no-color" => o.color = Some(false),
                     "--full-diff" => o.full_diff = true,
                     "--maintenance" => o.maintenance = true,
+                    "--json" => o.json = true,
                     _ => return Err(fatal(format!("unrecognized argument: {a}"))),
                 }
             }

@@ -128,7 +128,8 @@ Examples:
   pail branch feature                      # create at the current base
   pail branch -d feature
   pail branch --default                    # show the store's default branch
-  pail branch --default trunk              # change it";
+  pail branch --default trunk              # change it
+  pail --store gs://b/repo branch --json   # {\"default\", \"branches\": [{\"name\", \"commit\"}]}";
 
 pub const SWITCH: &str = "\
 Examples:
@@ -186,7 +187,8 @@ pub const GIT_READS: &str = "\
 Takes Git's options and prints Git's output (byte for byte) for pail history; Git's
 documentation applies. --ids git prints the Git ids of commits mirrored from Git.
 `log` hides maintenance commits (`pail maintenance repack`), which change no file;
---maintenance shows them.
+--maintenance shows them. `log --json` prints one JSON object per commit (pail ids and
+`meta`, for tools) instead of Git's format.
   pail log --oneline -20
   pail log -p --stat -- src/parser.rs
   pail log --format='%h %an %s' main..feature

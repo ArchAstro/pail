@@ -128,6 +128,9 @@ enum Cmd {
         /// Show the store's default branch, or with a name make it the default.
         #[arg(long)]
         default: bool,
+        /// List as JSON: `{"default": "main", "branches": [{"name", "commit"}]}`.
+        #[arg(long, conflicts_with_all = ["delete", "default"])]
+        json: bool,
     },
     /// Get and set options, as `git config`: the repository's file, or `--global`.
     #[command(after_long_help = cli_help::CONFIG)]
@@ -885,6 +888,23 @@ async fn cmd_log(ctx: &Ctx, args: &[String], out: &mut Output) -> Result<()> {
     o.paths = paths;
     let spec = Pathspec::new(&o.paths)?;
     let commits = walk(ctx, &o, &spec, o.diff.any_output()).await?;
+    if o.json {
+        // One object per line, in the order `log` would print them: what a UI needs that
+        // Git's format cannot carry (pail ids, `meta` such as `pail.maintenance` and
+        // `rewritten.from`).
+        for s in &commits {
+            let c = &s.commit;
+            let line = serde_json::json!({
+                "id": s.hash.hex(), "parent": c.parent.map(|p| p.hex()),
+                "author": c.author, "author_date": c.author_date,
+                "committer": c.committer, "committer_date": c.committer_date,
+                "message": c.message, "meta": c.meta,
+                "files": c.files, "bytes": c.bytes, "generation": c.generation,
+            });
+            writeln!(out.w, "{line}")?;
+        }
+        return Ok(());
+    }
     let any_merge = commits.iter().any(|c| {
         c.commit
             .meta
@@ -1352,6 +1372,7 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             delete: _,
             default: true,
+            json: _,
         } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             match name {
@@ -1366,8 +1387,24 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             delete,
             default: false,
+            json,
         } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            if json {
+                let default = ctx.default_branch().await?;
+                let branches: Vec<_> = ctx
+                    .repo
+                    .list_refs()
+                    .await?
+                    .into_iter()
+                    .map(|(b, h)| serde_json::json!({"name": b, "commit": h.hex()}))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({"default": default, "branches": branches})
+                );
+                return Ok(());
+            }
             match name {
                 Some(n) if delete => {
                     if ctx.default_branch().await? == n {
