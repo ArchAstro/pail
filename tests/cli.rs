@@ -2316,3 +2316,55 @@ fn small_packs_are_warned_about_once() {
     std::fs::write(&global, "[maintenance]\n\twarnSmallPacks = 3\n").unwrap();
     assert!(!with(&t, &["clone", &store, "erin"]).contains("warning"));
 }
+
+/// `log --json` and `branch --json`: what a UI needs that Git's output cannot carry.
+#[test]
+fn json_log_and_branches_for_browsers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "alice"]);
+    let a = t.join("alice");
+    for i in 0..3 {
+        write(
+            &a.join(format!("f{i}.txt")),
+            &format!("file {i} {}\n", "x".repeat(200)),
+        );
+        pail(&a, &["add", "-A"]);
+        pail(&a, &["commit", "-m", &format!("add {i}\n\nbody {i}")]);
+    }
+    pail(&a, &["maintenance", "repack"]);
+    let lines = |args: &[&str]| -> Vec<serde_json::Value> {
+        pail(&a, args)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    // Maintenance commits are hidden unless asked for, and carry their meta key.
+    let shown = lines(&["--store", &store, "log", "--json"]);
+    assert_eq!(shown.len(), 4, "3 commits and the initial empty one");
+    assert_eq!(shown[0]["message"], "add 2\n\nbody 2");
+    assert_eq!(shown[0]["id"].as_str().unwrap().len(), 64);
+    assert_eq!(shown[0]["parent"], shown[1]["id"]);
+    assert!(shown[3]["parent"].is_null());
+    let all = lines(&["--store", &store, "log", "--json", "--maintenance"]);
+    assert_eq!(all.len(), 5);
+    assert!(all[0]["meta"].get("pail.maintenance").is_some(), "{all:?}");
+    let one = lines(&[
+        "--store",
+        &store,
+        "log",
+        "--json",
+        "-1",
+        "--maintenance",
+        shown[1]["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(one[0]["message"], "add 1\n\nbody 1");
+
+    let out = pail(&a, &["--store", &store, "branch", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["default"], "main");
+    assert_eq!(v["branches"][0]["name"], "main");
+    assert_eq!(v["branches"][0]["commit"], all[0]["id"]);
+}
