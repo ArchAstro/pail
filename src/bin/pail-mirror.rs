@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
 use pail::gitsrc::{Git, RawCommit, commit_bytes, kind_for_mode, object_id, tree_id};
 use pail::hash::Hash;
 use pail::manifest::Entry;
-use pail::repo::{CommitRequest, Delta, FileInput, Repo};
+use pail::repo::{CommitOptions, CommitRequest, Delta, FileInput, Repo, Upload};
 use pail::store::Store;
 use serde::Serialize;
 
@@ -93,6 +93,11 @@ struct RunArgs {
     /// Serve a live dashboard, e.g. 127.0.0.1:8790.
     #[arg(long)]
     serve: Option<String>,
+    /// Store the files of up to this many pending commits in one pack, in path order,
+    /// instead of a pack per commit (fewer, larger packs; a cold checkout reads fewer
+    /// objects). 1 = a pack per commit.
+    #[arg(long, default_value_t = 1)]
+    pack_batch: usize,
 }
 
 #[derive(clap::Args)]
@@ -361,6 +366,125 @@ async fn import_delta(
     }
     let out = repo
         .commit(request(branch, Some(base), delta, sha, &raw))
+        .await?;
+    Ok((out.commit, changes.len(), out.attempts))
+}
+
+/// The files of the next few commits, packed together (`--pack-batch`): a blob of a commit
+/// is in the pack of the batch's first, so the batch writes one pack in path order, not one
+/// per commit.
+#[derive(Default)]
+struct PackBatch {
+    /// The commits whose files it holds.
+    covers: HashSet<String>,
+    /// Each distinct blob (Git id, mode): its size, content hash and place.
+    files: HashMap<(String, String), (u64, Hash, pail::manifest::Loc)>,
+    /// The pack(s) to store with the first of those commits.
+    uploads: Vec<Upload>,
+}
+
+/// Bytes of blobs one batch holds in memory.
+const BATCH_BYTES: usize = 256 << 20;
+
+/// Pack the files of `shas` (at most `n`, as many as fit in memory), which are applied in
+/// order on `base`.
+async fn prepare_batch(
+    repo: &Repo,
+    git: &Git,
+    base: Hash,
+    shas: &[String],
+    n: usize,
+) -> Result<PackBatch> {
+    let mut covers = HashSet::new();
+    let mut keys: Vec<(String, String)> = vec![];
+    let mut inputs: Vec<FileInput> = vec![];
+    let mut seen = HashSet::new();
+    let mut bytes = 0usize;
+    for sha in shas.iter().take(n) {
+        if bytes >= BATCH_BYTES {
+            break;
+        }
+        let raw = git.commit_info(sha)?;
+        let parent = raw.parents.first().context("commit has no parent")?;
+        for c in git.diff_tree(parent, sha)? {
+            let key = (c.new_oid.clone(), c.new_mode.clone());
+            if !c.deleted && seen.insert(key.clone()) {
+                let data = git.cat(&c.new_oid)?;
+                bytes += data.len();
+                inputs.push(FileInput {
+                    path: c.path.clone(),
+                    kind: kind_for_mode(&c.new_mode)?,
+                    data: Bytes::from(data),
+                });
+                keys.push(key);
+            }
+        }
+        covers.insert(sha.clone());
+    }
+    // Moves and reverts reuse bytes already in the store.
+    let base_root = repo.root_of(Some(base)).await?;
+    let reuse: HashMap<Hash, pail::manifest::Loc> = repo
+        .entries(base_root)
+        .await?
+        .into_iter()
+        .map(|e| (e.hash, e.loc))
+        .collect();
+    let (entries, uploads) = repo.prepare_files(&inputs, &reuse);
+    let files = keys
+        .into_iter()
+        .zip(entries)
+        .map(|(key, e)| (key, (e.size, e.hash, e.loc)))
+        .collect();
+    Ok(PackBatch {
+        covers,
+        files,
+        uploads,
+    })
+}
+
+/// Import one commit of a batch: its delta points into the batch's pack, which goes up with
+/// the first commit.
+async fn import_batched(
+    repo: &Repo,
+    git: &Git,
+    branch: &str,
+    base: Hash,
+    sha: &str,
+    batch: &mut PackBatch,
+) -> Result<(Hash, usize, u32)> {
+    let raw = git.commit_info(sha)?;
+    let parent = raw.parents.first().context("commit has no parent")?;
+    let changes = git.diff_tree(parent, sha)?;
+    let mut delta: Delta = BTreeMap::new();
+    for c in &changes {
+        if c.deleted {
+            delta.insert(c.path.clone(), None);
+            continue;
+        }
+        let (size, hash, loc) = batch
+            .files
+            .get(&(c.new_oid.clone(), c.new_mode.clone()))
+            .context("a file of the commit is not in its batch")?;
+        delta.insert(
+            c.path.clone(),
+            Some(Entry {
+                path: c.path.clone(),
+                kind: kind_for_mode(&c.new_mode)?,
+                size: *size,
+                hash: *hash,
+                loc: loc.clone(),
+            }),
+        );
+    }
+    let uploads = std::mem::take(&mut batch.uploads);
+    let out = repo
+        .commit_opts(
+            request(branch, Some(base), delta, sha, &raw),
+            CommitOptions {
+                uploads,
+                ..Default::default()
+            },
+        )
         .await?;
     Ok((out.commit, changes.len(), out.attempts))
 }
@@ -763,14 +887,22 @@ async fn run(args: RunArgs) -> Result<()> {
                 );
             }
         }
-        for sha in &pending {
+        let mut batch = PackBatch::default();
+        for (i, sha) in pending.iter().enumerate() {
             set_phase(&dash, format!("forwarding {}", &sha[..10]));
             let step = async {
                 let raw = git.commit_info(sha)?;
                 let before = repo.store.stats.snapshot();
                 let t = Instant::now();
-                let (h, changed, attempts) =
-                    import_delta(&repo, &git, &c.pail_branch, head, sha).await?;
+                let (h, changed, attempts) = if args.pack_batch > 1 {
+                    if !batch.covers.contains(sha) {
+                        batch = prepare_batch(&repo, &git, head, &pending[i..], args.pack_batch)
+                            .await?;
+                    }
+                    import_batched(&repo, &git, &c.pail_branch, head, sha, &mut batch).await?
+                } else {
+                    import_delta(&repo, &git, &c.pail_branch, head, sha).await?
+                };
                 let import_ms = t.elapsed().as_millis();
                 let after = repo.store.stats.snapshot();
                 let t = Instant::now();
@@ -821,6 +953,8 @@ async fn run(args: RunArgs) -> Result<()> {
                         format!("{}: {e:#}; retrying after the next poll", &sha[..10]),
                     );
                     eprintln!("  {}: {e:#}; retrying after the next poll", &sha[..10]);
+                    // Its pack may not have been stored: the next poll packs afresh.
+                    batch = PackBatch::default();
                     if let Ok(Some((h, _))) = repo.read_ref(&c.pail_branch).await
                         && let Ok(g) = mirrored_sha(&repo, h).await
                     {
@@ -1015,5 +1149,125 @@ async fn main() {
     if let Err(e) = res {
         eprintln!("error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git_cmd(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@e.x",
+            ])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+            .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn body(tag: &str, n: usize) -> String {
+        format!("{tag} {n}\n{}\n", "pack me ".repeat(40))
+    }
+
+    /// A Git repository of a first commit and six more, each adding two files.
+    fn history(dir: &Path) -> Vec<String> {
+        std::fs::create_dir_all(dir).unwrap();
+        git_cmd(dir, &["init", "-q", "-b", "main"]);
+        for k in 0..=6 {
+            for (sub, name) in [("a", "n"), ("b", "m")] {
+                let p = dir.join(sub).join(format!("{name}{k}.txt"));
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, body(name, k)).unwrap();
+            }
+            git_cmd(dir, &["add", "-A"]);
+            git_cmd(dir, &["commit", "-q", "-m", &format!("commit {k}")]);
+        }
+        git_cmd(dir, &["rev-list", "--reverse", "HEAD"])
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Mirror the history with `batch` commits per pack; every commit must prove. Returns
+    /// the repository.
+    async fn mirror(root: &Path, git_dir: &Path, shas: &[String], batch: usize) -> Repo {
+        let url = format!("file://{}", root.join(format!("store{batch}")).display());
+        let repo = Repo::with_store(Store::open(&url).unwrap(), None);
+        let verifier = Repo::with_store(Store::open(&url).unwrap(), None);
+        let mut ids = BlobIds::open(&root.join(format!("state{batch}"))).unwrap();
+        let git = Git::open(git_dir).unwrap();
+        let (mut head, ..) = import_full(&repo, &git, "main", &shas[0]).await.unwrap();
+        let mut pending = PackBatch::default();
+        for (i, sha) in shas.iter().enumerate().skip(1) {
+            let (h, ..) = if batch > 1 {
+                if !pending.covers.contains(sha) {
+                    pending = prepare_batch(&repo, &git, head, &shas[i..], batch)
+                        .await
+                        .unwrap();
+                }
+                import_batched(&repo, &git, "main", head, sha, &mut pending)
+                    .await
+                    .unwrap()
+            } else {
+                import_delta(&repo, &git, "main", head, sha).await.unwrap()
+            };
+            let raw = git.commit_info(sha).unwrap();
+            let p = prove(&verifier, &mut ids, h, sha, &raw.tree).await.unwrap();
+            assert!(p.commit_match && p.tree_match && p.changes_match, "{sha}");
+            head = h;
+        }
+        repo
+    }
+
+    async fn tip(r: &Repo) -> Vec<Entry> {
+        let (h, _) = r.read_ref("main").await.unwrap().unwrap();
+        let root = r.commit_obj(&h).await.unwrap().root;
+        r.entries(root).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_writes_one_pack_for_several_commits_and_still_proves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = tmp.path().join("g");
+        let shas = history(&g);
+        let single = mirror(tmp.path(), &g, &shas, 1).await;
+        let batched = mirror(tmp.path(), &g, &shas, 3).await;
+        // The first commit's pack, then a pack per commit, or per three.
+        assert_eq!(single.store.list("packs/").await.unwrap().len(), 7);
+        assert_eq!(batched.store.list("packs/").await.unwrap().len(), 3);
+
+        // Same files either way; in a batch, a pack's files are in path order.
+        let (a, b) = (tip(&single).await, tip(&batched).await);
+        assert_eq!(
+            a.iter().map(|e| (&e.path, e.hash)).collect::<Vec<_>>(),
+            b.iter().map(|e| (&e.path, e.hash)).collect::<Vec<_>>()
+        );
+        let at = |e: &Entry| match e.loc {
+            pail::manifest::Loc::Pack { pack, off, .. } => (pack, off),
+            _ => panic!("{e:?}"),
+        };
+        // Commits 1-3 are one batch: a/n1..n3 and b/m1..m3 share a pack, a's before b's.
+        let in_batch = |name: &str| b.iter().find(|e| e.path == name).map(at).unwrap();
+        let (p1, o1) = in_batch("a/n1.txt");
+        let (p2, o2) = in_batch("a/n3.txt");
+        let (p3, o3) = in_batch("b/m1.txt");
+        assert!(p1 == p2 && p2 == p3 && o1 < o2 && o2 < o3);
     }
 }
