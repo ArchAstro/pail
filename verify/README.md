@@ -101,7 +101,8 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
    move no record names); after an undo or reset takes it off, only a rewrite brings it
    back.
 9. `locatedOnBranch`, `locateKeepsChanges`: see the successor walks section.
-10. `packsAreStored`, `relocateKeepsContent`, `gcSparesNamedPacks`: see the packs section.
+10. `knownHeadsAreTrue`: see the known heads section.
+11. `packsAreStored`, `relocateKeepsContent`, `gcSparesNamedPacks`: see the packs section.
 
 `npm run simulate` checks them over random interleavings of three writers and gc,
 including crashes, expired leases and the grace period passing at any moment (simulation,
@@ -183,6 +184,7 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `ldRead(c)` | its `GET refs/main` (the stack's ref and records are read past the gate), then the copy's upload |
 | action `ldSwap(c, d)` / `ldRecheck(c)` | its conditional `PUT refs/main`; the ref read after one it did not win |
 | action `locate(c)` | `Repo::successor` of `c`'s read commit, from its read's lineage to the branch's, read past every gate |
+| action `beginKnown(c, from)` | `commit_opts` by `c` with `from`'s `KnownHead` (as its last `Written` left it: kept when its `head` is its `commit`); its first ref read is skipped |
 | action `rwStore(c)` | under `writing()`'s lease, the wave of `PUT commits/<hash>` for the plan's commits (`rebase::store`) |
 | action `rwRead(c)` | `rewrite_ref`'s `GET refs/main`, then each carried commit's upload and the `PUT reflog/main/<id>` |
 | action `rwSwap(c, d)` / `rwRecheck(c)` | its conditional `PUT refs/main`; the ref read after an unanswered one |
@@ -388,6 +390,37 @@ found it; `locateKeepsChanges` failed.)
 - Simplifications: only a writer's read commit is located; `None` (nothing survived)
   never happens, since the root survives every rewrite.
 
+## Known heads (`publish.qnt`, `beginKnown`)
+
+`pail commit` keeps the head its last publish left it (`KnownHead`: the ref's version,
+`recent` and lineage, kept only when its commit is the ref's tip then) and passes it to the
+next commit, whose first attempt swaps from it without reading the ref. A stale one only
+loses the swap: the second attempt reads the ref and replays as usual.
+
+```text
+  publish ──▶ known = (tip == mine) ? {version, recent, lineage} : none
+  beginKnown(c, from) ──▶ Leasing ─lease/check─▶ Uploading (no readRef) ─swap─▶ …
+                                       stale version → swap loses → Reading (attempt 2)
+```
+
+- Property `knownHeadsAreTrue`: while the ref's version is a known head's, the ref names
+  its commit, `recent` and lineage; so a swap from it moves the branch from that commit.
+- `beginKnown(c, from)` commits on `from`'s known head (one client per commit in the model,
+  so a known head is handed to the next writer).
+- Scenarios: `knownHeadRun` (first attempt reads nothing), `knownHeadStaleRun` (stale:
+  the swap loses, attempt 2 reads and replays), `knownHeadAfterCombineRun` (the batch's
+  tip keeps `recent`), `knownHeadAfterRewriteRun` (the lineage is carried).
+- Mutants of `commit_opts` and its outcomes: known head on every attempt, `recent` not
+  carried, lineage not carried, and the version paired with the writer's own commit after a
+  lost answer, a combined batch or a joined batch each fail a scenario. A joined writer
+  is mid-batch only with three intents, which four clients cannot reach (two must land
+  first to send the combiner to intents): `contended_writers_all_land_by_combining`
+  (`tests/repo.rs`) kills that one, its writers committing on their known heads. Using the
+  known head whatever the base is equivalent: its only caller (`Worktree::commit`) builds
+  it from the base.
+- Simplifications: a client commits once, so the head is handed to another client
+  (`from`); `Worktree::commit`'s own keep-or-drop is mirrored in the harness, not run.
+
 ## Packs and repacking (`bucket.qnt`, `gc.qnt`)
 
 A file bigger than a manifest entry holds (`INLINE_MAX`) is stored in a pack, and the leaf
@@ -445,8 +478,7 @@ path with the content it has, and the new page names a new pack.
 
 1. Squash and fixup plans.
 2. Chunks (files of 1 MiB and more). Packs are refined for direct commits and gc only.
-3. Known heads (the fast path that skips the first ref read).
-4. Lease timing: a live holder is assumed to refresh within the lease's lifetime
+3. Lease timing: a live holder is assumed to refresh within the lease's lifetime
    (`Lease::check` refuses a ref swap otherwise); only dead holders' leases expire.
 
 ## Notes
