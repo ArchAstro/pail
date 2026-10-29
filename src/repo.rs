@@ -27,8 +27,28 @@ use crate::pack::{
 use crate::store::{Cas, Store, Version};
 use serde::{Deserialize, Serialize};
 
-/// Requests in flight per operation.
+/// Requests in flight per operation (manifest pages, uploads). File contents are fetched
+/// `Store::max_in_flight` at a time.
 pub const PARALLELISM: usize = 64;
+
+/// A planned request for file contents.
+enum Job {
+    /// One ranged GET of a pack, covering these entries (index, byte range in the pack).
+    Pack {
+        pack: Hash,
+        range: std::ops::Range<u64>,
+        members: Vec<(usize, std::ops::Range<u64>)>,
+    },
+    /// A large file stored as chunks.
+    Chunked(usize),
+}
+
+/// Verified file contents from [`Repo::read_stream`]: `(entry index, bytes, came from the
+/// store rather than a local copy)`. Holds part of the in-flight byte budget until dropped.
+pub struct Fetched {
+    pub items: Vec<(usize, Bytes, bool)>,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
 /// How long a contended commit keeps retrying before giving up. Time-based rather than
 /// attempt-based because stores differ: GCS allows ~1 write/s to one object, S3 far more.
 pub const COMMIT_DEADLINE: Duration = Duration::from_secs(60);
@@ -1316,54 +1336,19 @@ impl Repo {
     /// Read file contents for entries (same order). Every result is hash-verified.
     pub async fn read_files(&self, entries: &[Entry]) -> Result<Vec<Bytes>> {
         let mut out: Vec<Option<Bytes>> = vec![None; entries.len()];
-        let mut by_pack: BTreeMap<Hash, Vec<usize>> = BTreeMap::new();
-        let mut chunked: Vec<usize> = vec![];
-        for (i, e) in entries.iter().enumerate() {
-            if !matches!(e.loc, Loc::Inline(_)) {
-                if let Some(d) = self.blobs.as_ref().and_then(|b| b.read(&e.hash)) {
-                    out[i] = Some(d);
-                    continue;
-                }
-            }
-            match &e.loc {
-                Loc::Inline(b) => out[i] = Some(Bytes::from(b.clone())),
-                Loc::Pack { pack, .. } => by_pack.entry(*pack).or_default().push(i),
-                Loc::Chunks(_) => chunked.push(i),
-                Loc::Unresolved => bail!(
-                    "{}: content {} is not cached and has no known location",
-                    e.path,
-                    e.hash.short()
-                ),
-            }
-        }
-        let jobs = by_pack
-            .into_iter()
-            .map(|(pack, idxs)| {
-                futures::future::Either::Left(self.read_pack_group(entries, pack, idxs))
-            })
-            .chain(chunked.into_iter().map(|i| {
-                futures::future::Either::Right(async move {
-                    Ok(vec![(i, self.read_chunked(&entries[i]).await?)])
-                })
-            }));
-        let results: Vec<Vec<(usize, Bytes)>> = run_unordered(jobs.collect(), PARALLELISM).await?;
         let mut fetched = vec![false; entries.len()];
-        for (i, b) in results.into_iter().flatten() {
-            fetched[i] = true;
-            out[i] = Some(b);
+        let mut stream = std::pin::pin!(self.read_stream(entries));
+        while let Some(batch) = stream.next().await {
+            // Everything is collected here, so there is nothing to bound: free the budget.
+            for (i, b, from_store) in batch?.items {
+                fetched[i] = from_store;
+                out[i] = Some(b);
+            }
         }
         let verified: Vec<Bytes> = entries
             .iter()
             .zip(out)
-            .map(|(e, b)| {
-                let b = b.ok_or_else(|| anyhow!("missing content for {}", e.path))?;
-                anyhow::ensure!(
-                    b.len() as u64 == e.size && Hash::of(&b) == e.hash,
-                    "content of {} failed hash verification",
-                    e.path
-                );
-                Ok(b)
-            })
+            .map(|(e, b)| b.ok_or_else(|| anyhow!("missing content for {}", e.path)))
             .collect::<Result<_>>()?;
         // Cache what came from the store, now that it is verified.
         if let Some(blobs) = &self.blobs {
@@ -1376,27 +1361,130 @@ impl Repo {
         Ok(verified)
     }
 
-    async fn read_pack_group(
-        &self,
-        entries: &[Entry],
-        pack: Hash,
-        mut idxs: Vec<usize>,
-    ) -> Result<Vec<(usize, Bytes)>> {
-        let span = |i: usize| match &entries[i].loc {
-            Loc::Pack { off, len, .. } => *off..*off + *len,
-            _ => unreachable!(),
-        };
-        idxs.sort_by_key(|&i| span(i).start);
-        let mut got = Vec::with_capacity(idxs.len());
-        // Bound each request batch so huge packs still stream in manageable pieces.
-        for batch in idxs.chunks(4096) {
-            let ranges: Vec<_> = batch.iter().map(|&i| span(i)).collect();
-            let bytes = self.store.get_ranges(&pack_key(&pack), &ranges).await?;
-            for (&i, b) in batch.iter().zip(bytes) {
-                got.push((i, Bytes::from(decode_blob(&b, entries[i].size)?)));
+    /// Stream the contents of `entries` as they arrive, verified, in batches (one per request,
+    /// in completion order). Pack reads are planned across all entries (nearby ranges share a
+    /// request, big packs split into parallel ones), run `Store::max_in_flight` at a time, and
+    /// stop starting new requests while `BYTES_IN_FLIGHT` of earlier ones are still held:
+    /// a consumer that writes each batch out and then drops it keeps memory bounded.
+    pub fn read_stream<'a>(
+        &'a self,
+        entries: &'a [Entry],
+    ) -> impl futures::Stream<Item = Result<Fetched>> + 'a {
+        let mut ready: Vec<(usize, Bytes, bool)> = vec![];
+        let mut by_pack: BTreeMap<Hash, Vec<usize>> = BTreeMap::new();
+        let mut jobs: Vec<Job> = vec![];
+        let mut early: Option<anyhow::Error> = None;
+        for (i, e) in entries.iter().enumerate() {
+            if !matches!(e.loc, Loc::Inline(_))
+                && let Some(d) = self.blobs.as_ref().and_then(|b| b.read(&e.hash))
+            {
+                ready.push((i, d, false));
+                continue;
+            }
+            match &e.loc {
+                Loc::Inline(b) => ready.push((i, Bytes::from(b.clone()), false)),
+                Loc::Pack { pack, .. } => by_pack.entry(*pack).or_default().push(i),
+                Loc::Chunks(_) => jobs.push(Job::Chunked(i)),
+                Loc::Unresolved => {
+                    early = Some(anyhow!(
+                        "{}: content {} is not cached and has no known location",
+                        e.path,
+                        e.hash.short()
+                    ));
+                }
             }
         }
-        Ok(got)
+        for (pack, idxs) in by_pack {
+            let span = |i: usize| match &entries[i].loc {
+                Loc::Pack { off, len, .. } => *off..*off + *len,
+                _ => unreachable!(),
+            };
+            let wanted: Vec<_> = idxs.iter().map(|&i| span(i)).collect();
+            for r in crate::fetch::plan_reads(&wanted, crate::fetch::gap(), crate::fetch::MAX_LEN) {
+                jobs.push(Job::Pack {
+                    pack,
+                    range: r.range,
+                    members: r
+                        .members
+                        .iter()
+                        .map(|&m| (idxs[m], wanted[m].clone()))
+                        .collect(),
+                });
+            }
+        }
+        let verify = |e: &Entry, b: &[u8]| -> Result<()> {
+            anyhow::ensure!(
+                b.len() as u64 == e.size && Hash::of(b) == e.hash,
+                "content of {} failed hash verification",
+                e.path
+            );
+            Ok(())
+        };
+        let budget = Arc::new(tokio::sync::Semaphore::new(
+            crate::fetch::BYTES_IN_FLIGHT as usize,
+        ));
+        let verified_ready = ready
+            .into_iter()
+            .map(|(i, b, f)| verify(&entries[i], &b).map(|_| (i, b, f)))
+            .collect::<Result<Vec<_>>>();
+        let first = stream::iter(early.map(Err).into_iter().chain(match verified_ready {
+            Ok(items) if items.is_empty() => None,
+            Ok(items) => Some(Ok(Fetched {
+                items,
+                _permit: None,
+            })),
+            Err(e) => Some(Err(e)),
+        }));
+        let rest = stream::iter(jobs)
+            .map(move |job| {
+                let budget = budget.clone();
+                async move {
+                    let want = match &job {
+                        Job::Pack { range, .. } => range.end - range.start,
+                        Job::Chunked(i) => entries[*i].size,
+                    }
+                    .clamp(1, crate::fetch::BYTES_IN_FLIGHT);
+                    let permit = budget.acquire_many_owned(want as u32).await?;
+                    let mut items = vec![];
+                    match job {
+                        Job::Pack {
+                            pack,
+                            range,
+                            members,
+                        } => {
+                            let data = self
+                                .store
+                                .get_range(&pack_key(&pack), range.clone())
+                                .await?;
+                            anyhow::ensure!(
+                                data.len() as u64 == range.end - range.start,
+                                "short read of pack {}",
+                                pack.short()
+                            );
+                            for (i, w) in members {
+                                let at = (w.start - range.start) as usize;
+                                let raw = decode_blob(
+                                    &data[at..at + (w.end - w.start) as usize],
+                                    entries[i].size,
+                                )?;
+                                verify(&entries[i], &raw)?;
+                                items.push((i, Bytes::from(raw), true));
+                            }
+                        }
+                        Job::Chunked(i) => {
+                            let b = self.read_chunked(&entries[i]).await?;
+                            verify(&entries[i], &b)?;
+                            items.push((i, b, true));
+                        }
+                    }
+                    Ok(Fetched {
+                        items,
+                        _permit: Some(permit),
+                    })
+                }
+            })
+            .buffer_unordered(self.store.max_in_flight());
+        first.chain(rest)
     }
 
     async fn read_chunked(&self, e: &Entry) -> Result<Bytes> {
