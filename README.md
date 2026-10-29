@@ -388,6 +388,12 @@ pail-mirror verify --git-dir … --store … --state-dir ./state   # re-prove th
 The dashboard at `--serve` shows sync state, per-commit import and proof times, upload
 costs, and deep-check results. `state/mirror.jsonl` holds one record per commit.
 
+Every commit writes a pack of its own files, so replaying a long history leaves a pack per
+commit. `--pack-batch N` stores the files of up to N pending commits in one pack, in path
+order (the first of them uploads it, the rest point into it): fewer, larger packs, with every
+commit still proved. `pail maintenance repack` merges the packs of history imported without
+it. A mirror's resume and `verify` step over repack commits.
+
 ## Extending pail: conventions plus events
 
 Features like pull requests and CI are programs that agree on names, not server code:

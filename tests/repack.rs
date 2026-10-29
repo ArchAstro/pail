@@ -542,3 +542,44 @@ async fn a_mirror_resumes_below_maintenance_commits() {
     assert!(repo.commit_obj(&repack2).await.unwrap().is_maintenance());
     assert!(!repo.commit_obj(&last).await.unwrap().is_maintenance());
 }
+
+/// New history stops scattering: a commit's files go into its pack in path order, whatever
+/// order they were given in; the entries come back in the order given.
+#[test]
+fn prepare_files_packs_in_path_order() {
+    let (_d, repo) = temp_repo();
+    let mut rng = StdRng::seed_from_u64(3);
+    let paths = [
+        "z/last.rs",
+        "a/first.rs",
+        "m/mid/two.rs",
+        "m/mid/one.rs",
+        "b.rs",
+    ];
+    let inputs: Vec<FileInput> = paths
+        .iter()
+        .map(|p| FileInput {
+            path: p.to_string(),
+            kind: Kind::File,
+            data: Bytes::from(noise(&mut rng, 200)),
+        })
+        .collect();
+    let (entries, uploads) = repo.prepare_files(&inputs, &HashMap::new());
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+        paths,
+        "entries keep the inputs' order"
+    );
+    let mut by_offset: Vec<(u64, &str)> = entries
+        .iter()
+        .map(|e| match e.loc {
+            Loc::Pack { off, .. } => (off, e.path.as_str()),
+            _ => panic!("{e:?}"),
+        })
+        .collect();
+    by_offset.sort();
+    let mut sorted = paths.to_vec();
+    sorted.sort();
+    assert_eq!(by_offset.iter().map(|x| x.1).collect::<Vec<_>>(), sorted);
+}
