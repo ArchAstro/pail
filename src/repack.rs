@@ -14,19 +14,20 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 
 use crate::hash::Hash;
 use crate::manifest::{Entry, Loc};
+use crate::objects::Commit;
 use crate::pack::{PackBuilder, decode_blob, pack_key};
 use crate::repo::{
     CommitOptions, CommitRequest, ConflictError, Delta, PARALLELISM, Repo, Upload, run_unordered,
 };
 
-/// The meta key marking a commit as maintenance (a repack): history views hide it.
-pub const MAINTENANCE_META: &str = "pail.maintenance";
+pub use crate::objects::MAINTENANCE_META;
 /// Its value for a repack.
 pub const REPACK: &str = "repack";
 
@@ -303,6 +304,19 @@ fn build(
         })
         .collect();
     Ok((delta, uploads))
+}
+
+/// The newest commit at or below `h` that is not maintenance, with its hash: where a mirror
+/// resumes, and what history views show first.
+pub async fn skip_maintenance(repo: &Repo, mut h: Hash) -> Result<(Hash, Arc<Commit>)> {
+    loop {
+        let c = repo.commit_obj(&h).await?;
+        match c.parent {
+            Some(p) if c.is_maintenance() => h = p,
+            _ if c.is_maintenance() => bail!("a branch of maintenance commits only"),
+            _ => return Ok((h, c)),
+        }
+    }
 }
 
 /// Called with the attempt number (from 1) after the packs are built and before they are
