@@ -167,13 +167,14 @@ module scenarios {
     .then(gcListCommits)
     .then(gcDeleteCommit(ALICE_1))
     .then(gcListPages)
-    .then(gcDeletePage(Map("a" -> "1", "b" -> "0")))
+    .then(gcDeletePage({ tree: Map("a" -> "1", "b" -> "0"), locs: Map() }))
+    .then(gcListPacks)
     .then(gcDone)
     .then(all {
       assert(all {
         client(state, "alice").outcome == Unknown,
         liveKeys(state.bucket.commits) == Set(ROOT),
-        liveKeys(state.bucket.pages) == Set(ROOT_TREE),
+        liveKeys(state.bucket.pages) == Set(ROOT_PAGE),
         liveKeys(state.bucket.locks) == Set(),
       }),
       state' = state,
@@ -212,6 +213,7 @@ module scenarios {
     .then(gcListCommits)
     .then(gcDeleteCommit(ALICE_1))
     .then(gcListPages)
+    .then(gcListPacks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -237,6 +239,7 @@ module scenarios {
     .then(gcMark)
     .then(gcListCommits)
     .then(gcListPages)
+    .then(gcListPacks)
     .then(gcDone)
     .then(lease("alice"))
     .then(checkLeases("alice"))
@@ -668,6 +671,7 @@ module scenarios {
     .then(gcMark)
     .then(gcListCommits)
     .then(gcListPages)
+    .then(gcListPacks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -1855,6 +1859,7 @@ module scenarios {
     .then(gcMark)
     .then(gcListCommits)
     .then(gcListPages)
+    .then(gcListPacks)
     .then(gcDone)
 
   /// A writer whose refreshes never land finds its lease too old (tick 4, more than
@@ -1988,7 +1993,7 @@ module scenarios {
     .then(gcListCommits)
     .then(all {
       assert(all {
-        state.collector.phase == GcSweepingPages,
+        state.collector.phase == GcSweepingPacks,
         state.collector.doomedCommits == Set(),
         isLive(state.bucket.commits, ALICE_1),
       }),
@@ -2024,7 +2029,7 @@ module scenarios {
     .then(gcListCommits)
     .then(all {
       assert(all {
-        state.collector.phase == GcSweepingPages,
+        state.collector.phase == GcSweepingPacks,
         isLive(state.bucket.commits, ALICE_1),
       }),
       state' = state,
@@ -2053,7 +2058,7 @@ module scenarios {
     .then(gcListCommits)
     .then(all {
       assert(all {
-        state.collector.phase == GcSweepingPages,
+        state.collector.phase == GcSweepingPacks,
         isLive(state.bucket.commits, ALICE_1),
       }),
       state' = state,
@@ -2151,4 +2156,301 @@ module scenarios {
       }),
       state' = state,
     })
+
+  // ---------- packs and repacking ----------
+
+  pure val BIG_A: Delta = Map("a" -> "p1")
+  pure val BIG_B: Delta = Map("b" -> "p3")
+  pure val BIG_A2: Delta = Map("a" -> "p2")
+  pure val BIG_1: CommitId = ["root", "alice"]
+  /// A repack of `BIG_1` by carol: her delta writes `a` with the content it has.
+  pure val REPACKED: CommitId = ["root", "alice", "carol"]
+
+  /// Alice writes a big file (a pack of her own). Carol's repack is a commit whose delta
+  /// writes the file with the content it has: same tree, an empty change list, the file in
+  /// a pack of hers. Both packs stay (the history names alice's), and gc, finding both
+  /// named, deletes none.
+  /// @conformance
+  run repackKeepsContentRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("carol", BIG_1, BIG_A))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: REPACKED, version: 3 },
+        client(state, "carol").outcome == Published,
+        treeOf(state.bucket, REPACKED) == treeOf(state.bucket, BIG_1),
+        deltaOf(state.bucket, REPACKED, BIG_1) == Map(),
+        body(state.bucket.commits, BIG_1).locs == Map("a" -> ["alice"]),
+        body(state.bucket.commits, REPACKED).locs == Map("a" -> ["carol"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["carol"]),
+        body(state.bucket.packs, ["carol"]) == Set("p1"),
+        relocateKeepsContent,
+        refOnlyMovesForward,
+      }),
+      state' = state,
+    })
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.packs) == Set(["alice"], ["carol"]),
+        packsAreStored,
+      }),
+      state' = state,
+    })
+
+  /// Carol's repack and bob's change to another path both read alice's tip; carol lands
+  /// first. Bob's CAS loses; he re-reads, replays his delta on carol's commit and lands:
+  /// his page names the file where carol's repack put it, and his own file in his pack. A
+  /// writer based before a repack neither conflicts with it nor undoes it.
+  /// @conformance
+  run repackRacesStaleWriterRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("carol", BIG_1, BIG_A))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(begin("bob", BIG_1, BIG_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("carol"))
+    .then(readRef("bob"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket) == { commit: REPACKED.append("bob"), version: 4 },
+        client(state, "carol").outcome == Published,
+        client(state, "bob").outcome == Published,
+        treeOf(state.bucket, REPACKED.append("bob")) == Map("a" -> "p1", "b" -> "p3"),
+        body(state.bucket.commits, REPACKED.append("bob")).locs == Map("a" -> ["carol"], "b" -> ["bob"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["carol"], ["bob"]),
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+
+  /// Bob changes `a` while carol's repack of it is in flight. Carol's CAS loses; her
+  /// re-read finds `a` changed under her (`check_disjoint`) and fails with a conflict:
+  /// nothing of hers is on the branch. Her pack, commit and page (the tree alice's page has,
+  /// in her pack) are stored, named by nothing; a repack that recomputes from the new tip
+  /// (dave) lands, and gc, once they are old, deletes them and no other.
+  /// @conformance
+  run repackRacesChangedPathRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("carol", BIG_1, BIG_A))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(begin("bob", BIG_1, BIG_A2))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("carol"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(readRef("carol"))
+    .then(all {
+      assert(all {
+        client(state, "carol").outcome == Conflicted,
+        branch(state.bucket) == Set(ROOT, BIG_1, ["root", "alice", "bob"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"], ["carol"]),
+        packsAreStored,
+      }),
+      state' = state,
+    })
+    .then(begin("dave", ["root", "alice", "bob"], BIG_A2))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcDeleteCommit(REPACKED))
+    .then(gcListPages)
+    .then(gcDeletePage({ tree: Map("a" -> "p1", "b" -> "0"), locs: Map("a" -> ["carol"]) }))
+    .then(gcListPacks)
+    .then(gcDeletePack(["carol"]))
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        client(state, "dave").outcome == Published,
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"], ["dave"]),
+        body(state.bucket.commits, ["root", "alice", "bob", "dave"]).locs == Map("a" -> ["dave"]),
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+
+  /// The race the lease closes, for a pack. Carol's repack stores its pack and commit,
+  /// but her swap never arrives; by the time she retries the pack is old. Her retry stores
+  /// nothing new (the pack and commit exist already, so keep their age: the real retry
+  /// uploads no packs at all). gc starts between her upload and her swap, and waits for her
+  /// lease; once she has landed it marks her commit and her pack.
+  /// @conformance
+  run gcWaitsForARepackReusingAnOldPackRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("carol", BIG_1, BIG_A))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Dropped))
+    .then(recheck("carol"))
+    .then(graceElapses)
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(all { assert(state.collector.phase == GcDraining), state' = state })
+    .then(gcCheckLeases)
+    .then(swap("carol", Answered))
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        client(state, "carol").outcome == Published,
+        tip(state.bucket).commit == REPACKED,
+        liveKeys(state.bucket.packs) == Set(["alice"], ["carol"]),
+        packsAreStored,
+      }),
+      state' = state,
+    })
+
+  /// Alice's commit never lands (both swaps are lost), leaving a pack named by no commit a
+  /// ref reaches. gc, run while it is young, spares it (it may belong to a writer outside
+  /// any lease); once the grace period has passed, the next run deletes it.
+  /// @conformance
+  run gcSparesAYoungPackRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(all {
+      assert(all {
+        state.collector.doomedPacks == Set(),
+        liveKeys(state.bucket.packs) == Set(["alice"]),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcDeleteCommit(BIG_1))
+    .then(gcListPages)
+    .then(gcDeletePage({ tree: Map("a" -> "p1", "b" -> "0"), locs: Map("a" -> ["alice"]) }))
+    .then(gcListPacks)
+    .then(gcDeletePack(["alice"]))
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.packs) == Set(),
+        liveKeys(state.bucket.commits) == Set(ROOT),
+        packsAreStored,
+      }),
+      state' = state,
+    })
+
+  /// An abandoned commit of alice's leaves its commit, page and pack behind (her swaps
+  /// never arrived). gc deletes the commit and page, then stalls: its refresh never lands,
+  /// and by the time it lists `packs/` its lease is too old to pass the check before a
+  /// pack delete. It gives up with the pack stored. (Without the check on pack deletes
+  /// gc deleted the pack of a commit a writer could have reused since.)
+  /// @conformance
+  run staleGcRefusesToDeletePackRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcDeleteCommit(BIG_1))
+    .then(gcListPages)
+    .then(gcDeletePage({ tree: Map("a" -> "p1", "b" -> "0"), locs: Map("a" -> ["alice"]) }))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(gcListPacks)
+    .then(all {
+      assert(all {
+        state.collector.phase == GcSweepingPacks,
+        state.collector.doomedPacks == Set(),
+        isLive(state.bucket.packs, ["alice"]),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
 }
