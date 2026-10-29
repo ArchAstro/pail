@@ -1226,13 +1226,18 @@ impl Repo {
             Done(Loc),
             InPack { pack: usize, off: u64, len: u64 },
         }
-        let mut slots: Vec<(Hash, Pending)> = Vec::with_capacity(inputs.len());
         let mut packs: Vec<PackBuilder> = vec![PackBuilder::default()];
         let mut in_push: HashMap<Hash, (usize, u64, u64)> = HashMap::new();
         let mut chunk_uploads: Vec<(Hash, Bytes)> = vec![];
         let mut chunk_seen: HashSet<Hash> = HashSet::new();
 
-        for f in inputs {
+        // Blobs go into packs in path order, so the files of a directory sit together and a
+        // checkout of it reads a few neighbouring ranges (entries keep the inputs' order).
+        let mut order: Vec<usize> = (0..inputs.len()).collect();
+        order.sort_by(|&a, &b| inputs[a].path.cmp(&inputs[b].path));
+        let mut placed: Vec<Option<(Hash, Pending)>> = (0..inputs.len()).map(|_| None).collect();
+        for i in order {
+            let f = &inputs[i];
             let h = Hash::of(&f.data);
             let slot = if f.kind == Kind::Symlink || f.data.len() <= INLINE_MAX {
                 Pending::Done(Loc::Inline(f.data.to_vec()))
@@ -1263,8 +1268,9 @@ impl Repo {
                 in_push.insert(h, (pack, off, len));
                 Pending::InPack { pack, off, len }
             };
-            slots.push((h, slot));
+            placed[i] = Some((h, slot));
         }
+        let slots: Vec<(Hash, Pending)> = placed.into_iter().flatten().collect();
 
         let finished: Vec<(Hash, Bytes)> = packs
             .into_iter()
