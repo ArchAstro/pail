@@ -56,6 +56,7 @@ Access
 Repository
   config [<key> [<value>]]  Options, as `git config` (user.name, core.hooksPath, …)
   gc                        Delete unreachable objects past a grace period
+  maintenance repack        Merge a branch tip's small packs (faster cold reads)
   inspect                   Browse the physical data model in a browser
 
 Shell and agents
@@ -252,6 +253,30 @@ new commits wait for it, so it never deletes what a commit in flight is about to
 --dry-run takes no lease and deletes nothing.
   pail gc --dry-run
   pail gc --grace-hours 24 --wait-secs 300";
+
+pub const MAINTENANCE: &str = "\
+Housekeeping that changes how a branch's data is stored, never what it holds.
+  pail maintenance repack --dry-run
+  pail maintenance repack";
+
+pub const REPACK: &str = "\
+Many small commits leave a branch tip's files in many small packs, and a cold checkout
+costs a request per pack. repack writes one ordinary commit on the branch with the same
+files (same Git tree ids, no changes in `log --stat`) whose entries point into a few
+large, path-ordered packs (about --target-mb each). Stored bytes are copied as they are
+(no recompression) after checking each blob's hash, and the ref moves by the usual
+compare-and-swap, so it is safe beside writers and gc.
+
+By default only files in packs smaller than --min-pack-kb move (dense packs stay, so
+repeating it is cheap). --full moves every packed file; do not schedule it: the old
+packs stay alive through history, so each full repack keeps another copy of the bytes it
+moves until older commits are rewritten.
+
+If a concurrent commit changes a file being moved, that file is left out and the rest is
+published on the new tip (up to --attempts times). Other branches are not touched.
+  pail maintenance repack --dry-run          # packs, files and bytes it would move; requests saved
+  pail maintenance repack --branch main
+  pail maintenance repack --full --target-mb 8";
 
 pub const INSPECT: &str = "\
 Opens an object graph of the repository: branches, commits, manifest pages, packs and chunks,

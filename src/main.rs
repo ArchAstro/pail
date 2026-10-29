@@ -312,6 +312,9 @@ enum Cmd {
         #[arg(long, default_value_t = 600)]
         wait_secs: u64,
     },
+    /// Housekeeping that changes how data is stored, not what (repack).
+    #[command(subcommand, arg_required_else_help = true, after_long_help = cli_help::MAINTENANCE)]
+    Maintenance(MaintenanceCmd),
     /// Browse the physical data model in a browser: commits, pages, packs, chunks.
     #[command(after_long_help = cli_help::INSPECT)]
     Inspect {
@@ -519,6 +522,32 @@ enum AuthCmd {
     Status { store: Option<String> },
     /// Forget cached credentials.
     Logout,
+}
+
+#[derive(Subcommand)]
+enum MaintenanceCmd {
+    /// Rewrite the files a branch tip keeps in many small packs into a few large ones.
+    #[command(after_long_help = cli_help::REPACK)]
+    Repack {
+        /// The branch to repack (default: HEAD's).
+        #[arg(long, add = ArgValueCandidates::new(complete::branches))]
+        branch: Option<String>,
+        /// Move every packed file, not only those in small packs.
+        #[arg(long)]
+        full: bool,
+        /// New packs close at about this size.
+        #[arg(long, default_value_t = 4.0)]
+        target_mb: f64,
+        /// Tiered repack moves files from packs smaller than this.
+        #[arg(long, default_value_t = 1024)]
+        min_pack_kb: u64,
+        /// Print what would move and the requests saved; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Plans to make while a busy branch changes the files being moved.
+        #[arg(long, default_value_t = pail::repack::DEFAULT_ATTEMPTS)]
+        attempts: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1767,6 +1796,84 @@ async fn run(cli: Cli) -> Result<()> {
                 fmt_bytes(r.bytes_freed),
                 r.kept_young
             );
+        }
+        Cmd::Maintenance(MaintenanceCmd::Repack {
+            branch,
+            full,
+            target_mb,
+            min_pack_kb,
+            dry_run,
+            attempts,
+        }) => {
+            use pail::repack::{Options, Outcome};
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let branch = match branch {
+                Some(b) => b,
+                None => ctx.branch().await?.to_string(),
+            };
+            let mut opts = Options::new(&branch);
+            opts.full = full;
+            opts.target_bytes = (target_mb * 1024.0 * 1024.0) as u64;
+            opts.min_pack_bytes = min_pack_kb << 10;
+            opts.dry_run = dry_run;
+            opts.attempts = attempts;
+            let date = now_date();
+            let who = pail::repack::Who {
+                author: ctx.config.identity("author")?,
+                committer: ctx.config.identity("committer")?,
+                date,
+            };
+            let out = pail::repack::repack(&ctx.repo, &opts, &who, None).await?;
+            let (stats, verb) = match &out {
+                Outcome::Nothing(s) => (s, "nothing to move"),
+                Outcome::Planned(s) => (s, "would move"),
+                Outcome::Done { stats, .. } => (stats, "moved"),
+            };
+            let mode = if full {
+                "full".to_string()
+            } else {
+                format!("tiered: packs under {}", fmt_bytes(opts.min_pack_bytes))
+            };
+            println!("repack {branch} ({mode})");
+            println!(
+                "  tip: {} packed files in {} packs",
+                stats.packed_files, stats.packs
+            );
+            if stats.moved_files > 0 {
+                println!(
+                    "  {verb}: {} files ({} blobs, {} stored) out of {} packs, into {} new packs",
+                    stats.moved_files,
+                    stats.moved_blobs,
+                    fmt_bytes(stats.moved_bytes),
+                    stats.source_packs,
+                    stats.new_packs
+                );
+            } else {
+                println!("  {verb}");
+            }
+            println!(
+                "  requests for a full checkout (one per pack, at least): {} -> {}",
+                stats.requests_before, stats.requests_after
+            );
+            if let Outcome::Done {
+                commit,
+                parent,
+                attempts,
+                dropped,
+                ..
+            } = out
+            {
+                println!(
+                    "  committed {} on {} (attempt {attempts}{})",
+                    commit.short(),
+                    parent.short(),
+                    if dropped > 0 {
+                        format!(", {dropped} changed file(s) left out")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
         }
         Cmd::Fetch {
             revs,

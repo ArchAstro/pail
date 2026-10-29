@@ -2202,3 +2202,57 @@ fn rebase_rewrites_history_and_working_copies_follow() {
     let msg = pail(&a, &["log", "-1", "--format=%B"]);
     assert!(msg.contains("one=1") && msg.contains("one=2"), "{msg}");
 }
+
+/// `pail maintenance repack`: same files, same Git tree ids; a working copy at the old tip
+/// syncs over it without touching a path.
+#[test]
+fn repack_changes_layout_not_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "alice"]);
+    pail(&t, &["clone", &store, "bob"]);
+    let (a, b) = (t.join("alice"), t.join("bob"));
+    // A commit per file, each over the 64-byte inline limit: a pack per commit.
+    for i in 0..6 {
+        write(
+            &a.join(format!("src/f{i}.txt")),
+            &format!("file {i} {}\n", "x".repeat(200)),
+        );
+        pail(&a, &["add", "-A"]);
+        pail(&a, &["commit", "-m", &format!("add {i}")]);
+    }
+    pail(&b, &["sync"]);
+    let tree = pail(&a, &["rev-parse", "HEAD^{tree}"]);
+
+    let dry = pail(&a, &["maintenance", "repack", "--dry-run"]);
+    assert!(dry.contains("would move: 6 files"), "{dry}");
+    assert!(dry.contains("6 -> 1"), "{dry}");
+    assert_eq!(
+        pail(&a, &["rev-parse", "HEAD"]),
+        pail(&b, &["rev-parse", "HEAD"])
+    );
+
+    let out = pail(&a, &["maintenance", "repack"]);
+    assert!(
+        out.contains("moved: 6 files") && out.contains("committed"),
+        "{out}"
+    );
+    // Alice's HEAD is her own commit until she syncs; so is bob's.
+    assert!(pail(&a, &["sync"]).contains("(0 path(s) updated)"));
+    assert!(pail(&b, &["sync"]).contains("(0 path(s) updated)"));
+    assert_eq!(pail(&a, &["rev-parse", "HEAD^{tree}"]), tree);
+    assert_eq!(pail(&b, &["rev-parse", "HEAD^{tree}"]), tree);
+    assert_eq!(
+        pail(&b, &["cat", "src/f3.txt"]),
+        format!("file 3 {}\n", "x".repeat(200))
+    );
+    assert!(pail(&a, &["maintenance", "repack"]).contains("nothing to move"));
+
+    let help = pail(&a, &["help", "maintenance", "repack"]);
+    assert!(
+        help.contains("--dry-run") && help.contains("--full"),
+        "{help}"
+    );
+}
