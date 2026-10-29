@@ -48,6 +48,8 @@ Extend
   events [--branch GLOB]    Stream ref changes (bucket notifications, or polling)
   policy show|set|check     Branch policy: who may write what (brokers and landers build on it)
 
+  <name> …                  Any other name runs the plugin `pail-<name>` from PATH (pail pr …); --list shows them
+
 Access
   auth list|install|use     Credential providers (extensions) for stores you can't reach directly
   auth status|logout        Which provider a store uses, and whether it works
