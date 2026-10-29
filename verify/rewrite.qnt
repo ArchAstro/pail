@@ -264,6 +264,7 @@ module rewrite {
       Set(a.made.fold(s.bucket, (acc, m) => stored(acc, m.id, m.tree, m.ancestors))).fold(s, (n, b) =>
         if (not(a.ok)) finished({ ...s, bucket: b }, c, { ...client(s, c), phase: Done, outcome: Conflicted })
         else {
+          val after = {
           ...s,
           bucket: recorded(b, {
             op: rw.op,
@@ -280,6 +281,9 @@ module rewrite {
             phase: RwSwapping,
             rw: { ...rw, version: cur.version, tip: a.tip, id: nextRecord(s.bucket) },
           }),
+          }
+          // `rewrite_ref` checks the lease itself and returns the error: unknown outcome.
+          guarded(after, c, finished(after, c, { ...client(after, c), phase: Done, outcome: Unknown }))
         }
       )
     )

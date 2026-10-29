@@ -150,10 +150,13 @@ module combine {
       Set(built(s.bucket, ws, cl.comb.head.commit)).fold(s, (none, r) =>
         if (r.batch == Set()) withClient(s, c, { ...cl, phase: Polling, comb: NO_COMB })
         else {
-          ...s,
-          bucket: storedBatch(s.bucket, r.batch),
-          clients: s.clients.set(c,
-            { ...cl, phase: BatchSwapping, comb: { ...cl.comb, batch: r.batch, tip: r.tip } }),
+          val after = {
+            ...s,
+            bucket: storedBatch(s.bucket, r.batch),
+            clients: s.clients.set(c,
+              { ...cl, phase: BatchSwapping, comb: { ...cl.comb, batch: r.batch, tip: r.tip } }),
+          }
+          guarded(after, c, batchSwapNext(after, c, Dropped))
         }
       )
   }

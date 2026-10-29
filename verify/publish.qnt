@@ -60,7 +60,7 @@ module publish {
 
   pure def leaseNext(s: State, c: str): State = {
     ...s,
-    bucket: leased(s.bucket, c, Shared),
+    bucket: leased(s.bucket, c, Shared, s.now),
     clients: s.clients.set(c, { ...client(s, c), phase: CheckingLeases }),
   }
 
@@ -71,16 +71,19 @@ module publish {
   pure def checkLeasesCan(s: State, c: str): bool = client(s, c).phase == CheckingLeases
 
   pure def checkLeasesNext(s: State, c: str): State =
-    if (leasedByOthers(s.bucket, c, Set(Exclusive)))
+    if (leasedByOthers(s.bucket, c, Set(Exclusive), s.now))
       { ...s, bucket: unleased(s.bucket, c), clients: s.clients.set(c, { ...client(s, c), phase: Leasing }) }
     else
-      withClient(s, c, { ...client(s, c), phase:
-        if (client(s, c).ld.calls > 0) LdReading
-        // A known head (`beginKnown`): the first attempt swaps from it without reading.
-        else if (client(s, c).rw == NO_RW and client(s, c).attempt == 1 and client(s, c).seen.version > 0) Uploading
-        else if (client(s, c).rw == NO_RW) Reading
-        else if (client(s, c).rw.made != Set()) RwStoring
-        else RwReading })
+      holding(
+        withClient(s, c, { ...client(s, c), phase:
+          if (client(s, c).ld.calls > 0) LdReading
+          // A known head (`beginKnown`): the first attempt swaps from it without reading.
+          else if (client(s, c).rw == NO_RW and client(s, c).attempt == 1 and client(s, c).seen.version > 0) Uploading
+          else if (client(s, c).rw == NO_RW) Reading
+          else if (client(s, c).rw.made != Set()) RwStoring
+          else RwReading }),
+        c,
+      )
 
   /// Read the ref. A head past the base replays the delta onto it, unless a path the delta
   /// writes changed in between (`check_disjoint`).
@@ -104,24 +107,30 @@ module publish {
   pure def uploadCan(s: State, c: str): bool = client(s, c).phase == Uploading
 
   pure def uploadNext(s: State, c: str): State = {
-    ...s,
-    bucket: uploaded(
-      s.bucket,
-      made(c, client(s, c)),
-      client(s, c).seen.commit,
-      client(s, c).delta,
-    ),
-    clients: s.clients.set(c, {
-      ...client(s, c),
-      phase:
-        if (liveKeys(s.bucket.intents).exclude(client(s, c).seenRecent.keys()) != Set()) Intending
-        else Swapping,
-    }),
+    val after = {
+      ...s,
+      bucket: uploaded(
+        s.bucket,
+        made(c, client(s, c)),
+        client(s, c).seen.commit,
+        client(s, c).delta,
+      ),
+      clients: s.clients.set(c, {
+        ...client(s, c),
+        phase:
+          if (liveKeys(s.bucket.intents).exclude(client(s, c).seenRecent.keys()) != Set()) Intending
+          else Swapping,
+      }),
+    }
+    // Before the swap, `advance_ref` checks the lease: refused, the swap never leaves.
+    if (client(after, c).phase == Swapping) guarded(after, c, swapNext(after, c, Dropped)) else after
   }
 
   /// CAS the ref from the version read to the new commit. Answered: a lost race retries
   /// from the read, and after the last direct attempt hands off to combining. Unanswered
-  /// (`Lost`: performed if it applied; `Dropped`: never received): recheck.
+  /// (`Lost`: performed if it applied; `Dropped`: never received): recheck. A swap the lease
+  /// check refused (`guarded`) is a `Dropped` one: `commit_opts` takes the error for an
+  /// unknown outcome.
   pure def swapCan(s: State, c: str): bool = client(s, c).phase == Swapping
 
   pure def swapNext(s: State, c: str, d: Delivery): State = finished(
@@ -179,17 +188,10 @@ module publish {
 
   // ---------- failures ----------
 
-  /// The process dies mid-call: it makes no more requests and leaves its lease behind.
+  /// The process dies mid-call: it makes no more requests, its refresher stops, and it
+  /// leaves its lease behind, which others ignore once it is older than `TTL`.
   pure def crashCan(s: State, c: str): bool = not(Set(Idle, Stacked, Done).contains(client(s, c).phase))
 
   pure def crashNext(s: State, c: str): State =
-    withClient(s, c, { ...client(s, c), phase: Done, outcome: Unknown })
-
-  /// A dead writer's lease expires (it stopped refreshing it). A live writer's never does:
-  /// one that has not refreshed its lease within its lifetime makes no further ref
-  /// request (`Lease::check`), so to the bucket it is dead.
-  pure def leaseExpiresCan(s: State, c: str): bool =
-    isLive(s.bucket.locks, c) and client(s, c).phase == Done
-
-  pure def leaseExpiresNext(s: State, c: str): State = { ...s, bucket: unleased(s.bucket, c) }
+    notHolding(withClient(s, c, { ...client(s, c), phase: Done, outcome: Unknown }), c)
 }

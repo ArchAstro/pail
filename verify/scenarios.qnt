@@ -1651,4 +1651,316 @@ module scenarios {
       assert(client(state, "dave").found == BOB_PICKED.append("alice").append("~carol")),
       state' = state,
     })
+
+  // ---------- lease timing ----------
+  //
+  // Time is `tick`s (`bucket.qnt`: `TTL` 6, a refresh every 2, a check at 3). A holder
+  // whose refreshes never land (a stall: the requests are left held) goes stale: to the
+  // others when its lease is `TTL` old by their clock, `SKEW` ahead of the store's, to
+  // itself when `Lease::check` finds it more than `MAX_AGE` old.
+
+  /// A holder that stopped refreshing is ignored once its lease is `TTL` old by the
+  /// lister's clock (a tick ahead of the store's): at tick 5 gc still waits for bob, at
+  /// tick 6 it does not.
+  /// @conformance
+  run expiredLeaseIsIgnoredRun = init
+    .then(begin("bob", ROOT, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(gcCheckLeases)
+    .then(all { assert(state.collector.phase == GcDraining), state' = state })
+    .then(tick)
+    .then(gcCheckLeases)
+    .then(all {
+      assert(all {
+        state.collector.phase == GcLocked,
+        isLive(state.bucket.locks, "bob"),
+        client(state, "bob").phase == Reading,
+      }),
+      state' = state,
+    })
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcDone)
+
+  /// A writer whose refreshes never land finds its lease too old (tick 4, more than
+  /// `MAX_AGE`) and refuses its swap: the swap never leaves, as a dropped one. It rechecks,
+  /// retries, refuses again and fails, publishing nothing.
+  /// @conformance
+  run staleWriterRefusesSwapRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(upload("alice"))
+    .then(all { assert(client(state, "alice").phase == Rechecking), state' = state })
+    .then(recheck("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(recheck("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").outcome == Unknown,
+        tip(state.bucket) == { commit: ROOT, version: 1 },
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// A swap is allowed at exactly `MAX_AGE`: alice's refresh landed at tick 2 (it counts
+  /// from tick 2, when it was sent), so at tick 5 she is 3 old and passes; her swap lands
+  /// a tick later, within `LATENCY` of the check.
+  /// @conformance
+  run swapAtTheEdgeOfTheMarginRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(tick)
+    .then(tick)
+    .then(refreshLand("alice", Answered))
+    .then(refreshAck("alice"))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(upload("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == Swapping,
+        state.timing.get("alice").refreshed == 2,
+      }),
+      state' = state,
+    })
+    .then(tick)
+    .then(swap("alice", Answered))
+    .then(all {
+      assert(all {
+        client(state, "alice").outcome == Published,
+        tip(state.bucket) == { commit: ALICE_1, version: 2 },
+      }),
+      state' = state,
+    })
+
+  /// A refresh counts from when it was sent, not when its reply came back: alice's, sent
+  /// at tick 2, lands at once but is answered at tick 3. At tick 6 she is 4 old (3 if the
+  /// reply's time counted) and refuses.
+  /// @conformance
+  run refreshCountsFromItsSendRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(tick)
+    .then(tick)
+    .then(refreshLand("alice", Answered))
+    .then(tick)
+    .then(refreshAck("alice"))
+    .then(all { assert(state.timing.get("alice").refreshed == 2), state' = state })
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(upload("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == Rechecking,
+        tip(state.bucket) == { commit: ROOT, version: 1 },
+      }),
+      state' = state,
+    })
+
+  /// gc holds its lease from the start but stalls: its refresh never lands, so by tick 6
+  /// the writers cannot see it, and alice makes a stack. gc then lists it as garbage (it
+  /// marked before) and, finding its own lease too old, deletes nothing and gives up.
+  /// Without the check gc deleted the stack's commit under alice's ref.
+  /// @conformance
+  run staleGcRefusesToDeleteRun = init
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(stack("alice", ALICE_A))
+    .then(graceElapses)
+    .then(gcListCommits)
+    .then(all {
+      assert(all {
+        state.collector.phase == GcSweepingPages,
+        state.collector.doomedCommits == Set(),
+        isLive(state.bucket.commits, ALICE_1),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        branchIsComplete,
+        state.collector.phase == GcIdle,
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// gc waits four ticks for its listing, so its lease is old when it holds it. It counts
+  /// from when the lease was written (tick 0), not from the listing (tick 4), or it would
+  /// pass its check at tick 6, when writers no longer see its lease.
+  /// @conformance
+  run gcLeaseCountsFromItsWriteRun = init
+    .then(gcLease)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(gcCheckLeases)
+    .then(all { assert(state.timing.get(GC).refreshed == 0), state' = state })
+    .then(gcMark)
+    .then(tick)
+    .then(tick)
+    .then(stack("alice", ALICE_A))
+    .then(graceElapses)
+    .then(gcListCommits)
+    .then(all {
+      assert(all {
+        state.collector.phase == GcSweepingPages,
+        isLive(state.bucket.commits, ALICE_1),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
+
+  /// The same gc, whose first refresh is sent at tick 6 and lands after alice made her
+  /// stack: it does not bring gc back to life. Its lease had gone unseen for a moment,
+  /// and gc, too old to pass its check when the reply came, stays so.
+  /// @conformance
+  run lateRefreshDoesNotReviveRun = init
+    .then(gcLease)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(tick)
+    .then(tick)
+    .then(stack("alice", ALICE_A))
+    .then(refreshLand(GC, Answered))
+    .then(refreshAck(GC))
+    .then(all { assert(state.timing.get(GC).refreshed == 0), state' = state })
+    .then(graceElapses)
+    .then(gcListCommits)
+    .then(all {
+      assert(all {
+        state.collector.phase == GcSweepingPages,
+        isLive(state.bucket.commits, ALICE_1),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
+
+  /// A rewriter whose lease went stale before its swap returns the error and moves nothing
+  /// (`rewrite_ref` checks, then swaps; its record is written, harmlessly, and kept).
+  /// @conformance
+  run staleRewriterRefusesRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(rwRead("carol"))
+    .then(all {
+      assert(all {
+        client(state, "carol").outcome == Unknown,
+        tip(state.bucket) == { commit: ALICE_1, version: 2 },
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// A lander whose lease went stale refuses its swap as a dropped one: it rereads the
+  /// branch (and, the lease still stale, would refuse again).
+  /// @conformance
+  run staleLanderRefusesRun = init
+    .then(stack("alice", ALICE_A))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(ldRead("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == LdRechecking,
+        tip(state.bucket) == { commit: ROOT, version: 1 },
+      }),
+      state' = state,
+    })
+
+  /// A combining writer whose lease went stale refuses its batch swap as a dropped one,
+  /// and rereads the ref: nothing landed, so it polls again.
+  /// @conformance
+  run staleCombinerRefusesRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(begin("bob", ROOT, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(readRef("alice"))
+    .then(begin("carol", BOB_1, CAROL_B))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(intend("alice", 1))
+    .then(pollRef("alice"))
+    .then(pollList("alice"))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(gather("alice", Set()))
+    .then(all { assert(client(state, "alice").phase == BatchRechecking), state' = state })
+    .then(batchRecheck("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == Polling,
+        tip(state.bucket) == { commit: CAROL_1, version: 3 },
+      }),
+      state' = state,
+    })
 }
