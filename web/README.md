@@ -57,7 +57,7 @@ environment overrides. Defaults < file < environment < flags (`--config`, `--sto
 | `discover[].store` | a bucket prefix or directory: each child that is a pail repository is listed (needs `gcloud` or `aws` on `PATH` for `gs://` and `s3://`; `file://` needs nothing) |
 | `actions` | `true` enables review and merge buttons (off by default; the UI is read-only) |
 | `author` | identity for actions, `Name <email>` (else `PAIL_AUTHOR`) |
-| `pail` | the binary (default `pail`; also `PAIL_BIN`) |
+| `pail` | the binary (default: `pail` on `PATH`, else this checkout's `target/release/pail`; also `PAIL_BIN`). The server exits at startup if it cannot run it |
 | `cacheDir`, `localCache` | where bare clones live and whether to use them (see Caching) |
 | `cacheMb`, `pollMs` | in-memory cache size (128) and `pail events` poll interval (2000) |
 
