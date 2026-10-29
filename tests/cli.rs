@@ -2250,6 +2250,20 @@ fn repack_changes_layout_not_content() {
     );
     assert!(pail(&a, &["maintenance", "repack"]).contains("nothing to move"));
 
+    // History hides the repack, unless asked.
+    let log = pail(&a, &["log", "--oneline"]);
+    assert!(!log.contains("repack") && log.lines().count() == 7, "{log}");
+    assert!(pail(&a, &["log", "--oneline", "-1"]).contains("add 5"));
+    let log = pail(&a, &["log", "--oneline", "--maintenance"]);
+    assert!(
+        log.lines()
+            .next()
+            .unwrap()
+            .contains("pail maintenance: repack"),
+        "{log}"
+    );
+    assert_eq!(log.lines().count(), 8, "{log}");
+
     let help = pail(&a, &["help", "maintenance", "repack"]);
     assert!(
         help.contains("--dry-run") && help.contains("--full"),
