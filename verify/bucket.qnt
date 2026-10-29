@@ -3,22 +3,30 @@
 /// modelled protocols depend on.
 ///
 /// ```text
-///   pages/<hash>     a tree's page, named by its content          Space[Tree, bool]
+///   pages/<hash>     a tree's page, named by its content          Space[Page, bool]
 ///   commits/<hash>   immutable, created once, named by content    Space[CommitId, Commit]
 ///   refs/<branch>    the one mutable object, moved by CAS         Space[str, RefBody]
 ///   locks/<holder>   a lease: writers share, gc holds alone       Space[str, LeaseKind]
 ///   intents/<b>/<id> a combining writer's change, until it lands   Space[str, Intent]
 ///   reflog/<b>/<id>  a rewrite's record, created once, kept         Space[int, Rewrite]
+///   packs/<hash>     file contents, created once, named by content   Space[PackId, Set[str]]
 /// ```
 ///
-/// A tree here is small enough for one page (as a real one of a few files is). Not laid
-/// out yet: packs and chunks (file contents inline).
+/// A tree here is small enough for one page (as a real one of a few files is). File
+/// contents are inline, except the `BIG` ones, which live in a pack: a writer prepares one
+/// pack for the big files it writes (or relocates), stores it with its first commit and
+/// reuses it in any retry, and the commit's page names it per path (`Commit.locs`, the
+/// page's `Loc::Pack`). Not laid out yet: chunks.
 module bucket {
   import store.* from "./store"
 
   /// A snapshot: every path in `PATHS` maps to its content. Also the name of its page:
   /// pages are named by their content, so equal trees share one.
   type Tree = str -> str
+
+  /// A page: the tree and where it puts each big file (a page hashes its locations, so
+  /// the same tree in other packs is another page).
+  type Page = { tree: Tree, locs: str -> PackId }
 
   /// Paths a commit writes, each to its new content.
   type Delta = str -> str
@@ -28,8 +36,16 @@ module bucket {
   /// delta, fields and dates), so the chain fixes the hash.
   type CommitId = List[str]
 
-  /// A stored commit: its tree (the key of its root page) and every commit below it.
-  type Commit = { tree: Tree, ancestors: Set[CommitId] }
+  /// A pack, named here by its writer: the commit's last name if a client's own commit
+  /// (`packOf`), else the commit's.
+  type PackId = CommitId
+
+  /// A stored commit: its tree (the key of its root page), every commit below it, and
+  /// where its page puts each big file: the pack that holds it.
+  type Commit = { tree: Tree, ancestors: Set[CommitId], locs: str -> PackId }
+
+  /// A commit about to be stored: its name, tree and ancestors.
+  type Made = { id: CommitId, tree: Tree, ancestors: Set[CommitId] }
 
   /// The intents a ref has landed, each to the commit that carries it. (pail's keeps the
   /// last `RECENT_MAX`; never reached here.)
@@ -75,15 +91,16 @@ module bucket {
 
   /// Objects written since the gc grace period last elapsed (by their LastModified).
   /// Creating an object that exists already does not write it, so does not make it young.
-  type Young = { pages: Set[Tree], commits: Set[CommitId] }
+  type Young = { pages: Set[Page], commits: Set[CommitId], packs: Set[PackId] }
 
   type Bucket = {
-    pages: Space[Tree, bool],
+    pages: Space[Page, bool],
     commits: Space[CommitId, Commit],
     refs: Space[str, RefBody],
     locks: Space[str, LeaseKind],
     intents: Space[str, Intent],
     reflog: Space[int, Rewrite],
+    packs: Space[PackId, Set[str]],
     young: Young,
   }
 
@@ -91,17 +108,23 @@ module bucket {
   pure val PATHS: Set[str] = Set("a", "b")
   pure val ROOT: CommitId = ["root"]
   pure val ROOT_TREE: Tree = Map("a" -> "0", "b" -> "0")
+  pure val ROOT_PAGE: Page = { tree: ROOT_TREE, locs: Map() }
   pure val NO_LINEAGE: Lineage = { epoch: 0, rewrite: 0 }
+
+  /// Contents too big to inline (`INLINE_MAX`): stored in packs.
+  pure val BIG: Set[str] = Set("p1", "p2", "p3")
+  pure def isBig(content: str): bool = BIG.contains(content)
 
   /// A branch created with one commit holding every path, long enough ago to be old.
   pure val ROOT_BUCKET: Bucket = {
-    pages: created(Map(), ROOT_TREE, true),
-    commits: created(Map(), ROOT, { tree: ROOT_TREE, ancestors: Set() }),
+    pages: created(Map(), ROOT_PAGE, true),
+    commits: created(Map(), ROOT, { tree: ROOT_TREE, ancestors: Set(), locs: Map() }),
     refs: created(Map(), BRANCH, { commit: ROOT, recent: Map(), lineage: NO_LINEAGE }),
     locks: Map(),
     intents: Map(),
     reflog: Map(),
-    young: { pages: Set(), commits: Set() },
+    packs: Map(),
+    young: { pages: Set(), commits: Set(), packs: Set() },
   }
 
   /// The branch ref as a client reads it.
@@ -118,6 +141,9 @@ module bucket {
   pure def recordOf(b: Bucket, id: int): Rewrite = body(b.reflog, id)
 
   pure def treeOf(b: Bucket, id: CommitId): Tree = body(b.commits, id).tree
+
+  /// The page of commit `id`'s root.
+  pure def pageOf(b: Bucket, id: CommitId): Page = { tree: treeOf(b, id), locs: body(b.commits, id).locs }
 
   pure def ancestorsOf(b: Bucket, id: CommitId): Set[CommitId] = body(b.commits, id).ancestors
 
@@ -147,29 +173,81 @@ module bucket {
   pure def overlaps(d: Delta, from: Tree, onto: Tree): bool =
     d.keys().exists(p => from.get(p) != onto.get(p))
 
-  /// Commit `id`, `d` on top of `parent`, uploaded with its page: two creates, each a
-  /// no-op if the object is there already (`Store::put_new`), and so not making it young.
+  /// Commit `id`, `d` on top of `parent`, uploaded with its page and the pack of the big
+  /// files it writes: creates, each a no-op if the object is there already
+  /// (`Store::put_new`), and so not making it young. Every path of `d` is written, even
+  /// to the content it has: that is a relocation (`pail maintenance repack`), which moves
+  /// the file into this commit's pack and changes no content.
   pure def uploaded(b: Bucket, id: CommitId, parent: CommitId, d: Delta): Bucket =
-    stored(b, id, overlay(treeOf(b, parent), d), ancestorsOf(b, parent).union(Set(parent)))
+    storedWith(b, id, overlay(treeOf(b, parent), d), ancestorsOf(b, parent).union(Set(parent)), d.keys())
 
-  /// Commit `id` with its page, created as `uploaded` does.
-  pure def stored(b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId]): Bucket = {
-    ...b,
-    pages: created(b.pages, tree, true),
-    commits: created(b.commits, id, { tree: tree, ancestors: ancestors }),
-    young: {
-      pages:
-        if (createApplies(b.pages, tree)) b.young.pages.union(Set(tree))
-        else b.young.pages,
-      commits:
-        if (createApplies(b.commits, id)) b.young.commits.union(Set(id))
-        else b.young.commits,
-    },
-  }
+  /// The pack commit `id` stores for the big files it writes. A client's own commit uses
+  /// the pack the client prepared once, whichever head its retries land on; a commit
+  /// made of one (a combined intent, a rewrite's copy, a landed stack) has its own.
+  pure def packOf(id: CommitId): PackId =
+    if (Set("alice", "bob", "carol", "dave").contains(id[length(id) - 1])) [id[length(id) - 1]] else id
+
+  /// The newest of `ancestors`: the parent (ids lengthen along a history).
+  pure def newest(ancestors: Set[CommitId]): CommitId =
+    ancestors.fold([], (best, x) => if (length(x) > length(best)) x else best)
+
+  /// Commit `id` with its page, created as `uploaded` does, writing the paths that differ
+  /// from its parent's. The parent is stored already.
+  pure def stored(b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId]): Bucket =
+    storedWith(
+      b, id, tree, ancestors,
+      if (ancestors == Set()) PATHS
+      else PATHS.filter(p => tree.get(p) != treeOf(b, newest(ancestors)).get(p)),
+    )
+
+  /// Commit `id` with its page, whose big files at `wrote` go in its pack (stored with
+  /// it, in the real upload's one wave), the others where its parent's page has them.
+  pure def storedWith(b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId], wrote: Set[str]): Bucket =
+    Set(if (ancestors == Set()) Map() else body(b.commits, newest(ancestors)).locs).fold(b, (n0, inherited) =>
+      Set(PATHS.filter(p => isBig(tree.get(p)))).fold(b, (n1, bigs) =>
+        Set(bigs.mapBy(p => if (wrote.contains(p)) packOf(id) else inherited.get(p))).fold(b, (n2, locs) =>
+          Set(bigs.filter(p => wrote.contains(p)).map(p => tree.get(p))).fold(b, (n3, contents) =>
+            Set({ tree: tree, locs: locs }).fold(b, (n4, page) => {
+              ...b,
+              pages: created(b.pages, page, true),
+              commits: created(b.commits, id, { tree: tree, ancestors: ancestors, locs: locs }),
+              packs: if (contents == Set()) b.packs else created(b.packs, packOf(id), contents),
+              young: {
+                pages: if (createApplies(b.pages, page)) b.young.pages.union(Set(page)) else b.young.pages,
+                commits:
+                  if (createApplies(b.commits, id)) b.young.commits.union(Set(id))
+                  else b.young.commits,
+                packs:
+                  if (contents != Set() and createApplies(b.packs, packOf(id)))
+                    b.young.packs.union(Set(packOf(id)))
+                  else b.young.packs,
+              },
+            })
+          )
+        )
+      )
+    )
 
   /// Every commit of a combining round, stored in one wave.
   pure def storedBatch(b: Bucket, batch: Set[Entry]): Bucket =
-    batch.fold(b, (acc, e) => stored(acc, e.commit, e.tree, e.ancestors))
+    storedAll(b, batch.map(e => { id: e.commit, tree: e.tree, ancestors: e.ancestors }))
+
+  /// Commits stored together (at most four: a writer each), each after its parent (a
+  /// page's locations come from the parent's), a level of ancestors at a time.
+  pure def storedAll(b: Bucket, items: Set[Made]): Bucket =
+    Set(items).fold(b, (n, xs) =>
+      Set(xs.fold(1000, (m, x) => if (x.ancestors.size() < m) x.ancestors.size() else m)).fold(b, (nl, lo) =>
+        Set(storedLevel(b, xs, lo)).fold(b, (n0, b0) =>
+          Set(storedLevel(b0, xs, lo + 1)).fold(b0, (n1, b1) =>
+            Set(storedLevel(b1, xs, lo + 2)).fold(b1, (n2, b2) => storedLevel(b2, xs, lo + 3))
+          )
+        )
+      )
+    )
+
+  /// The commits of `items` with `n` ancestors, stored.
+  pure def storedLevel(b: Bucket, items: Set[Made], n: int): Bucket =
+    items.filter(m => m.ancestors.size() == n).fold(b, (acc, m) => stored(acc, m.id, m.tree, m.ancestors))
 
   /// Whether a swap of the ref expecting `version` applies.
   pure def refSwapApplies(b: Bucket, version: int): bool = casApplies(b.refs, BRANCH, version)
@@ -238,7 +316,7 @@ module bucket {
 
   /// Whether each of `ids`, and its page, is stored.
   pure def allStored(b: Bucket, ids: Set[CommitId]): bool =
-    ids.forall(id => isLive(b.commits, id) and isLive(b.pages, treeOf(b, id)))
+    ids.forall(id => isLive(b.commits, id) and isLive(b.pages, pageOf(b, id)))
 
   /// Every commit in the history at `id`, `id` included.
   pure def historyAt(b: Bucket, id: CommitId): Set[CommitId] = ancestorsOf(b, id).union(Set(id))
@@ -249,4 +327,23 @@ module bucket {
 
   /// Whether every commit a ref reaches, and its page, is stored.
   pure def branchIsStored(b: Bucket): bool = allStored(b, refsReach(b))
+
+  /// The packs commit `id`'s page names.
+  pure def packsOf(b: Bucket, id: CommitId): Set[PackId] =
+    body(b.commits, id).locs.keys().map(p => body(b.commits, id).locs.get(p))
+
+  /// Every pack some commit in `ids` names.
+  pure def packsNamedBy(b: Bucket, ids: Set[CommitId]): Set[PackId] =
+    ids.fold(Set(), (acc, id) => acc.union(packsOf(b, id)))
+
+  /// Whether each pack the pages of `ids` name is stored.
+  pure def packsStored(b: Bucket, ids: Set[CommitId]): bool =
+    packsNamedBy(b, ids).forall(k => isLive(b.packs, k))
+
+  /// Whether each big file of `ids` reads back its content through its page's pack.
+  pure def packsHold(b: Bucket, ids: Set[CommitId]): bool =
+    ids.forall(id => body(b.commits, id).locs.keys().forall(p =>
+      isLive(b.packs, body(b.commits, id).locs.get(p))
+        and body(b.packs, body(b.commits, id).locs.get(p)).contains(treeOf(b, id).get(p))
+    ))
 }

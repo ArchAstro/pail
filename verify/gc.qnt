@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 /// `pail gc` (`gc::gc`): take the exclusive lease, wait for every writer's lease to go,
 /// then mark what the refs reach and, for commits and then pages, list the unreachable
-/// objects older than the grace period and delete them one by one. Each step is one phase
-/// of requests.
+/// objects older than the grace period and delete them one by one (commits, pages, then
+/// packs: a pack goes only if no marked page names it). Each step is one phase of requests.
 ///
 /// The lease is what makes this safe: a writer can reuse an object that is already stored
 /// without rewriting it (`put_new` of an existing object writes nothing), so an object's
@@ -13,7 +13,9 @@
 /// ```text
 ///   GcIdle ─lease─▶ GcDraining ─checkLeases (none left)─▶ GcLocked ─mark─▶ GcMarked ─listCommits─▶ GcSweepingCommits ─deleteCommit(id)*─┐
 ///      ▲                                                                       │
-///      └── done (release) ◀─ deletePage(t)* ◀─ GcSweepingPages ◀─ listPages ◀─────────────┘
+///      │      GcSweepingPages ◀─ listPages ◀─────────────────────────────────────────────┘
+///      │           │ deletePage(t)*
+///      └── done (release) ◀─ deletePack(k)* ◀─ GcSweepingPacks ◀─ listPacks
 /// ```
 ///
 /// Time is abstract: `graceElapses` makes every object old.
@@ -42,7 +44,8 @@ module gc {
     else { ...s, collector: { ...s.collector, phase: GcLocked } }
 
   /// Read the refs, then every reflog record, and walk what they reach (commits, then each
-  /// commit's root page): a rewrite's old history stays, for successor walks and undo.
+  /// commit's root page, then the packs its page names): a rewrite's old history stays,
+  /// for successor walks and undo.
   pure def gcMarkCan(s: State): bool = s.collector.phase == GcLocked
 
   pure def gcMarkNext(s: State): State = {
@@ -51,7 +54,8 @@ module gc {
       ...s.collector,
       phase: GcMarked,
       liveCommits: refsReach(s.bucket).union(reflogReaches(s.bucket)),
-      livePages: refsReach(s.bucket).union(reflogReaches(s.bucket)).map(id => treeOf(s.bucket, id)),
+      livePages: refsReach(s.bucket).union(reflogReaches(s.bucket)).map(id => pageOf(s.bucket, id)),
+      livePacks: packsNamedBy(s.bucket, refsReach(s.bucket).union(reflogReaches(s.bucket))),
     },
   }
 
@@ -98,17 +102,43 @@ module gc {
     },
   }
 
-  pure def gcDeletePageCan(s: State, t: Tree): bool =
+  pure def gcDeletePageCan(s: State, t: Page): bool =
     s.collector.phase == GcSweepingPages and s.collector.doomedPages.contains(t)
 
-  pure def gcDeletePageNext(s: State, t: Tree): State = {
+  pure def gcDeletePageNext(s: State, t: Page): State = {
     ...s,
     bucket: { ...s.bucket, pages: deleted(s.bucket.pages, t) },
     collector: { ...s.collector, doomedPages: s.collector.doomedPages.exclude(Set(t)) },
   }
 
-  pure def gcDoneCan(s: State): bool =
+  /// List `packs/` once every doomed page is gone.
+  pure def gcListPacksCan(s: State): bool =
     s.collector.phase == GcSweepingPages and s.collector.doomedPages == Set()
+
+  pure def gcListPacksNext(s: State): State = {
+    ...s,
+    collector: {
+      ...s.collector,
+      phase: GcSweepingPacks,
+      doomedPacks: liveKeys(s.bucket.packs).filter(k =>
+        not(s.collector.livePacks.contains(k))
+          and not(s.collector.spared.packs.contains(k))
+          and not(s.bucket.young.packs.contains(k))
+      ),
+    },
+  }
+
+  pure def gcDeletePackCan(s: State, k: PackId): bool =
+    s.collector.phase == GcSweepingPacks and s.collector.doomedPacks.contains(k)
+
+  pure def gcDeletePackNext(s: State, k: PackId): State = {
+    ...s,
+    bucket: { ...s.bucket, packs: deleted(s.bucket.packs, k) },
+    collector: { ...s.collector, doomedPacks: s.collector.doomedPacks.exclude(Set(k)) },
+  }
+
+  pure def gcDoneCan(s: State): bool =
+    s.collector.phase == GcSweepingPacks and s.collector.doomedPacks == Set()
 
   pure def gcDoneNext(s: State): State =
     { ...s, bucket: unleased(s.bucket, GC), collector: GC_IDLE }
@@ -117,7 +147,7 @@ module gc {
   /// lease, not the grace period, keeps gc from deleting what a commit needs.
   pure def graceElapsesNext(s: State): State = {
     ...s,
-    bucket: { ...s.bucket, young: { pages: Set(), commits: Set() } },
+    bucket: { ...s.bucket, young: { pages: Set(), commits: Set(), packs: Set() } },
     // Mid-sweep, what is young now was young at `now` or written after it: either way
     // newer than the cutoff.
     collector:
@@ -127,6 +157,7 @@ module gc {
         spared: {
           pages: s.collector.spared.pages.union(s.bucket.young.pages),
           commits: s.collector.spared.commits.union(s.bucket.young.commits),
+          packs: s.collector.spared.packs.union(s.bucket.young.packs),
         },
       },
   }

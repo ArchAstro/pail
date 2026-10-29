@@ -188,9 +188,7 @@ module rewrite {
     val rw = client(s, c).rw
     {
       ...s,
-      bucket: planned(s.bucket, c, rw.plan, rw.expected).made.fold(s.bucket, (acc, m) =>
-        stored(acc, m.id, m.tree, m.ancestors)
-      ),
+      bucket: storedAll(s.bucket, planned(s.bucket, c, rw.plan, rw.expected).made),
       clients: s.clients.set(c, { ...client(s, c), phase: RwReading }),
     }
   }
@@ -261,7 +259,7 @@ module rewrite {
     })
       finished(s, c, { ...client(s, c), phase: Done, outcome: Moved })
     else Set(carried(s.bucket, c, rw, cur.commit)).fold(s, (none, a) =>
-      Set(a.made.fold(s.bucket, (acc, m) => stored(acc, m.id, m.tree, m.ancestors))).fold(s, (n, b) =>
+      Set(storedAll(s.bucket, a.made)).fold(s, (n, b) =>
         if (not(a.ok)) finished({ ...s, bucket: b }, c, { ...client(s, c), phase: Done, outcome: Conflicted })
         else {
           ...s,
