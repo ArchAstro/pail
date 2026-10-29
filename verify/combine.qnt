@@ -28,14 +28,14 @@ module combine {
   import world.* from "./world"
 
   /// A round's accumulator: the batch so far and its last commit's tree and ancestors.
-  type Building = { tip: CommitId, tree: Tree, ancestors: Set[CommitId], batch: Set[Entry] }
+  type Building = { tip: CommitId, tree: Tree, locs: str -> PackId, ancestors: Set[CommitId], batch: Set[Entry] }
 
   /// Write the intent: the change and the base it was made on.
   pure def intendCan(s: State, c: str): bool = client(s, c).phase == Intending
 
   pure def intendNext(s: State, c: str, at: int): State = {
     ...s,
-    bucket: intentPut(s.bucket, c, { base: client(s, c).base, delta: client(s, c).delta, at: at }),
+    bucket: intentPut(s.bucket, c, { base: client(s, c).base, delta: client(s, c).delta, reloc: client(s, c).reloc, at: at }),
     clients: s.clients.set(c, { ...client(s, c), phase: Polling, comb: NO_COMB }),
   }
 
@@ -109,25 +109,37 @@ module combine {
     pending(client(s, c), c).exclude(Set(c)).filter(w => not(isLive(s.bucket.intents, w)))
 
   /// The `k`th of `ws` in id order, built onto `a` unless its paths changed since its base.
+  /// Its soft relocations that still apply (the paths as its base had them) ride along;
+  /// the others are dropped without a word.
   pure def buildStep(b: Bucket, ws: Set[str], k: int, a: Building): Building =
     ws.filter(w => ws.filter(v => before(b, v, w)).size() == k).fold(a, (acc, w) =>
       if (overlaps(body(b.intents, w).delta, treeOf(b, body(b.intents, w).base), acc.tree)) acc
-      else Set(acc.tip.append(INTENT_NAME.get(w))).fold(acc, (none, id) => {
-        tip: id,
-        tree: overlay(acc.tree, body(b.intents, w).delta),
-        ancestors: acc.ancestors.union(Set(acc.tip)),
-        batch: acc.batch.union(Set({
-          intent: w,
-          commit: id,
-          tree: overlay(acc.tree, body(b.intents, w).delta),
-          ancestors: acc.ancestors.union(Set(acc.tip)),
-        })),
-      })
+      else Set(acc.tip.append(INTENT_NAME.get(w))).fold(acc, (none, id) =>
+        Set(keptSoft(
+          treeOf(b, body(b.intents, w).base), body(b.commits, body(b.intents, w).base).locs,
+          acc.tree, acc.locs, body(b.intents, w).delta, body(b.intents, w).reloc,
+        )).fold(acc, (n1, kept) =>
+          Set(overlay(acc.tree, withSoft(body(b.intents, w).delta, body(b.intents, w).reloc, kept))).fold(acc, (n2, tree) => {
+            tip: id,
+            tree: tree,
+            locs: PATHS.filter(p => isBig(tree.get(p))).mapBy(p =>
+              if (body(b.intents, w).delta.keys().union(kept).contains(p)) packOf(id) else acc.locs.get(p)),
+            ancestors: acc.ancestors.union(Set(acc.tip)),
+            batch: acc.batch.union(Set({
+              intent: w,
+              commit: id,
+              tree: tree,
+              ancestors: acc.ancestors.union(Set(acc.tip)),
+              wrote: body(b.intents, w).delta.keys().union(kept).filter(p => isBig(tree.get(p))),
+            })),
+          })
+        )
+      )
     )
 
   /// One commit per intent in `ws` on `onto`, oldest first (at most one per client).
   pure def built(b: Bucket, ws: Set[str], onto: CommitId): Building = {
-    val start = { tip: onto, tree: treeOf(b, onto), ancestors: ancestorsOf(b, onto), batch: Set() }
+    val start = { tip: onto, tree: treeOf(b, onto), locs: body(b.commits, onto).locs, ancestors: ancestorsOf(b, onto), batch: Set() }
     Set(buildStep(b, ws, 0, start)).fold(start, (n0, a0) =>
       Set(buildStep(b, ws, 1, a0)).fold(a0, (n1, a1) =>
         Set(buildStep(b, ws, 2, a1)).fold(a1, (n2, a2) => buildStep(b, ws, 3, a2))

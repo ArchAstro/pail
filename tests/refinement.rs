@@ -789,8 +789,19 @@ fn unpad(data: &[u8]) -> String {
 fn pack_of(id: &Id) -> Id {
     match id.last() {
         Some(last) if CLIENTS.contains(&last.as_str()) => vec![last.clone()],
+        // A combined intent's commit points at the pack its writer uploaded first.
+        Some(last) if CLIENTS.contains(&last.trim_end_matches('+')) => {
+            vec![last.trim_end_matches('+').to_owned()]
+        }
         _ => id.clone(),
     }
+}
+
+/// A commit object, read past every gate.
+fn rt_commit(h: &Harness, hash: &Hash) -> Result<std::sync::Arc<pail::objects::Commit>, String> {
+    h.rt()
+        .block_on(h.observer.commit_obj(hash))
+        .map_err(|e| e.to_string())
 }
 
 /// The contents a pack holds (its footer indexes the blobs; the decoy is no content).
@@ -1008,6 +1019,8 @@ struct Writer {
     /// The paths its delta writes with content its base has elsewhere: `Client.reuse`.
     reuse: BTreeMap<String, Id>,
     delta: Tree,
+    /// The soft relocations it carries (`CommitOptions::relocs`), by path and content.
+    reloc: Tree,
     progress: Progress,
     /// Its last swap went unanswered, so its next ref read is a recheck.
     rechecking: bool,
@@ -2737,6 +2750,7 @@ impl Harness {
         Ok(record([
             ("base", id_value(&self.name(&base)?)),
             ("delta", tree_value(&delta)),
+            ("reloc", tree_value(&Tree::new())),
             ("at", RuntimeValue::Int(at)),
         ]))
     }
@@ -2822,11 +2836,24 @@ impl Harness {
                 .last()
                 .map(|a| a.trim_end_matches('+').to_owned())
                 .unwrap_or_default();
+            // The big files its page puts in a pack its parent's page does not: what the
+            // commit points at its writer's pack.
+            let c = rt_commit(self, h)?;
+            let mine = self.locs_of(&c.root)?;
+            let before = match c.parent {
+                Some(p) => self.locs_of(&rt_commit(self, &p)?.root)?,
+                None => BTreeMap::new(),
+            };
+            let wrote = mine
+                .iter()
+                .filter(|(path, pack)| before.get(*path) != Some(*pack))
+                .map(|(path, _)| RuntimeValue::Text(path.clone()));
             entries.push(record([
                 ("intent", RuntimeValue::Text(intent)),
                 ("commit", id_value(&id)),
                 ("tree", field(&commit, "tree")?.clone()),
                 ("ancestors", ancestors),
+                ("wrote", set(wrote)),
             ]));
         }
         // Withdrawing: landed (its intent in `recent`), or else conflicted.
@@ -2946,6 +2973,7 @@ impl Harness {
         Ok(record([
             ("base", id_value(&base)),
             ("delta", tree_value(&w.delta)),
+            ("reloc", tree_value(&w.reloc)),
             ("phase", RuntimeValue::Text(phase.to_owned())),
             ("seen", self.ref_seen_value(&w.seen, &base)),
             ("seenRecent", self.recent_value(&seen_recent)),

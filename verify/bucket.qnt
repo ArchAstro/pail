@@ -84,11 +84,19 @@ module bucket {
   /// A combining writer's change (`intents/<branch>/<id>.json`), keyed here by its writer
   /// (a writer makes one per commit). Ids sort by creation time, `at`; clocks differ
   /// between machines, so `at` is any time, ties broken by `RANK`.
-  type Intent = { base: CommitId, delta: Delta, at: int }
+  type Intent = { base: CommitId, delta: Delta, reloc: Delta, at: int }
 
   /// A commit a combining round builds for an intent: its tree and ancestors, known before
   /// it is stored.
-  type Entry = { intent: str, commit: CommitId, tree: Tree, ancestors: Set[CommitId] }
+  type Entry = {
+    intent: str,
+    commit: CommitId,
+    tree: Tree,
+    ancestors: Set[CommitId],
+    // The big files whose page entry the commit points at its writer's pack (the intent's
+    // delta, and the soft relocations that still applied).
+    wrote: Set[str],
+  }
 
   /// A lease's kind: writers hold shared leases together; gc holds an exclusive one alone.
   type LeaseKind = Shared | Exclusive
@@ -247,7 +255,11 @@ module bucket {
   /// the pack the client prepared once, whichever head its retries land on; a commit
   /// made of one (a combined intent, a rewrite's copy, a landed stack) has its own.
   pure def packOf(id: CommitId): PackId =
-    if (Set("alice", "bob", "carol", "dave").contains(id[length(id) - 1])) [id[length(id) - 1]] else id
+    if (Set("alice", "bob", "carol", "dave").contains(id[length(id) - 1])) [id[length(id) - 1]]
+    // A combined intent's commit points at the pack its writer uploaded with its first attempt.
+    else if (Set("alice+", "bob+", "carol+", "dave+").contains(id[length(id) - 1]))
+      [Map("alice+" -> "alice", "bob+" -> "bob", "carol+" -> "carol", "dave+" -> "dave").get(id[length(id) - 1])]
+    else id
 
   /// The newest of `ancestors`: the parent (ids lengthen along a history).
   pure def newest(ancestors: Set[CommitId]): CommitId =
@@ -270,12 +282,19 @@ module bucket {
   /// nothing: their loc is the one given.
   pure def storedWith(
     b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId], wrote: Set[str], reuse: str -> PackId
+  ): Bucket = storedSoft(b, id, tree, ancestors, wrote, reuse, Set())
+
+  /// `storedWith`, the pack also holding `extra`: the contents of the soft relocations a
+  /// writer planned, kept or dropped on replay (its pack is uploaded once, whole).
+  pure def storedSoft(
+    b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId], wrote: Set[str], reuse: str -> PackId,
+    extra: Set[str]
   ): Bucket =
     Set(if (ancestors == Set()) Map() else body(b.commits, newest(ancestors)).locs).fold(b, (n0, inherited) =>
       Set(PATHS.filter(p => isBig(tree.get(p)))).fold(b, (n1, bigs) =>
         Set(wrote.filter(p => not(reuse.keys().contains(p)))).fold(b, (nw, stores) =>
           Set(bigs.mapBy(p => if (reuse.keys().contains(p)) reuse.get(p) else if (wrote.contains(p)) packOf(id) else inherited.get(p))).fold(b, (n2, locs) =>
-            Set(bigs.filter(p => stores.contains(p)).map(p => tree.get(p))).fold(b, (n3, contents) =>
+            Set(bigs.filter(p => stores.contains(p)).map(p => tree.get(p)).union(extra)).fold(b, (n3, contents) =>
               Set(stores.filter(p => isHuge(tree.get(p))).fold(Set(), (acc, p) => acc.union(CHUNKS.get(tree.get(p))))).fold(b, (nc, pieces) =>
                 Set({ tree: tree, locs: locs }).fold(b, (n4, page) => {
                   ...b,
@@ -302,9 +321,65 @@ module bucket {
       )
     )
 
+  /// Where commit `id`'s page puts the big file at `p` (nowhere: the root).
+  pure def locOf(b: Bucket, id: CommitId, p: str): PackId =
+    if (body(b.commits, id).locs.keys().contains(p)) body(b.commits, id).locs.get(p) else ROOT
+
+  /// The soft relocations of `soft` (planned against a `base` that had them in `baseTree`
+  /// and `baseLocs`) that still apply on a `parent` of `parentTree` and `parentLocs`: not a
+  /// path the delta `d` writes, and a path the parent still has as the base did (the same
+  /// content, in the same pack). A changed or already relocated path is dropped, silently.
+  pure def keptSoft(
+    baseTree: Tree, baseLocs: str -> PackId, parentTree: Tree, parentLocs: str -> PackId, d: Delta, soft: Delta
+  ): Set[str] =
+    soft.keys().filter(p => and {
+      not(d.keys().contains(p)),
+      parentTree.get(p) == baseTree.get(p),
+      parentTree.get(p) == soft.get(p),
+      baseLocs.keys().contains(p) == parentLocs.keys().contains(p),
+      or { not(baseLocs.keys().contains(p)), baseLocs.get(p) == parentLocs.get(p) },
+    })
+
+  /// The delta `d` with the relocations `kept` written over it: what the commit's page has.
+  pure def withSoft(d: Delta, soft: Delta, kept: Set[str]): Delta =
+    d.keys().union(kept).mapBy(p => if (d.keys().contains(p)) d.get(p) else soft.get(p))
+
+  /// The contents of the big files `soft` plans to move: what a writer's pack holds besides
+  /// its delta's, whether or not the relocation survives a replay.
+  pure def softContents(soft: Delta): Set[str] =
+    soft.keys().filter(p => isBig(soft.get(p))).map(p => soft.get(p))
+
+  /// `uploaded` for a commit planned on `base` with soft relocations `soft`.
+  pure def uploadedSoft(
+    b: Bucket, id: CommitId, base: CommitId, parent: CommitId, d: Delta, soft: Delta, reuse: str -> PackId
+  ): Bucket =
+    Set(keptSoft(treeOf(b, base), body(b.commits, base).locs, treeOf(b, parent), body(b.commits, parent).locs, d, soft)).fold(b, (n, kept) =>
+      storedSoft(
+        b, id,
+        overlay(treeOf(b, parent), withSoft(d, soft, kept)),
+        ancestorsOf(b, parent).union(Set(parent)),
+        d.keys().union(kept),
+        reuse,
+        softContents(soft),
+      )
+    )
+
   /// Every commit of a combining round, stored in one wave.
   pure def storedBatch(b: Bucket, batch: Set[Entry]): Bucket =
-    storedAll(b, batch.map(e => { id: e.commit, tree: e.tree, ancestors: e.ancestors }))
+    Set(batch.fold(1000, (m, e) => if (e.ancestors.size() < m) e.ancestors.size() else m)).fold(b, (nl, lo) =>
+      Set(storedBatchLevel(b, batch, lo)).fold(b, (n0, b0) =>
+        Set(storedBatchLevel(b0, batch, lo + 1)).fold(b0, (n1, b1) =>
+          Set(storedBatchLevel(b1, batch, lo + 2)).fold(b1, (n2, b2) => storedBatchLevel(b2, batch, lo + 3))
+        )
+      )
+    )
+
+  /// The batch's commits with `n` ancestors: each in its writer's pack, uploaded already
+  /// with the writer's first attempt (a reused file is not modelled through combining).
+  pure def storedBatchLevel(b: Bucket, batch: Set[Entry], n: int): Bucket =
+    batch.filter(e => e.ancestors.size() == n).fold(b, (acc, e) =>
+      storedWith(acc, e.commit, e.tree, e.ancestors, e.wrote, Map())
+    )
 
   /// Commits stored together (at most four: a writer each), each after its parent (a
   /// page's locations come from the parent's), a level of ancestors at a time.
