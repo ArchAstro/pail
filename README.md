@@ -216,6 +216,9 @@ to the store; the tier keeps that to the small packs. If a concurrent commit cha
 being moved, that file is left out and the rest is published on the new tip. The protocol is
 `commit` with the packs as uploads, modelled in `verify/` ("Packs and repacking").
 
+`clone` (and `status`, at most daily) warns when 100 or more of the tip's packs hold under
+256 KiB of it. `maintenance.warnSmallPacks` sets that count; 0 turns the warning off.
+
 ## Inspecting the physical model
 
 ```sh
