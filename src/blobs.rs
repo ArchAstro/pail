@@ -198,6 +198,40 @@ impl Blobs {
         Ok(())
     }
 
+    /// Store content `h` by cloning `file`, a copy of it just written to a working tree: one
+    /// directory entry created instead of a temp file, a rename and a mode change, and the
+    /// blocks are shared like any other checkout. Falls back to writing `data` where the
+    /// filesystem can't clone.
+    pub fn store_clone(&self, h: &Hash, file: &Path, data: &[u8]) -> Result<()> {
+        let p = self.path(h);
+        if p.exists() {
+            return Ok(());
+        }
+        for attempt in 0..2 {
+            match clone_path(file, &p) {
+                Ok(true) => {
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o444))?;
+                    return Ok(());
+                }
+                Ok(false) => return self.put(h, data),
+                Err(e) => {
+                    let kind = e
+                        .root_cause()
+                        .downcast_ref::<std::io::Error>()
+                        .map(|e| e.kind());
+                    match kind {
+                        Some(std::io::ErrorKind::AlreadyExists) => return Ok(()),
+                        Some(std::io::ErrorKind::NotFound) if attempt == 0 => {
+                            std::fs::create_dir_all(p.parent().unwrap())?;
+                        }
+                        _ => return self.put(h, data),
+                    }
+                }
+            }
+        }
+        self.put(h, data)
+    }
+
     /// Move a file already on this volume into the store (used for committed stage snapshots).
     pub fn adopt(&self, h: &Hash, file: &Path) -> Result<()> {
         let p = self.path(h);

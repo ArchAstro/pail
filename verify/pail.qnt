@@ -26,6 +26,11 @@ module pail {
     state' = beginNext(state, c, base, delta),
   }
 
+  action beginKnown(c: str, from: str, delta: Delta): bool = all {
+    beginKnownCan(state, c, from),
+    state' = beginKnownNext(state, c, from, delta),
+  }
+
   action lease(c: str): bool = all { leaseCan(state, c), state' = leaseNext(state, c) }
 
   action checkLeases(c: str): bool = all {
@@ -212,6 +217,8 @@ module pail {
     nondet plan = PLANS.oneOf()
     any {
       begin(c, base, delta),
+      nondet from = CLIENTS.oneOf()
+      beginKnown(c, from, delta),
       lease(c),
       checkLeases(c),
       crash(c),
@@ -275,6 +282,8 @@ module pail {
     nondet plan = PLANS.oneOf()
     any {
       begin(c, base, delta),
+      nondet from = CLIENTS.oneOf()
+      beginKnown(c, from, delta),
       lease(c),
       checkLeases(c),
       readRef(c),
@@ -458,6 +467,16 @@ module pail {
         chain(state.bucket).exists(r => droppedBy(state.bucket, recordOf(state.bucket, r)).contains(a)),
       }))
 
+  /// A known head is true while its version stands: the ref at that version names its
+  /// commit, `recent` and lineage, so a swap from it moves the branch from that commit.
+  val knownHeadsAreTrue: bool =
+    CLIENTS.forall(c => client(state, c).known.has and tip(state.bucket).version == client(state, c).known.head.version
+      implies and {
+        tip(state.bucket).commit == client(state, c).known.head.commit,
+        recentOf(state.bucket) == client(state, c).known.recent,
+        lineageOf(state.bucket) == client(state, c).known.lineage,
+      })
+
   /// While gc marks and deletes, no writer is between its first read and its return.
   val gcRunsAlone: bool =
     Set(GcLocked, GcMarked, GcSweepingCommits, GcSweepingPages, GcSweepingPacks).contains(state.collector.phase)
@@ -482,5 +501,6 @@ module pail {
     publishedOnce,
     locatedOnBranch,
     locateKeepsChanges,
+    knownHeadsAreTrue,
   }
 }
