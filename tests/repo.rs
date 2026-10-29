@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pail::hash::Hash;
 use pail::manifest::{Entry, Kind, Loc};
-use pail::repo::{CommitRequest, ConflictError, Delta, FileInput, Repo};
+use pail::repo::{CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead, Repo};
 use pail::store::Store;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -555,10 +555,19 @@ async fn publish_check_runs_once_before_the_cas() {
     assert_eq!(files, ["a.txt", "b.txt", "c.txt"]);
 }
 
-/// Many writers on one branch: every commit lands (no give-ups, nothing lost or landed twice),
-/// history stays linear, and contended writers are landed in batches by whoever wins the swap.
+/// Many writers on one branch, each committing on the head its last publish left it: every
+/// commit lands (no give-ups, nothing lost or landed twice), history stays linear, and
+/// contended writers are landed in batches by whoever wins the swap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn contended_writers_all_land_by_combining() {
+    // A wrong known head only shows when its writer commits again before the ref moves on,
+    // which a round may not reach (it is a race): run several.
+    for _ in 0..8 {
+        contend_on_one_branch().await;
+    }
+}
+
+async fn contend_on_one_branch() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("file://{}", dir.path().join("bucket").display());
     let repo = Arc::new(Repo::with_store(Store::open(&url).unwrap(), None));
@@ -574,6 +583,10 @@ async fn contended_writers_all_land_by_combining() {
         let repo = repo.clone();
         tasks.push(tokio::spawn(async move {
             let mut head = Some(c0);
+            // As `Worktree::commit` keeps it: the head a publish left, only when the commit
+            // is the ref's tip then. A known head pairing a version with the wrong commit
+            // would swap past a landed change, and the checks below would miss it.
+            let mut known: Option<KnownHead> = None;
             let mut combined = 0;
             for i in 0..per {
                 let d = put_files(
@@ -582,13 +595,25 @@ async fn contended_writers_all_land_by_combining() {
                 )
                 .await;
                 let out = repo
-                    .commit(req("main", head, d, &format!("w{w}-{i}")))
+                    .commit_opts(
+                        req("main", head, d, &format!("w{w}-{i}")),
+                        CommitOptions {
+                            known_head: known.take(),
+                            ..Default::default()
+                        },
+                    )
                     .await
                     .unwrap();
                 if out.attempts > 2 {
                     combined += 1;
                 }
                 head = Some(out.commit);
+                known = (out.head == out.commit).then(|| KnownHead {
+                    commit: out.commit,
+                    version: out.version.clone(),
+                    recent: out.recent.clone(),
+                    lineage: out.lineage.clone(),
+                });
             }
             combined
         }));

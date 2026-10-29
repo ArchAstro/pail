@@ -34,6 +34,27 @@ module publish {
       seen: { commit: base, version: 0 },
     })
 
+  /// `commit` called with the head `from`'s last publish left (`KnownHead`): on that
+  /// head, as read, so its first attempt need not read the ref.
+  pure def beginKnownCan(s: State, c: str, from: str): bool = and {
+    client(s, c).phase == Idle,
+    client(s, from).known.has,
+    isLive(s.bucket.commits, client(s, from).known.head.commit),
+  }
+
+  pure def beginKnownNext(s: State, c: str, from: str, delta: Delta): State = {
+    val k = client(s, from).known
+    withClient(s, c, {
+      ...IDLE,
+      base: k.head.commit,
+      delta: delta,
+      phase: Leasing,
+      seen: k.head,
+      seenRecent: k.recent,
+      seenLineage: k.lineage,
+    })
+  }
+
   /// Write its shared lease (`locks/<c>`).
   pure def leaseCan(s: State, c: str): bool = client(s, c).phase == Leasing
 
@@ -55,6 +76,8 @@ module publish {
     else
       withClient(s, c, { ...client(s, c), phase:
         if (client(s, c).ld.calls > 0) LdReading
+        // A known head (`beginKnown`): the first attempt swaps from it without reading.
+        else if (client(s, c).rw == NO_RW and client(s, c).attempt == 1 and client(s, c).seen.version > 0) Uploading
         else if (client(s, c).rw == NO_RW) Reading
         else if (client(s, c).rw.made != Set()) RwStoring
         else RwReading })
@@ -117,7 +140,17 @@ module publish {
       if (not(answered(d)))
         { ...client(s, c), phase: Rechecking }
       else if (refSwapApplies(s.bucket, client(s, c).seen.version))
-        { ...client(s, c), phase: Done, outcome: Published }
+        {
+          ...client(s, c),
+          phase: Done,
+          outcome: Published,
+          known: knownOf(
+            made(c, client(s, c)),
+            { commit: made(c, client(s, c)), version: client(s, c).seen.version + 1 },
+            client(s, c).seenRecent,
+            client(s, c).seenLineage,
+          ),
+        }
       else if (client(s, c).attempt < DIRECT_ATTEMPTS)
         { ...client(s, c), phase: Reading, attempt: client(s, c).attempt + 1 }
       else
@@ -132,7 +165,12 @@ module publish {
   pure def recheckNext(s: State, c: str): State =
     finished(s, c,
       if (landedSince(s.bucket, made(c, client(s, c)), client(s, c).seenLineage))
-        { ...client(s, c), phase: Done, outcome: Published }
+        {
+          ...client(s, c),
+          phase: Done,
+          outcome: Published,
+          known: knownOf(made(c, client(s, c)), tip(s.bucket), recentOf(s.bucket), lineageOf(s.bucket)),
+        }
       else if (client(s, c).attempt < DIRECT_ATTEMPTS)
         { ...client(s, c), phase: Reading, attempt: client(s, c).attempt + 1 }
       else
