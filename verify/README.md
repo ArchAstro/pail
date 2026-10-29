@@ -527,10 +527,12 @@ path with the content it has, and the new page names a new pack.
   placing every file in its own pack, the real `commit_opts` not storing the writer's
   uploads, and not checking that the paths a replayed delta writes are disjoint
   (`check_disjoint`).
-- Simplifications: packs are modelled in every protocol the same way (a combined intent, a
-  rewrite's copy and a landed stack get a pack of their own named by the new commit, where
-  the real code points the copy at the original's pack), but refined against the real code
-  only in direct commits and gc; `simulate` samples the rest. A pack's name is its
+- Simplifications: packs are modelled in every protocol the same way, and refined against
+  the real code in direct commits, combined (intent) commits and gc. A combined intent's
+  commit points at the pack its writer uploaded with its first attempt (`packOf` maps
+  `alice+` to `alice`), as the real combiner does. A rewrite's copy and a landed stack still
+  get a pack of their own named by the new commit, where the real code points the copy at
+  the original's pack; `simulate` samples those. A pack's name is its
   writer's, not its content hash (the harness adds a decoy blob so two writers' packs of
   one content differ). Content already stored (`reuse`) is modelled for direct commits
   only (below). A repack's retry (recompute from the new tip) is a new
@@ -627,9 +629,50 @@ map, and a rewrite's copy of a commit keeps the original's locations as a matter
 - Simplifications: reuse is of a path other than the one written; rewrites, combined intents
   and landed stacks are not given reuse (their commits' packs are the model's, above).
 
+## Amortized compaction: soft relocations (`soft_scenarios.qnt`, `publish.qnt`, `bucket.qnt`)
+
+A commit may carry, besides its delta, a bounded list of old files of its base to move into
+the pack it uploads anyway (`CommitOptions::relocs`; the client re-encodes clean local copies,
+so no request is added). A relocation is *soft*: it is the same content at another place,
+so it never decides whether the commit lands.
+
+```text
+  user commit  = delta (hard: a changed path conflicts)  +  relocs (soft)
+  on a head past the base, a reloc is kept iff the head still has the path as the base did:
+      same content AND same pack  (so a path the head changed, or relocated elsewhere, is dropped)
+      and the delta does not write it
+  kept relocs: the page points at the writer's pack.  dropped: nothing, silently.
+  the writer's pack holds everything it planned, kept or not (storage is not reclaimed)
+```
+
+- Model: `Client.reloc` and `Intent.reloc` (path to the content it has), `beginSoft`,
+  `keptSoft` (the rule above, used by a direct commit's upload and by each commit of a
+  combining round, against the batch so far), `softBudget`. A combined commit's `Entry.wrote`
+  is the big files its page puts in the writer's pack.
+- Properties: `relocationsKeepContent` (a commit a writer or its combined intent makes changes
+  only paths its own delta writes: a relocation never changes content, kept or dropped),
+  `relocationsNeverConflict` (a client told it conflicted has a path of its own delta that
+  the branch changed), `relocationsAreBudgeted` (at most as many big files as the delta's own;
+  the real planner also has a floor, which two paths could not show).
+- Scenarios (`soft_scenarios.qnt`, run by `npm test`): `softKeptRun`,
+  `softDroppedWhenHeadChangedRun` (the user's commit lands with its own change, the
+  relocation of a path another commit changed is dropped), `softDroppedWhenHeadRelocatedRun`
+  (a repack of the path landed first), `softDroppedInCombineRun` (the same through an intent).
+- Mutants of the model, each killed: relocations hard (`softDroppedWhenHeadChangedRun`,
+  `softDroppedInCombineRun`), dropping the user's change when a relocation is dropped (three
+  scenarios), keeping a relocation whatever the head did (three scenarios, and `simulate`
+  breaks `relocationsKeepContent`), ignoring the budget (`simulate` breaks
+  `relocationsAreBudgeted`). Checking only the loc (not the content) is equivalent: a
+  changed path is always another pack.
+- Not yet refined against the real code: these scenarios run in Quint only; the harness
+  reports `reloc` as empty (the code lands separately).
+
 ## Not modelled yet
 
-1. Packs are refined for direct commits and gc only.
+1. A rewrite's copy and a landed stack get a pack of their own in the model (the real code
+   points the copy at the original's pack): sampled by `simulate`, not refined.
+2. Content reuse through combining: an intent's reused files are modelled as written to the
+   writer's pack.
 
 ## Lease timing (`clock.qnt`)
 

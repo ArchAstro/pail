@@ -94,6 +94,9 @@ module world {
   type Client = {
     base: CommitId,
     delta: Delta,
+    // Soft relocations the commit carries (`CommitOptions::relocs`): big files of the base,
+    // each to the content it has, dropped silently where the head changed or moved them.
+    reloc: Delta,
     phase: Phase,
     // The ref as this client last read it; version 0 until it reads.
     seen: Ref,
@@ -247,6 +250,7 @@ module world {
   pure val IDLE: Client = {
     base: ROOT,
     delta: Map(),
+    reloc: Map(),
     phase: Idle,
     seen: { commit: ROOT, version: 0 },
     seenRecent: Map(),
