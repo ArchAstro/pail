@@ -27,6 +27,9 @@ struct Cli {
     /// Print the agent skill file (SKILL.md) and exit.
     #[arg(long)]
     skill: bool,
+    /// List the plugins on PATH (`pail-<name>` programs run as `pail <name>`) and exit.
+    #[arg(long)]
+    list: bool,
     /// Read a store directly (s3://, gs://, file://), with no local state. Also PAIL_STORE.
     #[arg(long)]
     store: Option<String>,
@@ -691,6 +694,31 @@ fn fmt_bytes(n: u64) -> String {
 fn main() {
     // Shell completion requests (COMPLETE=<shell> pail …) are answered here and exit.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+    // `pail <name>` for a name that is not built in runs the plugin `pail-<name>`.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(argv.as_slice(), [] | [_])
+        && argv.first().is_none_or(|a| a == "--help" || a == "-h")
+    {
+        Cli::command().print_help().expect("help");
+        print!("{}", pail::plugin::help_section());
+        return;
+    }
+    if argv.as_slice() == ["--list"] {
+        for (name, path) in pail::plugin::list() {
+            println!("{name:20} {}", path.display());
+        }
+        return;
+    }
+    if let Some((i, name)) = pail::plugin::split(&argv).name {
+        let builtin = Cli::command()
+            .get_subcommands()
+            .any(|s| s.get_name() == name || s.get_all_aliases().any(|a| a == name));
+        if !builtin && name != "help" {
+            if let Some(program) = pail::plugin::find(name) {
+                pail::plugin::exec(&program, &argv, &argv[i + 1..]);
+            }
+        }
+    }
     let cli = Cli::parse();
     if cli.skill {
         print!("{}", include_str!("skill.md"));
@@ -698,6 +726,7 @@ fn main() {
     }
     let Some(cmd) = cli.cmd else {
         Cli::command().print_help().expect("help");
+        print!("{}", pail::plugin::help_section());
         return;
     };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");

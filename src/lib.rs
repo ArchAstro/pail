@@ -26,6 +26,7 @@ pub mod local;
 pub mod manifest;
 pub mod objects;
 pub mod pack;
+pub mod plugin;
 pub mod policy;
 pub mod rebase;
 pub mod repack;
