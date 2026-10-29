@@ -32,6 +32,7 @@ module publish {
       delta: delta,
       phase: Leasing,
       seen: { commit: base, version: 0 },
+      reuse: reuseOf(s.bucket, base, delta),
     })
 
   /// `commit` called with the head `from`'s last publish left (`KnownHead`): on that
@@ -52,6 +53,7 @@ module publish {
       seen: k.head,
       seenRecent: k.recent,
       seenLineage: k.lineage,
+      reuse: reuseOf(s.bucket, k.head.commit, delta),
     })
   }
 
@@ -114,6 +116,7 @@ module publish {
         made(c, client(s, c)),
         client(s, c).seen.commit,
         client(s, c).delta,
+        client(s, c).reuse,
       ),
       clients: s.clients.set(c, {
         ...client(s, c),

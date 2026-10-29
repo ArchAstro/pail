@@ -169,6 +169,7 @@ module scenarios {
     .then(gcListPages)
     .then(gcDeletePage({ tree: Map("a" -> "1", "b" -> "0"), locs: Map() }))
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -214,6 +215,7 @@ module scenarios {
     .then(gcDeleteCommit(ALICE_1))
     .then(gcListPages)
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -240,6 +242,7 @@ module scenarios {
     .then(gcListCommits)
     .then(gcListPages)
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(gcDone)
     .then(lease("alice"))
     .then(checkLeases("alice"))
@@ -672,6 +675,7 @@ module scenarios {
     .then(gcListCommits)
     .then(gcListPages)
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -1860,6 +1864,7 @@ module scenarios {
     .then(gcListCommits)
     .then(gcListPages)
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(gcDone)
 
   /// A writer whose refreshes never land finds its lease too old (tick 4, more than
@@ -1993,7 +1998,7 @@ module scenarios {
     .then(gcListCommits)
     .then(all {
       assert(all {
-        state.collector.phase == GcSweepingPacks,
+        state.collector.phase == GcSweepingChunks,
         state.collector.doomedCommits == Set(),
         isLive(state.bucket.commits, ALICE_1),
       }),
@@ -2029,7 +2034,7 @@ module scenarios {
     .then(gcListCommits)
     .then(all {
       assert(all {
-        state.collector.phase == GcSweepingPacks,
+        state.collector.phase == GcSweepingChunks,
         isLive(state.bucket.commits, ALICE_1),
       }),
       state' = state,
@@ -2058,7 +2063,7 @@ module scenarios {
     .then(gcListCommits)
     .then(all {
       assert(all {
-        state.collector.phase == GcSweepingPacks,
+        state.collector.phase == GcSweepingChunks,
         isLive(state.bucket.commits, ALICE_1),
       }),
       state' = state,
@@ -2206,6 +2211,7 @@ module scenarios {
     .then(gcListCommits)
     .then(gcListPages)
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -2307,6 +2313,7 @@ module scenarios {
     .then(gcDeletePage({ tree: Map("a" -> "p1", "b" -> "0"), locs: Map("a" -> ["carol"]) }))
     .then(gcListPacks)
     .then(gcDeletePack(["carol"]))
+    .then(gcListChunks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -2352,6 +2359,7 @@ module scenarios {
     .then(gcListCommits)
     .then(gcListPages)
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -2385,6 +2393,7 @@ module scenarios {
     .then(gcListCommits)
     .then(gcListPages)
     .then(gcListPacks)
+    .then(gcListChunks)
     .then(all {
       assert(all {
         state.collector.doomedPacks == Set(),
@@ -2403,6 +2412,7 @@ module scenarios {
     .then(gcDeletePage({ tree: Map("a" -> "p1", "b" -> "0"), locs: Map("a" -> ["alice"]) }))
     .then(gcListPacks)
     .then(gcDeletePack(["alice"]))
+    .then(gcListChunks)
     .then(gcDone)
     .then(all {
       assert(all {
@@ -2446,11 +2456,373 @@ module scenarios {
     .then(gcListPacks)
     .then(all {
       assert(all {
-        state.collector.phase == GcSweepingPacks,
+        state.collector.phase == GcSweepingChunks,
         state.collector.doomedPacks == Set(),
         isLive(state.bucket.packs, ["alice"]),
       }),
       state' = state,
     })
     .then(gcDone)
+
+  // ---------- chunks ----------
+
+  pure val HUGE_A: Delta = Map("a" -> "h1")
+  pure val HUGE_B: Delta = Map("b" -> "h2")
+  pure val HUGE_1: CommitId = ["root", "alice"]
+  pure val HUGE_PAGE_A = { tree: Map("a" -> "h1", "b" -> "0"), locs: Map() }
+
+  /// Alice writes a huge file (`h1`: chunks `k1`, `k2`), landing it; once the chunks are
+  /// old, bob writes another (`h2`: `k1`, `k3`) on top. His upload stores `k3` alone: `k1`
+  /// exists, so the create writes nothing and `k1` keeps its age (and is not young). gc
+  /// finds every chunk named and deletes none.
+  /// @conformance
+  run chunksAreSharedRun = init
+    .then(begin("alice", ROOT, HUGE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.chunks) == Set("k1", "k2"),
+        state.bucket.young.chunks == Set("k1", "k2"),
+        liveKeys(state.bucket.packs) == Set(),
+        chunksAreStored,
+        chunkedFilesReadBack,
+      }),
+      state' = state,
+    })
+    .then(graceElapses)
+    .then(begin("bob", HUGE_1, HUGE_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all {
+      assert(all {
+        client(state, "bob").outcome == Published,
+        liveKeys(state.bucket.chunks) == Set("k1", "k2", "k3"),
+        state.bucket.young.chunks == Set("k3"),
+        chunksOf(state.bucket, HUGE_1.append("bob")) == Set("k1", "k2", "k3"),
+        chunksAreStored,
+        chunkedFilesReadBack,
+      }),
+      state' = state,
+    })
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(all {
+      assert(all {
+        state.collector.liveChunks == Set("k1", "k2", "k3"),
+        state.collector.doomedChunks == Set(),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.chunks) == Set("k1", "k2", "k3"),
+        chunksAreStored,
+        gcSparesNamedChunks,
+      }),
+      state' = state,
+    })
+
+  /// Alice's huge file never lands (both swaps are lost), leaving chunks, a page and a
+  /// commit named by nothing a ref reaches. gc, run while they are young, spares them;
+  /// once the grace period has passed, the next run deletes the commit, page and chunks.
+  /// @conformance
+  run gcSparesAYoungChunkRun = init
+    .then(begin("alice", ROOT, HUGE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(all {
+      assert(all {
+        state.collector.doomedChunks == Set(),
+        liveKeys(state.bucket.chunks) == Set("k1", "k2"),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcDeleteCommit(HUGE_1))
+    .then(gcListPages)
+    .then(gcDeletePage(HUGE_PAGE_A))
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(all { assert(state.collector.doomedChunks == Set("k1", "k2")), state' = state })
+    .then(gcDeleteChunk("k2"))
+    .then(gcDeleteChunk("k1"))
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.chunks) == Set(),
+        liveKeys(state.bucket.commits) == Set(ROOT),
+        chunksAreStored,
+      }),
+      state' = state,
+    })
+
+  /// A chunk a live commit names outlives the abandoned commit that stored it. Alice's
+  /// huge file (`k1`, `k2`) never lands; bob's (`k1`, `k3`) does. Once all are old, gc
+  /// deletes alice's commit, page and `k2`, and keeps `k1` and `k3`: bob's page names them.
+  /// @conformance
+  run gcKeepsASharedChunkRun = init
+    .then(begin("alice", ROOT, HUGE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(begin("bob", ROOT, HUGE_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcDeleteCommit(HUGE_1))
+    .then(gcListPages)
+    .then(gcDeletePage(HUGE_PAGE_A))
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(all {
+      assert(all {
+        state.collector.liveChunks == Set("k1", "k3"),
+        state.collector.doomedChunks == Set("k2"),
+      }),
+      state' = state,
+    })
+    .then(gcDeleteChunk("k2"))
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.chunks) == Set("k1", "k3"),
+        tip(state.bucket).commit == ["root", "bob"],
+        chunksAreStored,
+        chunkedFilesReadBack,
+      }),
+      state' = state,
+    })
+
+  /// The race the lease closes, for a chunk (dedup). Alice's huge file never lands, but
+  /// her chunks stay; by the time bob writes another sharing `k1` they are old. His upload
+  /// stores `k3` and writes nothing for `k1` (it exists), so `k1` stays old, named by no
+  /// commit a ref reaches. gc starts between his upload and his swap, and waits for his
+  /// lease; once he has landed it marks his commit and, with it, `k1`. Alice's own chunk,
+  /// `k2`, goes.
+  /// @conformance
+  run gcWaitsForAWriterReusingAnOldChunkRun = init
+    .then(begin("alice", ROOT, HUGE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(graceElapses)
+    .then(begin("bob", ROOT, HUGE_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(all {
+      assert(all {
+        state.bucket.young.chunks == Set("k3"),
+        isLive(state.bucket.chunks, "k1"),
+      }),
+      state' = state,
+    })
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(all { assert(state.collector.phase == GcDraining), state' = state })
+    .then(gcCheckLeases)
+    .then(swap("bob", Answered))
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcDeleteCommit(HUGE_1))
+    .then(gcListPages)
+    .then(gcDeletePage(HUGE_PAGE_A))
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(gcDeleteChunk("k2"))
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        client(state, "bob").outcome == Published,
+        liveKeys(state.bucket.chunks) == Set("k1", "k3"),
+        chunksAreStored,
+        chunkedFilesReadBack,
+      }),
+      state' = state,
+    })
+
+  /// An abandoned commit of alice's leaves its chunks behind. gc deletes the commit and
+  /// page, then stalls: by the time it lists `chunks/` its lease is too old to pass the
+  /// check before a chunk delete. It gives up with the chunks stored. (Without the check on
+  /// chunk deletes gc deleted chunks of a commit a writer could have reused since.)
+  /// @conformance
+  run staleGcRefusesToDeleteChunkRun = init
+    .then(begin("alice", ROOT, HUGE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Dropped))
+    .then(recheck("alice"))
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcDeleteCommit(HUGE_1))
+    .then(gcListPages)
+    .then(gcDeletePage(HUGE_PAGE_A))
+    .then(gcListPacks)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(gcListChunks)
+    .then(all {
+      assert(all {
+        state.collector.phase == GcSweepingChunks,
+        state.collector.doomedChunks == Set(),
+        liveKeys(state.bucket.chunks) == Set("k1", "k2"),
+      }),
+      state' = state,
+    })
+    .then(gcDone)
+
+  // ---------- reuse ----------
+
+  /// Alice writes a big file; bob, based on her commit, writes the same content at
+  /// another path (a move or copy: his base has it). He reuses her pack: his page names it
+  /// for `b` and he stores no pack. A huge file's chunks are named by its content, so
+  /// reusing one stores no chunk either. gc keeps her pack: both pages name it.
+  /// @conformance
+  run reuseNamesTheBasePackRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", BIG_1, Map("b" -> "p1")))
+    .then(all { assert(client(state, "bob").reuse == Map("b" -> ["alice"])), state' = state })
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all {
+      assert(all {
+        client(state, "bob").outcome == Published,
+        body(state.bucket.commits, BIG_1.append("bob")).locs == Map("a" -> ["alice"], "b" -> ["alice"]),
+        liveKeys(state.bucket.packs) == Set(["alice"]),
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.packs) == Set(["alice"]),
+        packsAreStored,
+      }),
+      state' = state,
+    })
+
+  /// Bob's reused pack (alice's) is what his page names for `b` even when he lands on a
+  /// newer head: carol rewrote `a` meanwhile (her own pack), and bob's replay keeps carol's
+  /// `a` and alice's pack for `b`.
+  /// @conformance
+  run reuseSurvivesAReplayRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", BIG_1, Map("b" -> "p1")))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(begin("carol", BIG_1, BIG_A2))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("bob"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(all {
+      assert(all {
+        client(state, "bob").outcome == Published,
+        tip(state.bucket).commit == BIG_1.append("carol").append("bob"),
+        body(state.bucket.commits, tip(state.bucket).commit).locs == Map("a" -> ["carol"], "b" -> ["alice"]),
+        treeOf(state.bucket, tip(state.bucket).commit) == Map("a" -> "p2", "b" -> "p1"),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["carol"]),
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
 }

@@ -179,6 +179,13 @@ module pail {
     state' = gcDeletePackNext(state, k),
   }
 
+  action gcListChunks: bool = all { gcListChunksCan(state), state' = gcListChunksNext(state) }
+
+  action gcDeleteChunk(k: str): bool = all {
+    gcDeleteChunkCan(state, k),
+    state' = gcDeleteChunkNext(state, k),
+  }
+
   action gcDone: bool = all { gcDoneCan(state), state' = gcDoneNext(state) }
 
   action graceElapses: bool = state' = graceElapsesNext(state)
@@ -206,6 +213,9 @@ module pail {
     Map("a" -> "p1"),
     Map("a" -> "p2"),
     Map("b" -> "p3"),
+    Map("a" -> "h1"),
+    Map("b" -> "h2"),
+    Map("b" -> "p1"),
   )
 
   /// One draw in `SLOW` (four times that in `contendStep`) lets time pass, and two let a
@@ -272,6 +282,7 @@ module pail {
       gcListCommits,
       gcListPages,
       gcListPacks,
+      gcListChunks,
       gcDone,
       graceElapses,
       all { slow == 1, tick },
@@ -286,6 +297,8 @@ module pail {
       gcDeletePage(t),
       nondet k = state.collector.doomedPacks.union(Set(ROOT)).oneOf()
       gcDeletePack(k),
+      nondet ck = state.collector.doomedChunks.union(Set("")).oneOf()
+      gcDeleteChunk(ck),
     }
   }
 
@@ -363,6 +376,19 @@ module pail {
   val gcSparesNamedPacks: bool =
     state.collector.phase == GcSweepingPacks
       implies state.collector.doomedPacks.intersect(packsNamedBy(state.bucket, refsReach(state.bucket))) == Set()
+
+  /// Every chunk the pages of the commits a ref (or a record) reaches name is stored.
+  val chunksAreStored: bool =
+    chunksStored(state.bucket, refsReach(state.bucket).union(reflogReaches(state.bucket)))
+
+  /// Every huge file reads back its content: each chunk it names is stored with its bytes.
+  val chunkedFilesReadBack: bool =
+    chunksHold(state.bucket, refsReach(state.bucket).union(reflogReaches(state.bucket)))
+
+  /// gc sweeping chunks has doomed none that a commit a ref reaches names.
+  val gcSparesNamedChunks: bool =
+    state.collector.phase == GcSweepingChunks
+      implies state.collector.doomedChunks.intersect(chunksNamedBy(state.bucket, refsReach(state.bucket))) == Set()
 
   /// Every move of the ref keeps what it named before, unless a rewrite's record names
   /// the move: nothing published is overwritten unaccounted for.
@@ -520,6 +546,9 @@ module pail {
     packsAreStored,
     relocateKeepsContent,
     gcSparesNamedPacks,
+    chunksAreStored,
+    chunkedFilesReadBack,
+    gcSparesNamedChunks,
     refOnlyMovesForward,
     publishedIsOnBranch,
     recentIsTruthful,
@@ -535,4 +564,29 @@ module pail {
     locateKeepsChanges,
     knownHeadsAreTrue,
   }
+
+  // ---------- witnesses ----------
+  //
+  // Each is the negation of a state that matters, to run as an invariant that must be
+  // violated (`npm run witness`): simulation that never gets there checks nothing about it.
+
+  /// gc has deleted a pack.
+  val gcNeverDeletesAPack: bool = state.bucket.packs.keys().forall(k => isLive(state.bucket.packs, k))
+
+  /// gc has deleted a chunk.
+  val gcNeverDeletesAChunk: bool = state.bucket.chunks.keys().forall(k => isLive(state.bucket.chunks, k))
+
+  /// A client published a commit that reused a pack or chunks its base already had.
+  val nobodyPublishesAReuse: bool =
+    CLIENTS.forall(c => not(client(state, c).outcome == Published and client(state, c).reuse != Map()))
+
+  /// The branch has a huge file.
+  val branchHasNoHugeFile: bool = branch(state.bucket).forall(x => chunksOf(state.bucket, x) == Set())
+
+  /// Two commits of the branch's history store the same chunk (one chunk, two files or
+  /// versions).
+  val noChunkIsShared: bool =
+    branch(state.bucket).forall(x => branch(state.bucket).forall(y =>
+      x == y or chunksOf(state.bucket, x).intersect(chunksOf(state.bucket, y)) == Set()
+    ))
 }

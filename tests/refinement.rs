@@ -33,7 +33,7 @@ use pail::enc::Reader;
 use pail::hash::Hash;
 use pail::manifest::{Kind, Loc, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
-use pail::pack::decode_blob;
+use pail::pack::{CHUNK_MAX, chunk_spans, decode_blob};
 use pail::repo::{
     CommitFields, CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead,
     MovedError, Repo, RewriteRequest, Upload,
@@ -131,7 +131,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        65,
+        72,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -159,6 +159,8 @@ enum Request {
     DeletePage,
     ListPacks,
     DeletePack,
+    ListChunks,
+    DeleteChunk,
     /// gc releasing its lease: its last request.
     DeleteLease,
     /// A holder's refresher rewriting its lease, which the store applies on release...
@@ -328,6 +330,7 @@ impl Gate {
             "commits" => Some(Request::ListCommits),
             "pages" => Some(Request::ListPages),
             "packs" => Some(Request::ListPacks),
+            "chunks" => Some(Request::ListChunks),
             _ => None,
         }
     }
@@ -339,6 +342,8 @@ impl Gate {
             Some(Request::DeletePage)
         } else if key.starts_with("packs/") {
             Some(Request::DeletePack)
+        } else if key.starts_with("chunks/") {
+            Some(Request::DeleteChunk)
         } else if key.starts_with("locks/") && self.actor == GC {
             Some(Request::DeleteLease)
         } else if key.starts_with("intents/") {
@@ -500,7 +505,9 @@ impl ObjectStore for Gate {
         opts: PutOptions,
     ) -> StoreResult<PutResult> {
         let key = location.as_ref();
-        if (key.starts_with("pages/") || key.starts_with("packs/")) && !self.free {
+        if (key.starts_with("pages/") || key.starts_with("packs/") || key.starts_with("chunks/"))
+            && !self.free
+        {
             let wait = {
                 let mut u = self.uploads.lock().unwrap();
                 if u.open {
@@ -606,7 +613,10 @@ impl ObjectStore for Gate {
         let request = prefix.and_then(|p| Gate::list_request(p.as_ref()));
         let ages = matches!(
             request,
-            Some(Request::ListCommits) | Some(Request::ListPages) | Some(Request::ListPacks)
+            Some(Request::ListCommits)
+                | Some(Request::ListPages)
+                | Some(Request::ListPacks)
+                | Some(Request::ListChunks)
         );
         let stamps = request == Some(Request::ListLeases);
         let gate = self.clone();
@@ -687,8 +697,78 @@ fn is_big(content: &str) -> bool {
     matches!(content, "p1" | "p2" | "p3")
 }
 
-/// A model content as the file's bytes: a big one is padded past `INLINE_MAX`.
+/// Contents the model stores as chunks (`HUGE`): `CHUNK_THRESHOLD` and more.
+fn is_huge(content: &str) -> bool {
+    matches!(content, "h1" | "h2")
+}
+
+/// The chunks a huge content splits into, in file order (`CHUNKS` in `bucket.qnt`).
+fn chunks_of(content: &str) -> &'static [&'static str] {
+    match content {
+        "h1" => &["k1", "k2"],
+        "h2" => &["k1", "k3"],
+        _ => &[],
+    }
+}
+
+/// A model chunk's bytes. Constant bytes are never a cut point of the content-defined
+/// chunker, so a chunk is cut at its maximum or at the file's end: `k1` is a full chunk,
+/// the others the tail of a file. Checked against `chunk_spans` (`check_chunking`).
+fn chunk_bytes(name: &str) -> Vec<u8> {
+    match name {
+        "k1" => vec![0x11; CHUNK_MAX as usize],
+        "k2" => vec![0x22; 1 << 20],
+        "k3" => vec![0x33; 1 << 20],
+        other => panic!("no chunk {other}"),
+    }
+}
+
+/// Each model chunk by the hash of its bytes (the name of its object).
+fn chunk_names() -> &'static HashMap<Hash, &'static str> {
+    static NAMES: std::sync::OnceLock<HashMap<Hash, &'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        ["k1", "k2", "k3"]
+            .into_iter()
+            .map(|k| (Hash::of(&chunk_bytes(k)), k))
+            .collect()
+    })
+}
+
+/// Each huge content by the hash of its bytes (a file entry's `hash`).
+fn huge_names() -> &'static HashMap<Hash, &'static str> {
+    static NAMES: std::sync::OnceLock<HashMap<Hash, &'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        ["h1", "h2"]
+            .into_iter()
+            .map(|c| (Hash::of(&real(c)), c))
+            .collect()
+    })
+}
+
+/// The real chunker splits each huge content into the chunks the model says.
+fn check_chunking() -> Result<(), String> {
+    for content in ["h1", "h2"] {
+        let want: Vec<usize> = chunks_of(content)
+            .iter()
+            .map(|k| chunk_bytes(k).len())
+            .collect();
+        let got: Vec<usize> = chunk_spans(&real(content)).iter().map(|s| s.1).collect();
+        if got != want {
+            return Err(format!("{content} chunks as {got:?}, the model says {want:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// A model content as the file's bytes: a big one is padded past `INLINE_MAX`, a huge one
+/// is its chunks' bytes one after the other.
 fn real(content: &str) -> Vec<u8> {
+    if is_huge(content) {
+        return chunks_of(content)
+            .iter()
+            .flat_map(|k| chunk_bytes(k))
+            .collect();
+    }
     let mut bytes = content.as_bytes().to_vec();
     if is_big(content) {
         bytes.push(b'\n');
@@ -923,6 +1003,8 @@ struct Lander {
 #[derive(Default)]
 struct Writer {
     base: Option<Id>,
+    /// The paths its delta writes with content its base has elsewhere: `Client.reuse`.
+    reuse: BTreeMap<String, Id>,
     delta: Tree,
     progress: Progress,
     /// Its last swap went unanswered, so its next ref read is a recheck.
@@ -958,6 +1040,7 @@ struct Young {
     pages: BTreeSet<PageKey>,
     commits: BTreeSet<Id>,
     packs: BTreeSet<Id>,
+    chunks: BTreeSet<String>,
 }
 
 /// The collector's run, as read off its requests.
@@ -969,9 +1052,11 @@ struct Collector {
     progress: Progress,
     marked: Option<(BTreeSet<Id>, BTreeSet<PageKey>)>,
     marked_packs: BTreeSet<Id>,
+    marked_chunks: BTreeSet<String>,
     doomed_commits: BTreeSet<String>,
     doomed_pages: BTreeSet<String>,
     doomed_packs: BTreeSet<String>,
+    doomed_chunks: BTreeSet<String>,
     spared: Option<Young>,
 }
 
@@ -1089,11 +1174,24 @@ impl Harness {
         repo
     }
 
-    /// `tree`'s files as a delta, and the pack to upload with it (none if all are small
-    /// enough to inline). Writing a big file the tree already has is a repack: the delta
-    /// names the file in a pack of the writer's own. A pack holds a decoy blob of the
-    /// writer's too, so two writers' packs of one content are not one object.
-    fn files(&self, tree: &Tree, actor: &str) -> Result<(Delta, Vec<Upload>), String> {
+    /// `tree`'s files as a delta, the objects to upload with it (none if all are small
+    /// enough to inline), and the paths whose content `base` has elsewhere, each with the
+    /// pack the base names for it (`reuse` in `bucket.qnt`: content already stored is
+    /// reused by hash, `Worktree::commit`). Writing a big file the tree already has is a
+    /// repack: the delta names the file in a pack of the writer's own, reusing nothing. A
+    /// pack holds a decoy blob of the writer's too, so two writers' packs of one content are
+    /// not one object.
+    #[allow(clippy::type_complexity)]
+    fn files(
+        &self,
+        tree: &Tree,
+        actor: &str,
+        base: Option<&Id>,
+    ) -> Result<(Delta, Vec<Upload>, BTreeMap<String, Id>), String> {
+        let (reuse, reused) = match base {
+            Some(base) => self.reuse_of(base, tree)?,
+            None => Default::default(),
+        };
         let mut inputs: Vec<FileInput> = tree
             .iter()
             .map(|(path, data)| FileInput {
@@ -1102,7 +1200,10 @@ impl Harness {
                 data: Bytes::from(real(data)),
             })
             .collect();
-        if tree.values().any(|v| is_big(v)) {
+        if tree
+            .iter()
+            .any(|(p, v)| is_big(v) && !reused.contains_key(p))
+        {
             let mut decoy = format!("decoy:{actor}\n").into_bytes();
             decoy.extend(std::iter::repeat_n(b'.', 80));
             inputs.push(FileInput {
@@ -1111,13 +1212,62 @@ impl Harness {
                 data: Bytes::from(decoy),
             });
         }
-        let (entries, uploads) = self.observer.prepare_files(&inputs, &HashMap::new());
+        let (entries, uploads) = self.observer.prepare_files(&inputs, &reuse);
         let delta = entries
             .into_iter()
             .filter(|e| e.path != DECOY)
             .map(|e| (e.path.clone(), Some(e)))
             .collect();
-        Ok((delta, uploads))
+        Ok((delta, uploads, reused))
+    }
+
+    /// What a writer based on commit `base` reuses for `delta` (`reuseOf` in `bucket.qnt`):
+    /// for each big or huge path it changes to content another path of the base holds, that
+    /// path's location, found by the content's hash as `Worktree::commit` does, and the
+    /// model's name of it (a big file's pack, a huge file's `root`). Only a base the branch
+    /// reaches is one a working copy has read.
+    #[allow(clippy::type_complexity)]
+    fn reuse_of(
+        &self,
+        base: &Id,
+        delta: &Tree,
+    ) -> Result<(HashMap<Hash, Loc>, BTreeMap<String, Id>), String> {
+        let (head, _) = self.read_ref()?;
+        if !self.marked(head)?.0.contains(base) {
+            return Ok(Default::default());
+        }
+        let h = self.hashes.get(base).ok_or(format!("no commit {base:?}"))?;
+        let root = self
+            .rt()
+            .block_on(self.observer.commit_obj(h))
+            .map_err(|e| e.to_string())?
+            .root;
+        let base_tree = self.tree(&format!("pages/{}", root.hex()))?;
+        let entries = self
+            .rt()
+            .block_on(self.observer.entries(root))
+            .map_err(|e| e.to_string())?;
+        let (mut reuse, mut reused) = (HashMap::new(), BTreeMap::new());
+        for (p, v) in delta {
+            if !(is_big(v) || is_huge(v)) || base_tree.get(p) == Some(v) {
+                continue;
+            }
+            let Some(q) = base_tree.iter().find(|(q, w)| *q != p && *w == v) else {
+                continue;
+            };
+            let e = entries
+                .iter()
+                .find(|e| e.path == *q.0)
+                .ok_or(format!("the base has no entry {}", q.0))?;
+            let name = match &e.loc {
+                Loc::Pack { pack, .. } => self.pack_name(pack)?,
+                Loc::Chunks(_) => vec!["root".to_owned()],
+                other => return Err(format!("a reused file is at {other:?}")),
+            };
+            reuse.insert(e.hash, e.loc.clone());
+            reused.insert(p.clone(), name);
+        }
+        Ok((reuse, reused))
     }
 
     fn request(&self, by: &str, base: Option<Hash>, delta: Delta) -> CommitRequest {
@@ -1192,6 +1342,30 @@ impl Harness {
         Ok((ids, trees))
     }
 
+    /// What gc marks, given the branch's head: the commits the refs (every stack too: read
+    /// past the gate, nothing moves them) and the reflog's records (their old and new tips)
+    /// reach, and their pages.
+    fn marked(&self, head: Hash) -> Result<(BTreeSet<Id>, BTreeSet<PageKey>), String> {
+        let (mut ids, mut trees) = self.reach(head)?;
+        for (branch, data) in self.live("refs/")? {
+            if branch != BRANCH {
+                let v: RefValue = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+                let (i, t) = self.reach(v.commit)?;
+                ids.extend(i);
+                trees.extend(t);
+            }
+        }
+        for (_, data) in self.live("reflog/")? {
+            let r: Rewrite = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+            for h in [r.old, r.new] {
+                let (i, t) = self.reach(h)?;
+                ids.extend(i);
+                trees.extend(t);
+            }
+        }
+        Ok((ids, trees))
+    }
+
     /// The model name of the writer whose intent has `key` (`intents/<branch>/<id>.json`).
     fn intent_writer(&self, id: &str) -> Result<String, String> {
         let id = id
@@ -1239,6 +1413,7 @@ impl Harness {
                         | Request::DeleteCommit
                         | Request::DeletePage
                         | Request::DeletePack
+                        | Request::DeleteChunk
                 ) && let Some(e) = self.refreshers.lock().unwrap().get_mut(&actor)
                 {
                     // A request a passed `Lease::check` let go.
@@ -1340,28 +1515,9 @@ impl Harness {
                 };
                 if actor == GC {
                     let (commit, _) = seen.ok_or("gc's ref read failed")?;
-                    // Then the reflog: every record's old and new tips are roots too.
-                    let (mut ids, mut trees) = self.reach(commit)?;
-                    // Every stack too (read past the gate: nothing moves them).
-                    for (branch, data) in self.live("refs/")? {
-                        if branch != BRANCH {
-                            let v: RefValue =
-                                serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-                            let (i, t) = self.reach(v.commit)?;
-                            ids.extend(i);
-                            trees.extend(t);
-                        }
-                    }
-                    for (_, data) in self.live("reflog/")? {
-                        let r: Rewrite =
-                            serde_json::from_slice(&data).map_err(|e| e.to_string())?;
-                        for h in [r.old, r.new] {
-                            let (i, t) = self.reach(h)?;
-                            ids.extend(i);
-                            trees.extend(t);
-                        }
-                    }
+                    let (ids, trees) = self.marked(commit)?;
                     self.collector.marked_packs = self.packs_named_by(&ids)?;
+                    self.collector.marked_chunks = self.chunks_named_by(&ids)?;
                     self.collector.marked = Some((ids, trees));
                     return Ok(());
                 }
@@ -1512,6 +1668,22 @@ impl Harness {
                 }
                 self.collector.doomed_packs = doomed;
             }
+            Request::ListChunks => {
+                let marked = self.collector.marked_chunks.clone();
+                let young = self.young()?;
+                let spared = self.collector.spared.clone().unwrap_or_default();
+                let mut doomed = BTreeSet::new();
+                for (hex, _) in self.live("chunks/")? {
+                    let name = Self::chunk_name(&Hash::from_hex(&hex).map_err(|e| e.to_string())?)?;
+                    if !marked.contains(&name)
+                        && !young.chunks.contains(&name)
+                        && !spared.chunks.contains(&name)
+                    {
+                        doomed.insert(format!("chunks/{hex}"));
+                    }
+                }
+                self.collector.doomed_chunks = doomed;
+            }
             Request::DeleteCommit => {
                 self.collector.doomed_commits.remove(key);
             }
@@ -1520,6 +1692,9 @@ impl Harness {
             }
             Request::DeletePack => {
                 self.collector.doomed_packs.remove(key);
+            }
+            Request::DeleteChunk => {
+                self.collector.doomed_chunks.remove(key);
             }
             Request::Swap
             | Request::GetIntent
@@ -2116,14 +2291,26 @@ impl Harness {
         let entries = rt
             .block_on(self.observer.entries(h))
             .map_err(|e| e.to_string())?;
+        // A chunked file is named by its hash (its chunks may be gone by the time a page is
+        // read; `chunked_files_read_back` is the model's property of them).
+        let (chunked, plain): (Vec<_>, Vec<_>) = entries
+            .iter()
+            .cloned()
+            .partition(|e| matches!(e.loc, Loc::Chunks(_)));
         let data = rt
-            .block_on(self.observer.read_files(&entries))
+            .block_on(self.observer.read_files(&plain))
             .map_err(|e| e.to_string())?;
-        let tree: Tree = entries
+        let mut tree: Tree = plain
             .iter()
             .zip(data)
             .map(|(e, d)| (e.path.clone(), unpad(&d)))
             .collect();
+        for e in chunked {
+            let content = huge_names()
+                .get(&e.hash)
+                .ok_or_else(|| format!("{} is a chunked file the model does not know", e.path))?;
+            tree.insert(e.path, (*content).to_owned());
+        }
         self.trees
             .lock()
             .unwrap()
@@ -2192,6 +2379,38 @@ impl Harness {
             .get(pack)
             .cloned()
             .ok_or_else(|| format!("pack {} is named by no commit", pack.short()))
+    }
+
+    /// A chunk object's model name, from the hash in its key (`chunks/<hash>`).
+    fn chunk_name(hash: &Hash) -> Result<String, String> {
+        chunk_names()
+            .get(hash)
+            .map(|k| (*k).to_owned())
+            .ok_or_else(|| format!("chunk {} is no chunk of the model", hash.short()))
+    }
+
+    /// The chunks the pages of the commits `ids` name (`Loc::Chunks`).
+    fn chunks_named_by(&self, ids: &BTreeSet<Id>) -> Result<BTreeSet<String>, String> {
+        let mut chunks = BTreeSet::new();
+        for id in ids {
+            let h = self.hashes.get(id).ok_or(format!("no commit {id:?}"))?;
+            let c = self
+                .rt()
+                .block_on(self.observer.commit_obj(h))
+                .map_err(|e| e.to_string())?;
+            let entries = self
+                .rt()
+                .block_on(self.observer.entries(c.root))
+                .map_err(|e| e.to_string())?;
+            for e in entries {
+                if let Loc::Chunks(cs) = &e.loc {
+                    for c in cs {
+                        chunks.insert(Self::chunk_name(&c.hash)?);
+                    }
+                }
+            }
+        }
+        Ok(chunks)
     }
 
     /// A page as the model keys it: its tree and the pack of each big file.
@@ -2283,6 +2502,9 @@ impl Harness {
                 out.commits.insert(self.name(&h)?);
             } else if let Some(name) = key.strip_prefix("packs/") {
                 out.packs.insert(self.pack_name(&Self::pack_hash(name)?)?);
+            } else if let Some(hex) = key.strip_prefix("chunks/") {
+                let h = Hash::from_hex(hex).map_err(|e| e.to_string())?;
+                out.chunks.insert(Self::chunk_name(&h)?);
             }
         }
         Ok(out)
@@ -2356,6 +2578,15 @@ impl Harness {
                 set(contents.into_iter().map(RuntimeValue::Text)),
             ))
         })?;
+        // A chunk's body is the name of the bytes it holds (none if they are no chunk's).
+        let chunks = self.space("chunks/", |hex, data| {
+            let name = Self::chunk_name(&Hash::from_hex(hex).map_err(|e| e.to_string())?)?;
+            let held = decode_blob(data, 2 * CHUNK_MAX as u64)
+                .ok()
+                .and_then(|raw| chunk_names().get(&Hash::of(&raw)).copied())
+                .unwrap_or_default();
+            Ok((RuntimeValue::Text(name), RuntimeValue::Text(held.to_owned())))
+        })?;
         self.read_ref()?;
         let mut refs = BTreeMap::new();
         for (branch, data) in self.live("refs/")? {
@@ -2400,6 +2631,7 @@ impl Harness {
             ("intents", RuntimeValue::Map(intents)),
             ("reflog", RuntimeValue::Map(reflog)),
             ("packs", RuntimeValue::Map(packs)),
+            ("chunks", RuntimeValue::Map(chunks)),
             ("young", Self::young_value(&young)),
         ]))
     }
@@ -2409,6 +2641,10 @@ impl Harness {
             ("pages", set(young.pages.iter().map(Self::page_value))),
             ("commits", set(young.commits.iter().map(id_value))),
             ("packs", set(young.packs.iter().map(id_value))),
+            (
+                "chunks",
+                set(young.chunks.iter().cloned().map(RuntimeValue::Text)),
+            ),
         ])
     }
 
@@ -2721,6 +2957,15 @@ impl Harness {
             ),
             ("known", self.known_value(w.known.as_ref())?),
             (
+                "reuse",
+                RuntimeValue::Map(
+                    w.reuse
+                        .iter()
+                        .map(|(p, id)| (RuntimeValue::Text(p.clone()), id_value(id)))
+                        .collect(),
+                ),
+            ),
+            (
                 "foundAt",
                 self.lineage_value(w.found.as_ref().map_or(&Lineage::default(), |(_, l)| l))?,
             ),
@@ -2737,7 +2982,8 @@ impl Harness {
             (true, Some(Request::ListCommits)) => "GcMarked",
             (true, Some(Request::DeleteCommit | Request::ListPages)) => "GcSweepingCommits",
             (true, Some(Request::DeletePage | Request::ListPacks)) => "GcSweepingPages",
-            (true, Some(Request::DeletePack | Request::DeleteLease)) => "GcSweepingPacks",
+            (true, Some(Request::DeletePack | Request::ListChunks)) => "GcSweepingPacks",
+            (true, Some(Request::DeleteChunk | Request::DeleteLease)) => "GcSweepingChunks",
             (true, other) => return Err(format!("gc is between requests ({other:?})")),
         };
         let (live_commits, live_pages) = c.marked.clone().unwrap_or_default();
@@ -2770,14 +3016,30 @@ impl Harness {
                 Ok(id_value(&self.pack_name(&Self::pack_hash(name)?)?))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let doomed_chunks = c
+            .doomed_chunks
+            .iter()
+            .filter(|_| !given_up)
+            .map(|k| {
+                let hex = k.trim_start_matches("chunks/");
+                Ok(RuntimeValue::Text(Self::chunk_name(
+                    &Hash::from_hex(hex).map_err(|e| e.to_string())?,
+                )?))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(record([
             ("phase", RuntimeValue::Text(phase.to_owned())),
             ("liveCommits", set(live_commits.iter().map(id_value))),
             ("livePages", set(live_pages.iter().map(Self::page_value))),
             ("livePacks", set(c.marked_packs.iter().map(id_value))),
+            (
+                "liveChunks",
+                set(c.marked_chunks.iter().cloned().map(RuntimeValue::Text)),
+            ),
             ("doomedCommits", set(doomed_commits)),
             ("doomedPages", set(doomed_pages)),
             ("doomedPacks", set(doomed_packs)),
+            ("doomedChunks", set(doomed_chunks)),
             ("spared", Self::young_value(&spared)),
         ]))
     }
@@ -2905,6 +3167,7 @@ impl generated::Implementation for Harness {
             refresh_requests: 0,
             lease_sent: Mutex::default(),
         };
+        check_chunking()?;
         let bucket = field(initial, "bucket")?;
         let RuntimeValue::Map(refs) = field(bucket, "refs")? else {
             return Err("expected a map of refs".into());
@@ -2919,9 +3182,10 @@ impl generated::Implementation for Harness {
         let root_commit = commits
             .get(&id_value(&root))
             .ok_or("the model's head is not among its commits")?;
-        let (delta, uploads) = h.files(
+        let (delta, uploads, _) = h.files(
             &tree_of(field(field(root_commit, "body")?, "tree")?)?,
             &root[0],
+            None,
         )?;
         if !uploads.is_empty() {
             return Err("the model's root must be small enough to inline".into());
@@ -2969,10 +3233,11 @@ impl generated::Implementation for Harness {
             .hashes
             .get(&base)
             .ok_or_else(|| format!("no commit {base:?}"))?;
-        let (files, uploads) = self.files(&delta, &name)?;
+        let (files, uploads, reuse) = self.files(&delta, &name, Some(&base))?;
         let req = self.request(&name, Some(base_hash), files);
         self.spawn_commit(&name, req, uploads, None);
         let w = self.writer(&name)?;
+        w.reuse = reuse;
         w.base = Some(base);
         w.delta = delta;
         w.found = None;
@@ -2992,11 +3257,12 @@ impl generated::Implementation for Harness {
             .known
             .clone()
             .ok_or(format!("{from} has no known head"))?;
-        let (files, uploads) = self.files(&delta, &name)?;
-        let req = self.request(&name, Some(k.commit), files);
         let seen = self.known_seen(&k)?;
+        let (files, uploads, reuse) = self.files(&delta, &name, Some(&seen.0))?;
+        let req = self.request(&name, Some(k.commit), files);
         self.spawn_commit(&name, req, uploads, Some(k.clone()));
         let w = self.writer(&name)?;
+        w.reuse = reuse;
         w.base = Some(seen.0.clone());
         w.delta = delta;
         w.seen = Some(seen);
@@ -3236,7 +3502,7 @@ impl generated::Implementation for Harness {
         let name = text(c)?.to_owned();
         let delta = tree_of(delta)?;
         let (tip, _) = Harness::read_ref(self)?;
-        let (files, uploads) = self.files(&delta, &name)?;
+        let (files, uploads, _) = self.files(&delta, &name, None)?;
         if !uploads.is_empty() {
             return Err("a stack's files must be small enough to inline".into());
         }
@@ -3450,6 +3716,21 @@ impl generated::Implementation for Harness {
             .ok_or_else(|| format!("no pack {id:?}"))?;
         let key = format!("packs/{}.pack", hash.hex());
         self.release(GC, Request::DeletePack, Some(&key), Delivery::Answered)
+    }
+
+    fn gc_list_chunks(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.release(GC, Request::ListChunks, None, Delivery::Answered)
+    }
+
+    fn gc_delete_chunk(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = text(arguments.first().ok_or("gcDeleteChunk takes a chunk")?)?;
+        let hash = chunk_names()
+            .iter()
+            .find(|(_, k)| **k == name)
+            .map(|(h, _)| *h)
+            .ok_or_else(|| format!("no chunk {name}"))?;
+        let key = pail::pack::chunk_key(&hash);
+        self.release(GC, Request::DeleteChunk, Some(&key), Delivery::Answered)
     }
 
     fn gc_done(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {

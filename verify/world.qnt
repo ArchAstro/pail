@@ -114,12 +114,16 @@ module world {
     foundAt: Lineage,
     // The head its last publish left it (`Known`), if any.
     known: Known,
+    // The big or huge paths its delta writes with content its base already has elsewhere:
+    // each to the pack its base's page names for it (the pack is reused, nothing stored).
+    // Fixed when it begins, before any lease (`Worktree::commit` prepares the files).
+    reuse: str -> PackId,
   }
 
   // ---------- the collector (`pail gc`) ----------
 
   /// Idle; holding its exclusive lease, waiting for writers' leases to go; holding it alone;
-  /// marked what the refs reach; deleting unreachable old commits, then pages, then packs.
+  /// marked what the refs reach; deleting unreachable old commits, then pages, then packs, then chunks.
   type GcPhase =
     | GcIdle
     | GcDraining
@@ -128,6 +132,7 @@ module world {
     | GcSweepingCommits
     | GcSweepingPages
     | GcSweepingPacks
+    | GcSweepingChunks
 
   type Collector = {
     phase: GcPhase,
@@ -135,10 +140,12 @@ module world {
     liveCommits: Set[CommitId],
     livePages: Set[Page],
     livePacks: Set[PackId],
+    liveChunks: Set[str],
     // Listed as unreachable and old, not yet deleted.
     doomedCommits: Set[CommitId],
     doomedPages: Set[Page],
     doomedPacks: Set[PackId],
+    doomedChunks: Set[str],
     // Young when it took `now` (at its first listing): its cutoff for every listing.
     spared: Young,
   }
@@ -253,6 +260,7 @@ module world {
     found: ROOT,
     foundAt: NO_LINEAGE,
     known: NO_KNOWN,
+    reuse: Map(),
   }
 
   pure val GC_IDLE: Collector = {
@@ -260,10 +268,12 @@ module world {
     liveCommits: Set(),
     livePages: Set(),
     livePacks: Set(),
+    liveChunks: Set(),
     doomedCommits: Set(),
     doomedPages: Set(),
     doomedPacks: Set(),
-    spared: { pages: Set(), commits: Set(), packs: Set() },
+    doomedChunks: Set(),
+    spared: { pages: Set(), commits: Set(), packs: Set(), chunks: Set() },
   }
 
   pure val NO_TIMING: Timing = { running: false, refreshed: 0, done: 0, inflight: false, sent: 0, landed: false, checked: 0 }
@@ -343,6 +353,7 @@ module world {
       col.phase == GcSweepingCommits and col.doomedCommits != Set(),
       col.phase == GcSweepingPages and col.doomedPages != Set(),
       col.phase == GcSweepingPacks and col.doomedPacks != Set(),
+      col.phase == GcSweepingChunks and col.doomedChunks != Set(),
     }
 
   /// The name of the writer or intent whose change commit `id` makes (a rewrite's mark

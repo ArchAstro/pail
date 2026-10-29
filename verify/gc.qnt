@@ -1,8 +1,9 @@
 // -*- mode: Bluespec; -*-
 /// `pail gc` (`gc::gc`): take the exclusive lease, wait for every writer's lease to go,
 /// then mark what the refs reach and, for commits and then pages, list the unreachable
-/// objects older than the grace period and delete them one by one (commits, pages, then
-/// packs: a pack goes only if no marked page names it). Each step is one phase of requests.
+/// objects older than the grace period and delete them one by one (commits, pages, packs,
+/// then chunks: a pack or chunk goes only if no marked page names it). Each step is one
+/// phase of requests.
 ///
 /// The lease is what makes this safe: a writer can reuse an object that is already stored
 /// without rewriting it (`put_new` of an existing object writes nothing), so an object's
@@ -14,8 +15,10 @@
 ///   GcIdle ─lease─▶ GcDraining ─checkLeases (none left)─▶ GcLocked ─mark─▶ GcMarked ─listCommits─▶ GcSweepingCommits ─deleteCommit(id)*─┐
 ///      ▲                                                                       │
 ///      │      GcSweepingPages ◀─ listPages ◀─────────────────────────────────────────────┘
-///      │           │ deletePage(t)*
-///      └── done (release) ◀─ deletePack(k)* ◀─ GcSweepingPacks ◀─ listPacks
+///      │           │ deletePage(t)*, listPacks
+///      │           ▼
+///      │      GcSweepingPacks ─deletePack(k)*─▶ listChunks ─▶ GcSweepingChunks ─deleteChunk(k)*─┐
+///      └── done (release) ◀────────────────────────────────────────────────────────────────────┘
 /// ```
 ///
 /// Time is abstract: `graceElapses` makes every object old.
@@ -44,7 +47,7 @@ module gc {
     else holding({ ...s, collector: { ...s.collector, phase: GcLocked } }, GC)
 
   /// Read the refs, then every reflog record, and walk what they reach (commits, then each
-  /// commit's root page, then the packs its page names): a rewrite's old history stays,
+  /// commit's root page, then the packs and chunks its page names): a rewrite's old history stays,
   /// for successor walks and undo.
   pure def gcMarkCan(s: State): bool = s.collector.phase == GcLocked
 
@@ -56,6 +59,7 @@ module gc {
       liveCommits: refsReach(s.bucket).union(reflogReaches(s.bucket)),
       livePages: refsReach(s.bucket).union(reflogReaches(s.bucket)).map(id => pageOf(s.bucket, id)),
       livePacks: packsNamedBy(s.bucket, refsReach(s.bucket).union(reflogReaches(s.bucket))),
+      liveChunks: chunksNamedBy(s.bucket, refsReach(s.bucket).union(reflogReaches(s.bucket))),
     },
   }
 
@@ -137,8 +141,34 @@ module gc {
     collector: { ...s.collector, doomedPacks: s.collector.doomedPacks.exclude(Set(k)) },
   })
 
-  pure def gcDoneCan(s: State): bool =
+  /// List `chunks/` once every doomed pack is gone.
+  pure def gcListChunksCan(s: State): bool =
     s.collector.phase == GcSweepingPacks and s.collector.doomedPacks == Set()
+
+  pure def gcListChunksNext(s: State): State = gcGuarded({
+    ...s,
+    collector: {
+      ...s.collector,
+      phase: GcSweepingChunks,
+      doomedChunks: liveKeys(s.bucket.chunks).filter(k =>
+        not(s.collector.liveChunks.contains(k))
+          and not(s.collector.spared.chunks.contains(k))
+          and not(s.bucket.young.chunks.contains(k))
+      ),
+    },
+  })
+
+  pure def gcDeleteChunkCan(s: State, k: str): bool =
+    s.collector.phase == GcSweepingChunks and s.collector.doomedChunks.contains(k)
+
+  pure def gcDeleteChunkNext(s: State, k: str): State = gcGuarded({
+    ...s,
+    bucket: { ...s.bucket, chunks: deleted(s.bucket.chunks, k) },
+    collector: { ...s.collector, doomedChunks: s.collector.doomedChunks.exclude(Set(k)) },
+  })
+
+  pure def gcDoneCan(s: State): bool =
+    s.collector.phase == GcSweepingChunks and s.collector.doomedChunks == Set()
 
   pure def gcDoneNext(s: State): State =
     notHolding({ ...s, bucket: unleased(s.bucket, GC), collector: GC_IDLE }, GC)
@@ -152,10 +182,11 @@ module gc {
         ...s,
         collector: {
           ...s.collector,
-          phase: GcSweepingPacks,
+          phase: GcSweepingChunks,
           doomedCommits: Set(),
           doomedPages: Set(),
           doomedPacks: Set(),
+          doomedChunks: Set(),
         },
       })
     else s
@@ -164,17 +195,18 @@ module gc {
   /// lease, not the grace period, keeps gc from deleting what a commit needs.
   pure def graceElapsesNext(s: State): State = {
     ...s,
-    bucket: { ...s.bucket, young: { pages: Set(), commits: Set(), packs: Set() } },
+    bucket: { ...s.bucket, young: { pages: Set(), commits: Set(), packs: Set(), chunks: Set() } },
     // Mid-sweep, what is young now was young at `now` or written after it: either way
     // newer than the cutoff. (Before the first listing there is no cutoff yet.)
     collector:
-      if (not(Set(GcSweepingCommits, GcSweepingPages, GcSweepingPacks).contains(s.collector.phase))) s.collector
+      if (not(Set(GcSweepingCommits, GcSweepingPages, GcSweepingPacks, GcSweepingChunks).contains(s.collector.phase))) s.collector
       else {
         ...s.collector,
         spared: {
           pages: s.collector.spared.pages.union(s.bucket.young.pages),
           commits: s.collector.spared.commits.union(s.bucket.young.commits),
           packs: s.collector.spared.packs.union(s.bucket.young.packs),
+          chunks: s.collector.spared.chunks.union(s.bucket.young.chunks),
         },
       },
   }

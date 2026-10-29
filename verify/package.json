@@ -8,7 +8,8 @@
     "compile:store": "quint-refinements compile store_scenarios.qnt --module storeScenarios --compact --artifact store-refinements.json --rust ../tests/store_refinement/generated.rs",
     "check": "npm run compile:publish -- --check && npm run compile:store -- --check && npm run compile:policy -- --check",
     "test": "quint test store_scenarios.qnt --main=storeScenarios --match='Run$' && quint test scenarios.qnt --main=scenarios --match='Run$' && quint test policy_scenarios.qnt --main=policyScenarios --match='Run$'",
-    "simulate": "quint run pail.qnt --main=pail --invariant=safety --max-steps=60 --max-samples=20000 && quint run pail.qnt --main=pail --step=contendStep --invariant=safety --max-steps=60 --max-samples=20000",
+    "simulate": "quint run pail.qnt --main=pail --invariant=safety --max-steps=100 --max-samples=20000 && quint run pail.qnt --main=pail --step=contendStep --invariant=safety --max-steps=60 --max-samples=20000",
+    "witness": "for inv in gcNeverDeletesAPack gcNeverDeletesAChunk branchHasNoHugeFile; do quint run pail.qnt --main=pail --invariant=$inv --max-steps=100 --max-samples=200000 | grep -q '^\\[violation\\]' || { echo \"never reached: $inv\"; exit 1; }; done",
     "compile:policy": "quint-refinements compile policy_scenarios.qnt --module policyScenarios --compact --artifact policy/policy-refinements.json --rust ../tests/policy_refinement/generated.rs --go policy/pailpolicy_refinement_gen_test.go --go-package gateway"
   },
   "devDependencies": {
