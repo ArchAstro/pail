@@ -2470,3 +2470,113 @@ fn plugins_run_from_path() {
     let out = with_path(&["nosuchthing"]).output().unwrap();
     assert!(!out.status.success());
 }
+
+/// `pail pr` end to end through plugin dispatch: create (title from the commit), draft,
+/// comment, review, edit, close/reopen and merge, with the records as documented.
+#[cfg(unix)]
+#[test]
+fn pr_plugin_commands() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("python3 not found; skipping");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    let ext = Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions");
+    let path = format!(
+        "{}:{}",
+        ext.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = |dir: &Path, args: &[&str], author: &str| {
+        let out = cmd(dir, args)
+            .env("PATH", &path)
+            .env("PAIL_AUTHOR", author)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let ok = |dir: &Path, args: &[&str], author: &str| {
+        let (ok, o, e) = run(dir, args, author);
+        assert!(ok, "pail {args:?} failed:\n{o}{e}");
+        o
+    };
+    let alice = "Alice <a@x>";
+    let bob = "Bob <b@x>";
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "w"]);
+    let w = t.join("w");
+    write(&w.join("a.txt"), "a\n");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "base"]);
+    pail(&w, &["switch", "-c", "pr/feat"]);
+
+    // Nothing to propose yet.
+    let (good, _, err) = run(&w, &["pr", "create"], alice);
+    assert!(!good && err.contains("no commits between"), "{err}");
+
+    write(&w.join("b.txt"), "b\n");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "Add b\n\nBecause b is good."]);
+    // Title and body default to the first commit; --draft is kept.
+    let rec: serde_json::Value =
+        serde_json::from_str(&ok(&w, &["pr", "create", "--draft", "--json"], alice)).unwrap();
+    assert_eq!(rec["id"], 1);
+    assert_eq!(rec["title"], "Add b");
+    assert_eq!(rec["body"], "Because b is good.");
+    assert_eq!(
+        (rec["draft"].clone(), rec["base"].clone()),
+        (true.into(), "main".into())
+    );
+    // The record is a plain file on _meta.
+    let raw = pail(&t, &["--store", &store, "cat", "_meta:prs/1.json"]);
+    assert!(raw.contains("\"head\": \"pr/feat\""), "{raw}");
+    let (good, _, err) = run(&w, &["pr", "create"], alice);
+    assert!(!good && err.contains("already open"), "{err}");
+
+    ok(&w, &["pr", "comment", "1", "-m", "ping"], bob);
+    ok(&w, &["pr", "review", "1", "--approve", "-m", "lgtm"], bob);
+    let files = pail(&t, &["--store", &store, "ls", "-r", "_meta:prs"]);
+    assert!(files.contains("prs/1/reviews/Bob.json"), "{files}");
+    assert!(
+        files.contains("-Bob.json") && files.contains("prs/1/comments/"),
+        "{files}"
+    );
+    let view: serde_json::Value =
+        serde_json::from_str(&ok(&w, &["pr", "view", "1", "--json"], alice)).unwrap();
+    assert_eq!(view["comments"][0]["body"], "ping");
+    assert_eq!(view["reviews"][0]["verdict"], "approve");
+
+    // A draft does not merge, even with --force; ready, then policy (no CI file: approvals only).
+    let (good, _, err) = run(&w, &["pr", "merge", "1", "--force"], alice);
+    assert!(!good && err.contains("draft"), "{err}");
+    ok(&w, &["pr", "ready", "1"], alice);
+    ok(&w, &["pr", "edit", "1", "--title", "Add the b file"], alice);
+
+    // Close, reopen, then merge.
+    ok(&w, &["pr", "close", "1", "-m", "wait"], alice);
+    assert!(ok(&w, &["pr", "list"], alice).trim().is_empty());
+    assert!(ok(&w, &["pr", "list", "-s", "closed"], alice).contains("Add the b file"));
+    let (good, _, err) = run(&w, &["pr", "merge", "1"], alice);
+    assert!(!good && err.contains("is closed"), "{err}");
+    ok(&w, &["pr", "reopen", "1"], alice);
+    let diff = ok(&w, &["pr", "diff", "1"], alice);
+    assert!(diff.contains("+++ b/b.txt"), "{diff}");
+    ok(&w, &["pr", "merge", "1"], alice);
+    assert_eq!(pail(&t, &["--store", &store, "cat", "main:b.txt"]), "b\n");
+    let rec: serde_json::Value =
+        serde_json::from_str(&pail(&t, &["--store", &store, "cat", "_meta:prs/1.json"])).unwrap();
+    assert_eq!(rec["state"], "merged");
+    assert!(rec["merged_commit"].is_string() && rec["merged_at"].is_number());
+    assert!(rec["updated"].is_number() && rec["closed_at"].is_null());
+
+    // checkout switches the working copy to the PR's branch.
+    pail(&w, &["switch", "main"]);
+    ok(&w, &["pr", "checkout", "1"], alice);
+    assert!(pail(&w, &["status"]).contains("pr/feat"));
+}
