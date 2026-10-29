@@ -1651,4 +1651,170 @@ module scenarios {
       assert(client(state, "dave").found == BOB_PICKED.append("alice").append("~carol")),
       state' = state,
     })
+
+  // ---------- squash and fixup ----------
+
+  /// Carol's plan melds bob's commit into alice's (`squash`/`fixup`): one commit on the
+  /// root with both changes, each one's successor; nothing dropped.
+  /// @conformance
+  run rebaseSquashRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "squash"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "bob", "&", "alice", "~carol"],
+        treeOf(state.bucket, tip(state.bucket).commit) == Map("a" -> "1", "b" -> "1"),
+        authorsOf(tip(state.bucket).commit) == Set("alice", "bob"),
+        recordOf(state.bucket, 1).successors == Map(
+          ALICE_1 -> ["root", "bob", "&", "alice", "~carol"],
+          BOB_ON_ALICE -> ["root", "bob", "&", "alice", "~carol"],
+        ),
+        recordOf(state.bucket, 1).dropped == Set(),
+        client(state, "carol").outcome == Rewritten,
+      }),
+      state' = state,
+    })
+
+
+  /// A fixup moved down: carol's plan melds alice's commit into bob's, which goes first.
+  /// Bob's change is to `b`, so it applies on the root; the one commit has both.
+  /// @conformance
+  run rebaseSquashUnderRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_B))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "squashUnder"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "alice", "&", "bob", "~carol"],
+        treeOf(state.bucket, tip(state.bucket).commit) == Map("a" -> "1", "b" -> "1"),
+        recordOf(state.bucket, 1).successors == Map(
+          ALICE_1 -> ["root", "alice", "&", "bob", "~carol"],
+          BOB_ON_ALICE -> ["root", "alice", "&", "bob", "~carol"],
+        ),
+      }),
+      state' = state,
+    })
+
+
+  /// Bob's commit rewrites `a` from alice's content: melded into alice's it applies (her
+  /// change comes first in the group), but led by it on the root it does not, a conflict
+  /// before carol leases.
+  /// @conformance
+  run rebaseSquashConflictRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "squashUnder"))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == BOB_ON_ALICE,
+        client(state, "carol").outcome == Conflicted,
+        client(state, "carol").phase == Done,
+      }),
+      state' = state,
+    })
+
+
+  /// The same commits squashed in order apply: alice's `a` first, then bob's over it.
+  /// @conformance
+  run rebaseSquashOverwritesRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "squash"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "bob", "&", "alice", "~carol"],
+        treeOf(state.bucket, tip(state.bucket).commit) == Map("a" -> "2", "b" -> "0"),
+      }),
+      state' = state,
+    })
+
+  /// Bob's commit puts `a` back as the root had it.
+  pure val BOB_REVERTS_A: Delta = Map("a" -> "0")
+
+  /// Carol's plan melds bob's revert into alice's commit: together they change nothing,
+  /// so both are dropped and the branch is the root again.
+  /// @conformance
+  run rebaseSquashEmptyRun = init
+    .then(begin("alice", ROOT, ALICE_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", ALICE_1, BOB_REVERTS_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "squash"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ROOT,
+        recordOf(state.bucket, 1).successors == Map(),
+        recordOf(state.bucket, 1).dropped == Set(ALICE_1, BOB_ON_ALICE),
+        client(state, "carol").outcome == Rewritten,
+      }),
+      state' = state,
+    })
 }

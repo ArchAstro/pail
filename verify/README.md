@@ -276,11 +276,18 @@ now cover combined commits.
 Three rewrites, each its record's `op`, all published by `rewrite_ref`:
 
 1. `rebase`: a client carries out a plan on the tip's commits (`beginRewrite`: reword the
-   tip; `beginRebase`: drop its parent, drop the tip, or swap the two). It reads the ref
-   and builds the plan in memory as `rebase::build` does (each picked commit kept if it
-   still sits on the history so far, else its change checked to apply and written over
-   it, dropped if that changes nothing; a commit that does not apply is a conflict before
-   any lease), then leases and stores the commits it made in one wave.
+   tip; `beginRebase`: drop its parent, drop the tip, swap the two, or meld one into the
+   other: `squash` (the tip into its parent) or `squashUnder` (the parent into the tip,
+   a fixup moved down). It reads the ref and builds the plan in memory as `rebase::build`
+   does (each picked commit kept if it still sits on the history so far, else its change
+   checked to apply and written over it, dropped if that changes nothing; a squash or
+   fixup group is one commit: each member's change, lead first, checked to apply over the
+   tree with the group's changes before it, every member's successor, the group dropped
+   whole if it changes nothing; a commit that does not apply is a conflict before any
+   lease), then leases and stores the commits it made in one wave.
+   A melded commit's id keeps its members' tags (`[.., t, "&", lead, mark]`), so
+   `authorsOf` names every writer whose change it makes; the properties ask
+   `authorsOf(x).contains(c)` where one author used to do.
 2. `undo` (`pail rebase --undo`): `beginUndo` reads the ref and the record its lineage
    names; `RewriteRequest::undo` goes from that record's new tip back to its old one, each
    successor mapped back, and fails if the branch was rewritten since (its lineage moved).
@@ -314,7 +321,16 @@ what is under them).
   undone moves); `rebaseDropParentRun` (a plan dropping a commit, then carrying one
   landed since), `rebaseDropTipRun` (a kept commit reused, nothing stored),
   `rebaseReorderRun`, `rebaseConflictRun` (a plan's commit does not apply: nothing
-  leased), `rebaseEmptyRun` (commits whose changes are already there dropped as empty).
+  leased), `rebaseEmptyRun` (commits whose changes are already there dropped as empty);
+  `rebaseSquashRun` (one commit with both changes, both its successor),
+  `rebaseSquashUnderRun` (a fixup moved down), `rebaseSquashConflictRun` (led by the
+  commit that depends on the other: a conflict), `rebaseSquashOverwritesRun` (members in
+  order: the later change wins), `rebaseSquashEmptyRun` (a change and its revert: both
+  dropped, the branch back at the root).
+- Six mutants of `rebase::build`'s groups each fail a scenario: members checked without
+  the group's changes before them, a member's change put under the lead's, an empty group
+  kept, only the lead mapped to the group's commit, a melded commit kept as it was, the
+  group built from its lead alone.
 - `contendStep` interleaves rewriters with writers. 100,000 contended runs and 50,000
   `step` runs: no violation.
 - Twenty mutants of the rewrite code each fail a scenario: no carrying, epoch not bumped,
@@ -326,8 +342,8 @@ what is under them).
   missing drops, no apply check, empty commits kept. The map mutant
   passed until quint-refinements#25 (the runtime filled a map entry the snapshot lacked in
   from the model).
-- Simplifications: plans are over the tip's two commits, without squash or fixup (the
-  model names a commit by one author); a reset only drops the tip; each client rewrites
+- Simplifications: plans are over the tip's two commits (a group melds two; messages and
+  `--autosquash` are not modelled); a reset only drops the tip; each client rewrites
   at most once, so a chain has at most four records; `rewrites_between`'s
   `REWRITE_CHAIN_MAX` is never reached.
 
@@ -419,9 +435,8 @@ loses the swap: the second attempt reads the ref and replays as usual.
 
 ## Not modelled yet
 
-1. Squash and fixup plans.
-2. Packs and chunks (files are inline in the model's trees).
-3. Lease timing: a live holder is assumed to refresh within the lease's lifetime
+1. Packs and chunks (files are inline in the model's trees).
+2. Lease timing: a live holder is assumed to refresh within the lease's lifetime
    (`Lease::check` refuses a ref swap otherwise); only dead holders' leases expire.
 
 ## Notes
