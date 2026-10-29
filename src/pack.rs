@@ -77,6 +77,16 @@ impl PackBuilder {
         (off, enc.len() as u64)
     }
 
+    /// Append a blob that is already encoded (`[codec][data]`, as stored in another pack):
+    /// the bytes are copied verbatim, so repacking neither recompresses nor alters a blob.
+    /// Returns `(offset, stored_len)`.
+    pub fn add_stored(&mut self, hash: Hash, stored: &[u8], raw_len: u64) -> (u64, u64) {
+        let off = self.buf.len() as u64;
+        self.buf.extend_from_slice(stored);
+        self.index.push((hash, off, stored.len() as u64, raw_len));
+        (off, stored.len() as u64)
+    }
+
     pub fn finish(mut self) -> (Hash, Bytes) {
         let mut w = Writer::default();
         w.varint(self.index.len() as u64);
@@ -120,6 +130,23 @@ mod tests {
             let enc = encode_blob(&raw);
             assert_eq!(decode_blob(&enc, raw.len() as u64).unwrap(), raw);
         }
+    }
+
+    #[test]
+    fn stored_blobs_are_copied_verbatim() {
+        let raw = vec![7u8; 10_000];
+        let hash = Hash::of(&raw);
+        let mut a = PackBuilder::default();
+        let (off, len) = a.add(hash, &raw);
+        let (_, pack) = a.finish();
+        let stored = pack[off as usize..(off + len) as usize].to_vec();
+        let mut b = PackBuilder::default();
+        b.add(Hash::of(b"first"), b"first");
+        let (off2, len2) = b.add_stored(hash, &stored, raw.len() as u64);
+        assert_eq!(len2, len);
+        let (_, pack2) = b.finish();
+        assert_eq!(&pack2[off2 as usize..(off2 + len2) as usize], &stored[..]);
+        assert_eq!(decode_blob(&stored, raw.len() as u64).unwrap(), raw);
     }
 
     #[test]
