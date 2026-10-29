@@ -28,6 +28,7 @@ pub mod objects;
 pub mod pack;
 pub mod policy;
 pub mod rebase;
+pub mod repack;
 pub mod repo;
 pub mod rev;
 pub mod serve;

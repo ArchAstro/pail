@@ -197,6 +197,25 @@ plan ─▶ build (prepare commits, check each path) ─▶ store ─▶ reflog 
 S3 settings come from the usual `AWS_*` variables (`AWS_ENDPOINT`, `AWS_ALLOW_HTTP` for
 emulators). GCS settings come from `GOOGLE_*`.
 
+## Repacking: many small packs, few requests
+
+Every commit writes one pack, so a branch built from many small commits keeps its files in
+many small packs, and a cold checkout costs a request per pack. `pail maintenance repack`
+writes one ordinary commit on the branch with the same files (same Git tree ids, nothing
+in the change list) whose entries point into a few path-ordered packs of about 4 MiB:
+
+```sh
+pail maintenance repack --dry-run   # packs and files it would move, requests before and after
+pail maintenance repack             # tiered: only files in packs under 1 MiB move
+pail maintenance repack --full      # every packed file (don't schedule it)
+```
+
+Stored bytes are copied as they are, after checking each blob's hash. The old packs stay
+alive through history (gc keeps what a commit names), so a repack adds the bytes it moves
+to the store; the tier keeps that to the small packs. If a concurrent commit changes a file
+being moved, that file is left out and the rest is published on the new tip. The protocol is
+`commit` with the packs as uploads, modelled in `verify/` ("Packs and repacking").
+
 ## Inspecting the physical model
 
 ```sh
