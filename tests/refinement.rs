@@ -754,7 +754,9 @@ fn check_chunking() -> Result<(), String> {
             .collect();
         let got: Vec<usize> = chunk_spans(&real(content)).iter().map(|s| s.1).collect();
         if got != want {
-            return Err(format!("{content} chunks as {got:?}, the model says {want:?}"));
+            return Err(format!(
+                "{content} chunks as {got:?}, the model says {want:?}"
+            ));
         }
     }
     Ok(())
@@ -2585,7 +2587,10 @@ impl Harness {
                 .ok()
                 .and_then(|raw| chunk_names().get(&Hash::of(&raw)).copied())
                 .unwrap_or_default();
-            Ok((RuntimeValue::Text(name), RuntimeValue::Text(held.to_owned())))
+            Ok((
+                RuntimeValue::Text(name),
+                RuntimeValue::Text(held.to_owned()),
+            ))
         })?;
         self.read_ref()?;
         let mut refs = BTreeMap::new();
