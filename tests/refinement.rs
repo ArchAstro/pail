@@ -29,12 +29,14 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as StoreResult,
 };
 use pail::clock::Clock;
+use pail::enc::Reader;
 use pail::hash::Hash;
-use pail::manifest::{Kind, Page, decode_page};
+use pail::manifest::{Kind, Loc, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
+use pail::pack::decode_blob;
 use pail::repo::{
     CommitFields, CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead,
-    MovedError, Repo, RewriteRequest,
+    MovedError, Repo, RewriteRequest, Upload,
 };
 use pail::store::Store;
 use quint_refinements::{NormalizedRuntimeEvidence, RuntimeValue};
@@ -129,7 +131,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        59,
+        65,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -155,6 +157,8 @@ enum Request {
     DeleteCommit,
     ListPages,
     DeletePage,
+    ListPacks,
+    DeletePack,
     /// gc releasing its lease: its last request.
     DeleteLease,
     /// A holder's refresher rewriting its lease, which the store applies on release...
@@ -239,8 +243,8 @@ struct Book {
     clock: Arc<TestClock>,
 }
 
-/// A writer's page puts wait for its commit uploads to be released: the model uploads a
-/// commit and its page in one step. Pages stay open until the writer's next other request
+/// A writer's page and pack puts wait for its commit uploads to be released: the model
+/// uploads a commit, its page and its pack in one step. Pages stay open until the writer's next other request
 /// (a combining round stores several commits in one wave).
 #[derive(Default)]
 struct Uploads {
@@ -323,6 +327,7 @@ impl Gate {
             "locks" => Some(Request::ListLeases),
             "commits" => Some(Request::ListCommits),
             "pages" => Some(Request::ListPages),
+            "packs" => Some(Request::ListPacks),
             _ => None,
         }
     }
@@ -332,6 +337,8 @@ impl Gate {
             Some(Request::DeleteCommit)
         } else if key.starts_with("pages/") {
             Some(Request::DeletePage)
+        } else if key.starts_with("packs/") {
+            Some(Request::DeletePack)
         } else if key.starts_with("locks/") && self.actor == GC {
             Some(Request::DeleteLease)
         } else if key.starts_with("intents/") {
@@ -493,7 +500,7 @@ impl ObjectStore for Gate {
         opts: PutOptions,
     ) -> StoreResult<PutResult> {
         let key = location.as_ref();
-        if key.starts_with("pages/") && !self.free {
+        if (key.starts_with("pages/") || key.starts_with("packs/")) && !self.free {
             let wait = {
                 let mut u = self.uploads.lock().unwrap();
                 if u.open {
@@ -599,7 +606,7 @@ impl ObjectStore for Gate {
         let request = prefix.and_then(|p| Gate::list_request(p.as_ref()));
         let ages = matches!(
             request,
-            Some(Request::ListCommits) | Some(Request::ListPages)
+            Some(Request::ListCommits) | Some(Request::ListPages) | Some(Request::ListPacks)
         );
         let stamps = request == Some(Request::ListLeases);
         let gate = self.clone();
@@ -664,6 +671,71 @@ impl ObjectStore for Gate {
 type Id = Vec<String>;
 /// A tree: path to content.
 type Tree = BTreeMap<String, String>;
+
+/// A page as `bucket.qnt` keys it: the tree, and the pack each big file is in.
+type PageKey = (Tree, BTreeMap<String, Id>);
+
+/// The model's clients, whose own commits use the pack the client prepared (`packOf`).
+const CLIENTS: [&str; 4] = ["alice", "bob", "carol", "dave"];
+
+/// The path of the decoy file each pack holds (see `Harness::files`), left out of every
+/// delta.
+const DECOY: &str = "\u{1}decoy";
+
+/// Contents the model stores in packs (`BIG`): bigger than a manifest entry holds.
+fn is_big(content: &str) -> bool {
+    matches!(content, "p1" | "p2" | "p3")
+}
+
+/// A model content as the file's bytes: a big one is padded past `INLINE_MAX`.
+fn real(content: &str) -> Vec<u8> {
+    let mut bytes = content.as_bytes().to_vec();
+    if is_big(content) {
+        bytes.push(b'\n');
+        bytes.extend(std::iter::repeat_n(b'.', 80));
+    }
+    bytes
+}
+
+/// A file's bytes as the model's content: `real` undone.
+fn unpad(data: &[u8]) -> String {
+    let text = String::from_utf8_lossy(data);
+    text.split('\n').next().unwrap_or_default().to_owned()
+}
+
+/// The pack a commit named `id` stores (`packOf`).
+fn pack_of(id: &Id) -> Id {
+    match id.last() {
+        Some(last) if CLIENTS.contains(&last.as_str()) => vec![last.clone()],
+        _ => id.clone(),
+    }
+}
+
+/// The contents a pack holds (its footer indexes the blobs; the decoy is no content).
+fn pack_contents(pack: &[u8]) -> Result<BTreeSet<String>, String> {
+    let bad = |e: anyhow::Error| e.to_string();
+    let end = pack
+        .len()
+        .checked_sub(12)
+        .ok_or("a pack shorter than its trailer")?;
+    let footer = u32::from_le_bytes(pack[end..end + 4].try_into().unwrap()) as usize;
+    let mut r = Reader::new(&pack[end - footer..end]);
+    let mut out = BTreeSet::new();
+    for _ in 0..r.varint().map_err(bad)? {
+        r.hash().map_err(bad)?;
+        let (off, len, raw) = (
+            r.varint().map_err(bad)? as usize,
+            r.varint().map_err(bad)? as usize,
+            r.varint().map_err(bad)?,
+        );
+        let blob = decode_blob(&pack[off..off + len], raw).map_err(bad)?;
+        let content = unpad(&blob);
+        if !content.starts_with("decoy:") {
+            out.insert(content);
+        }
+    }
+    Ok(out)
+}
 
 fn id_value(id: &Id) -> RuntimeValue {
     RuntimeValue::List(id.iter().map(|a| RuntimeValue::Text(a.clone())).collect())
@@ -880,6 +952,14 @@ struct Writer {
     reading: bool,
 }
 
+/// What was written since the grace period last elapsed: `Young` in `bucket.qnt`.
+#[derive(Clone, Default)]
+struct Young {
+    pages: BTreeSet<PageKey>,
+    commits: BTreeSet<Id>,
+    packs: BTreeSet<Id>,
+}
+
 /// The collector's run, as read off its requests.
 #[derive(Default)]
 struct Collector {
@@ -887,10 +967,12 @@ struct Collector {
     /// Its lease, once it holds it.
     probe: Option<pail::lease::Probe>,
     progress: Progress,
-    marked: Option<(BTreeSet<Id>, BTreeSet<Tree>)>,
+    marked: Option<(BTreeSet<Id>, BTreeSet<PageKey>)>,
+    marked_packs: BTreeSet<Id>,
     doomed_commits: BTreeSet<String>,
     doomed_pages: BTreeSet<String>,
-    spared: Option<(BTreeSet<Tree>, BTreeSet<Id>)>,
+    doomed_packs: BTreeSet<String>,
+    spared: Option<Young>,
 }
 
 /// Real actors over one bucket, and what the scenario has seen of them.
@@ -914,6 +996,10 @@ struct Harness {
     bodies: Mutex<HashMap<String, RuntimeValue>>,
     /// Pages by key: the tree each holds.
     trees: Mutex<HashMap<String, Tree>>,
+    /// Each page's big files: the pack they are in.
+    page_locs: Mutex<HashMap<Hash, BTreeMap<String, Hash>>>,
+    /// Packs by hash, named by the commit that first names them (`packOf`).
+    pack_names: Mutex<HashMap<Hash, Id>>,
     /// The ref's ETags in order: version n is the n-th.
     ref_etags: Mutex<Vec<String>>,
     /// The commit each version of the ref named, oldest first.
@@ -1003,24 +1089,35 @@ impl Harness {
         repo
     }
 
-    fn files(&self, tree: &Tree) -> Result<Delta, String> {
-        let inputs: Vec<FileInput> = tree
+    /// `tree`'s files as a delta, and the pack to upload with it (none if all are small
+    /// enough to inline). Writing a big file the tree already has is a repack: the delta
+    /// names the file in a pack of the writer's own. A pack holds a decoy blob of the
+    /// writer's too, so two writers' packs of one content are not one object.
+    fn files(&self, tree: &Tree, actor: &str) -> Result<(Delta, Vec<Upload>), String> {
+        let mut inputs: Vec<FileInput> = tree
             .iter()
             .map(|(path, data)| FileInput {
                 path: path.clone(),
                 kind: Kind::File,
-                data: Bytes::from(data.clone().into_bytes()),
+                data: Bytes::from(real(data)),
             })
             .collect();
-        // Small files are stored inline: nothing to upload, so no lease to take.
-        let (entries, uploads) = self.observer.prepare_files(&inputs, &HashMap::new());
-        if !uploads.is_empty() {
-            return Err("the model's files must be small enough to inline".into());
+        if tree.values().any(|v| is_big(v)) {
+            let mut decoy = format!("decoy:{actor}\n").into_bytes();
+            decoy.extend(std::iter::repeat_n(b'.', 80));
+            inputs.push(FileInput {
+                path: DECOY.to_owned(),
+                kind: Kind::File,
+                data: Bytes::from(decoy),
+            });
         }
-        Ok(entries
+        let (entries, uploads) = self.observer.prepare_files(&inputs, &HashMap::new());
+        let delta = entries
             .into_iter()
+            .filter(|e| e.path != DECOY)
             .map(|e| (e.path.clone(), Some(e)))
-            .collect())
+            .collect();
+        Ok((delta, uploads))
     }
 
     fn request(&self, by: &str, base: Option<Hash>, delta: Delta) -> CommitRequest {
@@ -1079,8 +1176,8 @@ impl Harness {
             .ok_or_else(|| format!("commit {} has no writer the scenario knows", h.short()))
     }
 
-    /// Every commit the branch reached at `head`, and their trees.
-    fn reach(&self, head: Hash) -> Result<(BTreeSet<Id>, BTreeSet<Tree>), String> {
+    /// Every commit the branch reached at `head`, and their pages.
+    fn reach(&self, head: Hash) -> Result<(BTreeSet<Id>, BTreeSet<PageKey>), String> {
         let (mut ids, mut trees) = (BTreeSet::new(), BTreeSet::new());
         let mut cur = Some(head);
         while let Some(h) = cur {
@@ -1089,7 +1186,7 @@ impl Harness {
                 .rt()
                 .block_on(self.observer.commit_obj(&h))
                 .map_err(|e| e.to_string())?;
-            trees.insert(self.tree(&format!("pages/{}", c.root.hex()))?);
+            trees.insert(self.page(&format!("pages/{}", c.root.hex()))?);
             cur = c.parent;
         }
         Ok((ids, trees))
@@ -1138,7 +1235,10 @@ impl Harness {
                 }
                 if matches!(
                     request,
-                    Request::Swap | Request::DeleteCommit | Request::DeletePage
+                    Request::Swap
+                        | Request::DeleteCommit
+                        | Request::DeletePage
+                        | Request::DeletePack
                 ) && let Some(e) = self.refreshers.lock().unwrap().get_mut(&actor)
                 {
                     // A request a passed `Lease::check` let go.
@@ -1261,6 +1361,7 @@ impl Harness {
                             trees.extend(t);
                         }
                     }
+                    self.collector.marked_packs = self.packs_named_by(&ids)?;
                     self.collector.marked = Some((ids, trees));
                     return Ok(());
                 }
@@ -1371,7 +1472,7 @@ impl Harness {
                 for (hex, _) in self.live("commits/")? {
                     let h = Hash::from_hex(&hex).map_err(|e| e.to_string())?;
                     let id = self.name(&h)?;
-                    if !marked.contains(&id) && !young.1.contains(&id) {
+                    if !marked.contains(&id) && !young.commits.contains(&id) {
                         doomed.insert(format!("commits/{hex}"));
                     }
                 }
@@ -1385,18 +1486,40 @@ impl Harness {
                 let mut doomed = BTreeSet::new();
                 for (hex, _) in self.live("pages/")? {
                     let key = format!("pages/{hex}");
-                    let t = self.tree(&key)?;
-                    if !marked.contains(&t) && !young.0.contains(&t) && !spared.0.contains(&t) {
+                    let t = self.page(&key)?;
+                    if !marked.contains(&t)
+                        && !young.pages.contains(&t)
+                        && !spared.pages.contains(&t)
+                    {
                         doomed.insert(key);
                     }
                 }
                 self.collector.doomed_pages = doomed;
+            }
+            Request::ListPacks => {
+                let marked = self.collector.marked_packs.clone();
+                let young = self.young()?;
+                let spared = self.collector.spared.clone().unwrap_or_default();
+                let mut doomed = BTreeSet::new();
+                for (name, _) in self.live("packs/")? {
+                    let pack = self.pack_name(&Self::pack_hash(&name)?)?;
+                    if !marked.contains(&pack)
+                        && !young.packs.contains(&pack)
+                        && !spared.packs.contains(&pack)
+                    {
+                        doomed.insert(format!("packs/{name}"));
+                    }
+                }
+                self.collector.doomed_packs = doomed;
             }
             Request::DeleteCommit => {
                 self.collector.doomed_commits.remove(key);
             }
             Request::DeletePage => {
                 self.collector.doomed_pages.remove(key);
+            }
+            Request::DeletePack => {
+                self.collector.doomed_packs.remove(key);
             }
             Request::Swap
             | Request::GetIntent
@@ -1584,12 +1707,19 @@ impl Harness {
     /// A rewriter spawned: it is one from now on, and its first ref read is its begin.
     /// `commit_opts` by `name`, reporting the head its publish leaves (`Event::Known`), then
     /// its outcome.
-    fn spawn_commit(&self, name: &str, req: CommitRequest, known_head: Option<KnownHead>) {
+    fn spawn_commit(
+        &self,
+        name: &str,
+        req: CommitRequest,
+        uploads: Vec<Upload>,
+        known_head: Option<KnownHead>,
+    ) {
         let repo = self.client(name);
         let events = self.sender.clone();
         let actor = name.to_owned();
         self.rt().spawn(async move {
             let opts = CommitOptions {
+                uploads,
                 known_head,
                 ..CommitOptions::default()
             };
@@ -1992,13 +2122,103 @@ impl Harness {
         let tree: Tree = entries
             .iter()
             .zip(data)
-            .map(|(e, d)| (e.path.clone(), String::from_utf8_lossy(&d).into_owned()))
+            .map(|(e, d)| (e.path.clone(), unpad(&d)))
             .collect();
         self.trees
             .lock()
             .unwrap()
             .insert(key.to_owned(), tree.clone());
         Ok(tree)
+    }
+
+    /// A pack object's hash from its key without `packs/`.
+    fn pack_hash(name: &str) -> Result<Hash, String> {
+        Hash::from_hex(name.trim_end_matches(".pack")).map_err(|e| e.to_string())
+    }
+
+    /// The pack each big file of the page at `root` is in.
+    fn locs_of(&self, root: &Hash) -> Result<BTreeMap<String, Hash>, String> {
+        if let Some(l) = self.page_locs.lock().unwrap().get(root) {
+            return Ok(l.clone());
+        }
+        let entries = self
+            .rt()
+            .block_on(self.observer.entries(*root))
+            .map_err(|e| e.to_string())?;
+        let locs: BTreeMap<String, Hash> = entries
+            .iter()
+            .filter_map(|e| match &e.loc {
+                Loc::Pack { pack, .. } => Some((e.path.clone(), *pack)),
+                _ => None,
+            })
+            .collect();
+        self.page_locs.lock().unwrap().insert(*root, locs.clone());
+        Ok(locs)
+    }
+
+    /// A pack's model name: the commit that first names it (its page has the pack, its
+    /// parent's does not) stores it (`packOf`).
+    fn pack_name(&self, pack: &Hash) -> Result<Id, String> {
+        if let Some(n) = self.pack_names.lock().unwrap().get(pack) {
+            return Ok(n.clone());
+        }
+        let mut commits: Vec<(Hash, Id)> =
+            self.names.iter().map(|(h, id)| (*h, id.clone())).collect();
+        commits.sort_by_key(|(_, id)| id.len());
+        for (h, id) in commits {
+            // A commit gc deleted names nothing new: its packs were named before.
+            let Ok(c) = self.rt().block_on(self.observer.commit_obj(&h)) else {
+                continue;
+            };
+            let mine = self.locs_of(&c.root)?;
+            let parents: BTreeSet<Hash> = match c.parent {
+                Some(p) => match self.rt().block_on(self.observer.commit_obj(&p)) {
+                    Ok(p) => self.locs_of(&p.root)?.into_values().collect(),
+                    Err(_) => BTreeSet::new(),
+                },
+                None => BTreeSet::new(),
+            };
+            for pk in mine.into_values().filter(|pk| !parents.contains(pk)) {
+                self.pack_names
+                    .lock()
+                    .unwrap()
+                    .entry(pk)
+                    .or_insert_with(|| pack_of(&id));
+            }
+        }
+        self.pack_names
+            .lock()
+            .unwrap()
+            .get(pack)
+            .cloned()
+            .ok_or_else(|| format!("pack {} is named by no commit", pack.short()))
+    }
+
+    /// A page as the model keys it: its tree and the pack of each big file.
+    fn page(&self, key: &str) -> Result<PageKey, String> {
+        let root = Hash::from_hex(key.trim_start_matches("pages/")).map_err(|e| e.to_string())?;
+        let locs = self
+            .locs_of(&root)?
+            .into_iter()
+            .map(|(path, pack)| Ok((path, self.pack_name(&pack)?)))
+            .collect::<Result<_, String>>()?;
+        Ok((self.tree(key)?, locs))
+    }
+
+    /// The packs the pages of the commits `ids` name.
+    fn packs_named_by(&self, ids: &BTreeSet<Id>) -> Result<BTreeSet<Id>, String> {
+        let mut packs = BTreeSet::new();
+        for id in ids {
+            let h = self.hashes.get(id).ok_or(format!("no commit {id:?}"))?;
+            let c = self
+                .rt()
+                .block_on(self.observer.commit_obj(h))
+                .map_err(|e| e.to_string())?;
+            for pack in self.locs_of(&c.root)?.into_values() {
+                packs.insert(self.pack_name(&pack)?);
+            }
+        }
+        Ok(packs)
     }
 
     /// Pail layer: a commit object as the model's `Commit`.
@@ -2017,14 +2237,35 @@ impl Harness {
                 .map_err(|e| e.to_string())?
                 .parent;
         }
+        let locs = self
+            .locs_of(&c.root)?
+            .into_iter()
+            .map(|(path, pack)| Ok((RuntimeValue::Text(path), id_value(&self.pack_name(&pack)?))))
+            .collect::<Result<_, String>>()?;
         Ok(record([
             ("tree", tree_value(&tree)),
             ("ancestors", RuntimeValue::Set(ancestors)),
+            ("locs", RuntimeValue::Map(locs)),
         ]))
     }
 
-    /// Commits and pages written in this grace epoch: `Young` (trees, ids).
-    fn young(&self) -> Result<(BTreeSet<Tree>, BTreeSet<Id>), String> {
+    /// A page as `bucket.qnt`'s `Page`.
+    fn page_value((tree, locs): &PageKey) -> RuntimeValue {
+        record([
+            ("tree", tree_value(tree)),
+            (
+                "locs",
+                RuntimeValue::Map(
+                    locs.iter()
+                        .map(|(p, id)| (RuntimeValue::Text(p.clone()), id_value(id)))
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
+    /// Commits, pages and packs written in this grace epoch: `Young`.
+    fn young(&self) -> Result<Young, String> {
         let young: Vec<String> = {
             let book = self.book.lock().unwrap();
             book.written
@@ -2033,16 +2274,18 @@ impl Harness {
                 .map(|(k, _)| k.clone())
                 .collect()
         };
-        let (mut pages, mut commits) = (BTreeSet::new(), BTreeSet::new());
+        let mut out = Young::default();
         for key in young {
             if key.starts_with("pages/") {
-                pages.insert(self.tree(&key)?);
+                out.pages.insert(self.page(&key)?);
             } else if let Some(hex) = key.strip_prefix("commits/") {
                 let h = Hash::from_hex(hex).map_err(|e| e.to_string())?;
-                commits.insert(self.name(&h)?);
+                out.commits.insert(self.name(&h)?);
+            } else if let Some(name) = key.strip_prefix("packs/") {
+                out.packs.insert(self.pack_name(&Self::pack_hash(name)?)?);
             }
         }
-        Ok((pages, commits))
+        Ok(out)
     }
 
     /// Leases by holder: each holder's lease is one model object, written once per lease
@@ -2101,8 +2344,16 @@ impl Harness {
         })?;
         let pages = self.space("pages/", |hex, _| {
             Ok((
-                tree_value(&self.tree(&format!("pages/{hex}"))?),
+                Self::page_value(&self.page(&format!("pages/{hex}"))?),
                 RuntimeValue::Bool(true),
+            ))
+        })?;
+        let packs = self.space("packs/", |name, data| {
+            let pack = self.pack_name(&Self::pack_hash(name)?)?;
+            let contents = pack_contents(data)?;
+            Ok((
+                id_value(&pack),
+                set(contents.into_iter().map(RuntimeValue::Text)),
             ))
         })?;
         self.read_ref()?;
@@ -2140,7 +2391,7 @@ impl Harness {
                 .ok_or(format!("record {id} was never seen written"))?;
             Ok((RuntimeValue::Int(n), self.rewrite_value(&r)?))
         })?;
-        let (young_pages, young_commits) = self.young()?;
+        let young = self.young()?;
         Ok(record([
             ("pages", RuntimeValue::Map(pages)),
             ("commits", RuntimeValue::Map(commits)),
@@ -2148,14 +2399,17 @@ impl Harness {
             ("locks", self.locks_value()?),
             ("intents", RuntimeValue::Map(intents)),
             ("reflog", RuntimeValue::Map(reflog)),
-            (
-                "young",
-                record([
-                    ("pages", set(young_pages.iter().map(tree_value))),
-                    ("commits", set(young_commits.iter().map(id_value))),
-                ]),
-            ),
+            ("packs", RuntimeValue::Map(packs)),
+            ("young", Self::young_value(&young)),
         ]))
+    }
+
+    fn young_value(young: &Young) -> RuntimeValue {
+        record([
+            ("pages", set(young.pages.iter().map(Self::page_value))),
+            ("commits", set(young.commits.iter().map(id_value))),
+            ("packs", set(young.packs.iter().map(id_value))),
+        ])
     }
 
     fn lineage_value(&self, l: &Lineage) -> Result<RuntimeValue, String> {
@@ -2482,11 +2736,12 @@ impl Harness {
             (true, Some(Request::ReadRef)) => "GcLocked",
             (true, Some(Request::ListCommits)) => "GcMarked",
             (true, Some(Request::DeleteCommit | Request::ListPages)) => "GcSweepingCommits",
-            (true, Some(Request::DeletePage | Request::DeleteLease)) => "GcSweepingPages",
+            (true, Some(Request::DeletePage | Request::ListPacks)) => "GcSweepingPages",
+            (true, Some(Request::DeletePack | Request::DeleteLease)) => "GcSweepingPacks",
             (true, other) => return Err(format!("gc is between requests ({other:?})")),
         };
         let (live_commits, live_pages) = c.marked.clone().unwrap_or_default();
-        let (spared_pages, spared_commits) = c.spared.clone().unwrap_or_default();
+        let spared = c.spared.clone().unwrap_or_default();
         // gc gives up at a delete its lease check refused, and releases its lease: what it
         // listed is no longer its to delete.
         let given_up = held == Some(Request::DeleteLease);
@@ -2504,21 +2759,26 @@ impl Harness {
             .doomed_pages
             .iter()
             .filter(|_| !given_up)
-            .map(|k| self.tree(k).map(|t| tree_value(&t)))
+            .map(|k| self.page(k).map(|p| Self::page_value(&p)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let doomed_packs = c
+            .doomed_packs
+            .iter()
+            .filter(|_| !given_up)
+            .map(|k| {
+                let name = k.trim_start_matches("packs/");
+                Ok(id_value(&self.pack_name(&Self::pack_hash(name)?)?))
+            })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(record([
             ("phase", RuntimeValue::Text(phase.to_owned())),
             ("liveCommits", set(live_commits.iter().map(id_value))),
-            ("livePages", set(live_pages.iter().map(tree_value))),
+            ("livePages", set(live_pages.iter().map(Self::page_value))),
+            ("livePacks", set(c.marked_packs.iter().map(id_value))),
             ("doomedCommits", set(doomed_commits)),
             ("doomedPages", set(doomed_pages)),
-            (
-                "spared",
-                record([
-                    ("pages", set(spared_pages.iter().map(tree_value))),
-                    ("commits", set(spared_commits.iter().map(id_value))),
-                ]),
-            ),
+            ("doomedPacks", set(doomed_packs)),
+            ("spared", Self::young_value(&spared)),
         ]))
     }
 
@@ -2634,6 +2894,8 @@ impl generated::Implementation for Harness {
             record_ids: HashMap::new(),
             bodies: Mutex::default(),
             trees: Mutex::default(),
+            page_locs: Mutex::default(),
+            pack_names: Mutex::default(),
             ref_etags: Mutex::default(),
             ref_commits: Mutex::default(),
             ref_values: Mutex::default(),
@@ -2657,7 +2919,13 @@ impl generated::Implementation for Harness {
         let root_commit = commits
             .get(&id_value(&root))
             .ok_or("the model's head is not among its commits")?;
-        let delta = h.files(&tree_of(field(field(root_commit, "body")?, "tree")?)?)?;
+        let (delta, uploads) = h.files(
+            &tree_of(field(field(root_commit, "body")?, "tree")?)?,
+            &root[0],
+        )?;
+        if !uploads.is_empty() {
+            return Err("the model's root must be small enough to inline".into());
+        }
         let req = h.request(&root[0], None, delta);
         let made = h
             .rt()
@@ -2701,8 +2969,9 @@ impl generated::Implementation for Harness {
             .hashes
             .get(&base)
             .ok_or_else(|| format!("no commit {base:?}"))?;
-        let req = self.request(&name, Some(base_hash), self.files(&delta)?);
-        self.spawn_commit(&name, req, None);
+        let (files, uploads) = self.files(&delta, &name)?;
+        let req = self.request(&name, Some(base_hash), files);
+        self.spawn_commit(&name, req, uploads, None);
         let w = self.writer(&name)?;
         w.base = Some(base);
         w.delta = delta;
@@ -2723,9 +2992,10 @@ impl generated::Implementation for Harness {
             .known
             .clone()
             .ok_or(format!("{from} has no known head"))?;
-        let req = self.request(&name, Some(k.commit), self.files(&delta)?);
+        let (files, uploads) = self.files(&delta, &name)?;
+        let req = self.request(&name, Some(k.commit), files);
         let seen = self.known_seen(&k)?;
-        self.spawn_commit(&name, req, Some(k.clone()));
+        self.spawn_commit(&name, req, uploads, Some(k.clone()));
         let w = self.writer(&name)?;
         w.base = Some(seen.0.clone());
         w.delta = delta;
@@ -2966,7 +3236,11 @@ impl generated::Implementation for Harness {
         let name = text(c)?.to_owned();
         let delta = tree_of(delta)?;
         let (tip, _) = Harness::read_ref(self)?;
-        let req = self.request(&name, Some(tip), self.files(&delta)?);
+        let (files, uploads) = self.files(&delta, &name)?;
+        if !uploads.is_empty() {
+            return Err("a stack's files must be small enough to inline".into());
+        }
+        let req = self.request(&name, Some(tip), files);
         let fields = CommitFields {
             author: req.author,
             author_date: req.author_date,
@@ -3141,16 +3415,41 @@ impl generated::Implementation for Harness {
     }
 
     fn gc_delete_page(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
-        let t = tree_of(arguments.first().ok_or("gcDeletePage takes a tree")?)?;
-        let key = {
-            let trees = self.trees.lock().unwrap();
-            trees
-                .iter()
-                .find(|(_, v)| **v == t)
-                .map(|(k, _)| k.clone())
-                .ok_or_else(|| format!("no page holds {t:?}"))?
-        };
+        let page = arguments.first().ok_or("gcDeletePage takes a page")?;
+        let want: PageKey = (
+            tree_of(field(page, "tree")?)?,
+            match field(page, "locs")? {
+                RuntimeValue::Map(m) => m
+                    .iter()
+                    .map(|(k, v)| Ok((text(k)?.to_owned(), id_of(v)?)))
+                    .collect::<Result<_, String>>()?,
+                other => return Err(format!("expected a map of locations: {other:?}")),
+            },
+        );
+        let keys: Vec<String> = self.trees.lock().unwrap().keys().cloned().collect();
+        let key = keys
+            .into_iter()
+            .find(|k| self.page(k).is_ok_and(|p| p == want))
+            .ok_or_else(|| format!("no page is {want:?}"))?;
         self.release(GC, Request::DeletePage, Some(&key), Delivery::Answered)
+    }
+
+    fn gc_list_packs(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        self.release(GC, Request::ListPacks, None, Delivery::Answered)
+    }
+
+    fn gc_delete_pack(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let id = id_of(arguments.first().ok_or("gcDeletePack takes a pack")?)?;
+        let hash = self
+            .pack_names
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, n)| **n == id)
+            .map(|(h, _)| *h)
+            .ok_or_else(|| format!("no pack {id:?}"))?;
+        let key = format!("packs/{}.pack", hash.hex());
+        self.release(GC, Request::DeletePack, Some(&key), Delivery::Answered)
     }
 
     fn gc_done(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {

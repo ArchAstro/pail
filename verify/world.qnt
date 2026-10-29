@@ -119,7 +119,7 @@ module world {
   // ---------- the collector (`pail gc`) ----------
 
   /// Idle; holding its exclusive lease, waiting for writers' leases to go; holding it alone;
-  /// marked what the refs reach; deleting unreachable old commits, then pages.
+  /// marked what the refs reach; deleting unreachable old commits, then pages, then packs.
   type GcPhase =
     | GcIdle
     | GcDraining
@@ -127,15 +127,18 @@ module world {
     | GcMarked
     | GcSweepingCommits
     | GcSweepingPages
+    | GcSweepingPacks
 
   type Collector = {
     phase: GcPhase,
     // What the refs reached when it marked.
     liveCommits: Set[CommitId],
-    livePages: Set[Tree],
+    livePages: Set[Page],
+    livePacks: Set[PackId],
     // Listed as unreachable and old, not yet deleted.
     doomedCommits: Set[CommitId],
-    doomedPages: Set[Tree],
+    doomedPages: Set[Page],
+    doomedPacks: Set[PackId],
     // Young when it took `now` (at its first listing): its cutoff for every listing.
     spared: Young,
   }
@@ -256,9 +259,11 @@ module world {
     phase: GcIdle,
     liveCommits: Set(),
     livePages: Set(),
+    livePacks: Set(),
     doomedCommits: Set(),
     doomedPages: Set(),
-    spared: { pages: Set(), commits: Set() },
+    doomedPacks: Set(),
+    spared: { pages: Set(), commits: Set(), packs: Set() },
   }
 
   pure val NO_TIMING: Timing = { running: false, refreshed: 0, done: 0, inflight: false, sent: 0, landed: false, checked: 0 }
@@ -337,6 +342,7 @@ module world {
     or {
       col.phase == GcSweepingCommits and col.doomedCommits != Set(),
       col.phase == GcSweepingPages and col.doomedPages != Set(),
+      col.phase == GcSweepingPacks and col.doomedPacks != Set(),
     }
 
   /// The name of the writer or intent whose change commit `id` makes (a rewrite's mark

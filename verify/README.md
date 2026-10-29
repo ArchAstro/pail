@@ -14,8 +14,8 @@ may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new
 ```text
 store.qnt     any object store: versioned objects, create / CAS / put / delete, lost requests
    ▲
-bucket.qnt    pail's layout in it: pages/, commits/ (create-once), refs/ (CAS, lineage), locks/,
-              intents/, reflog/
+bucket.qnt    pail's layout in it: pages/, commits/ (create-once), packs/, refs/ (CAS, lineage),
+              locks/, intents/, reflog/
    ▲
 world.qnt     the shared state: bucket, writers, the collector, ghosts
    ▲
@@ -23,7 +23,7 @@ publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, exp
 combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
 rewrite.qnt   rewrite_ref steps for rebase, undo, reset (read, lease, store, read + carry + record, swap, recheck)
 land.qnt      land_stack steps (make the stack; lease, read + fork point + copy, swap, recheck)
-gc.qnt        gc steps (exclusive lease, drain, mark, list, check, delete, release)
+gc.qnt        gc steps (exclusive lease, drain, mark, list, check, delete commits, pages, packs, release)
 clock.qnt     time: the tick, the refreshers that keep leases alive
    ▲
 pail.qnt      the steps as actions, any interleaving (`step`), the properties
@@ -105,6 +105,7 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
    back.
 9. `locatedOnBranch`, `locateKeepsChanges`: see the successor walks section.
 10. `knownHeadsAreTrue`: see the known heads section.
+11. `packsAreStored`, `relocateKeepsContent`, `gcSparesNamedPacks`: see the packs section.
 
 `npm run simulate` checks them over random interleavings of four clients and gc,
 including crashes, the clock ticking, stalled refreshers and the grace period passing at any
@@ -201,7 +202,10 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | `Comb` | the poll's ref read and listing, and the commits the round stored |
 | action `recheck(c)` | the ref read after an unanswered swap |
 | `gcListCommits` / `gcListPages` | gc's listing of `commits/` / `pages/` |
-| `gcDeleteCommit(id)` / `gcDeletePage(t)` | gc's next DELETE, which must be of that object |
+| action `gcDeleteCommit(id)` / `gcDeletePage(t)` / `gcDeletePack(k)` | gc's next DELETE, which must be of that object |
+| action `gcListPacks` | gc's listing of `packs/` |
+| `Commit.locs`, `Page.locs` | for each big file of the tree, the pack its page's `Loc::Pack` names |
+| `packs` | `packs/<hash>.pack`, named by `packOf` (below), holding the contents of its blobs (the harness reads the pack's footer) |
 | `gcDone` | gc's DELETE of its lease, its last request |
 | `graceElapses` | every object's LastModified, as gc lists it, moves back past the grace period |
 | action `tick` | the test clock (`Store::with_clock`) moves 100 s on; every refresher whose sleep ended makes its `PUT locks/<holder>` and waits at the gate |
@@ -468,9 +472,62 @@ loses the swap: the second attempt reads the ref and replays as usual.
 - Simplifications: a client commits once, so the head is handed to another client
   (`from`); `Worktree::commit`'s own keep-or-drop is mirrored in the harness, not run.
 
+## Packs and repacking (`bucket.qnt`, `gc.qnt`)
+
+A file bigger than a manifest entry holds (`INLINE_MAX`) is stored in a pack, and the leaf
+page names the pack and the range (`Loc::Pack`). A page hashes its locations, so moving a
+file to another pack makes another page, another root, another commit. A repack
+(`pail maintenance repack`) is therefore an ordinary commit: its delta writes each moved
+path with the content it has, and the new page names a new pack.
+
+```text
+  alice  a = p1 ──▶ commit [root alice]        locs {a: alice}   packs/alice  {p1}
+  carol  repack ──▶ commit [root alice carol]  locs {a: carol}   packs/carol  {p1}   same tree, no change
+                    (the delta is `a = p1`, the content it has; pages differ, trees do not)
+```
+
+- Model: contents in `BIG` (`p1`..`p3`) live in packs, the others inline. A writer prepares
+  one pack for the big files its delta writes (`packOf`: named by the client), stores it
+  with its first commit, and a retry on a newer head reuses it (`commit_opts` takes the
+  uploads once). A commit's `locs` say where its page has each big file: its own pack for
+  the paths it writes, its parent's loc for the rest (a writer based before a repack
+  inherits the repack's locs from the head it replays on). The page is keyed by tree and
+  locs.
+- gc marks every pack a marked page names, then, after pages, lists `packs/` and deletes
+  the unmarked, old ones (`GcSweepingPacks`).
+- Properties:
+  1. `packsAreStored`: every pack the pages of the commits a ref (or a record) reaches
+     name is stored.
+  2. `relocateKeepsContent`: each big file reads back its content through its page's pack,
+     so a repack that moved a file changed no content.
+  3. `gcSparesNamedPacks`: while gc sweeps packs, none it has doomed is named by a commit
+     a ref reaches.
+  `refOnlyMovesForward` and the rest hold of a repack as of any commit, which is the claim
+  that it is ordinary.
+- Scenarios: `repackKeepsContentRun` (same tree, empty change list, both packs kept by gc),
+  `repackRacesStaleWriterRun` (a writer based before the repack lands over it and keeps
+  the repack's locs), `repackRacesChangedPathRun` (a writer changed a moved path: the
+  repack conflicts; one recomputed from the new tip lands; gc deletes the abandoned
+  repack's commit, page and pack and nothing else), `gcWaitsForARepackReusingAnOldPackRun`
+  (the repack's pack is old when the retry reuses it; gc waits for the writer's lease),
+  `gcSparesAYoungPackRun`.
+- Mutants, each failing a scenario: gc marking no packs (model and `src/gc.rs`), gc
+  ignoring the grace period for packs (both), a pack stored without its contents, a retry
+  placing every file in its own pack, the real `commit_opts` not storing the writer's
+  uploads, and not checking that the paths a replayed delta writes are disjoint
+  (`check_disjoint`).
+- Simplifications: packs are modelled in every protocol the same way (a combined intent, a
+  rewrite's copy and a landed stack get a pack of their own named by the new commit, where
+  the real code points the copy at the original's pack), but refined against the real code
+  only in direct commits and gc; `simulate` samples the rest. A pack's name is its
+  writer's, not its content hash (the harness adds a decoy blob so two writers' packs of
+  one content differ). Content already stored (`reuse`) is not modelled. Chunks (files of
+  1 MiB and more) are not laid out. A repack's retry (recompute from the new tip) is a new
+  `commit` call, played by another client in the model.
+
 ## Not modelled yet
 
-1. Packs and chunks (files are inline in the model's trees).
+1. Chunks (files of 1 MiB and more). Packs are refined for direct commits and gc only.
 
 ## Lease timing (`clock.qnt`)
 
@@ -533,7 +590,7 @@ is not in the bound: a lease counts from before its put.
   `staleLanderRefusesRun`, `staleCombinerRefusesRun` (each swap site refuses a stale
   holder), `swapAtTheEdgeOfTheMarginRun` (age `MAX_AGE` passes), `refreshCountsFromItsSendRun`,
   `leaseCountsFromItsPutRun`, `gcLeaseCountsFromItsWriteRun`, `lateRefreshDoesNotReviveRun`,
-  `staleGcRefusesToDeleteRun`.
+  `staleGcRefusesToDeleteRun`, `staleGcRefusesToDeletePackRun` (pack deletes are guarded like commit and page deletes).
 - Mutants of `src/lease.rs`, `src/gc.rs` and `src/repo.rs`: fourteen, each undone after the run. Thirteen fail a scenario: gc without its check
   (`staleGcRefusesToDeleteRun`), a lease counting from after its put (`leaseCountsFromItsPutRun`)
   or from after its listing (`expiredLeaseIsIgnoredRun`), a refresh counting from its reply

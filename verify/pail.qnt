@@ -167,9 +167,16 @@ module pail {
 
   action gcListPages: bool = all { gcListPagesCan(state), state' = gcListPagesNext(state) }
 
-  action gcDeletePage(t: Tree): bool = all {
+  action gcDeletePage(t: Page): bool = all {
     gcDeletePageCan(state, t),
     state' = gcDeletePageNext(state, t),
+  }
+
+  action gcListPacks: bool = all { gcListPacksCan(state), state' = gcListPacksNext(state) }
+
+  action gcDeletePack(k: PackId): bool = all {
+    gcDeletePackCan(state, k),
+    state' = gcDeletePackNext(state, k),
   }
 
   action gcDone: bool = all { gcDoneCan(state), state' = gcDoneNext(state) }
@@ -196,16 +203,26 @@ module pail {
     Map("a" -> "1"),
     Map("a" -> "2"),
     Map("b" -> "1"),
+    Map("a" -> "p1"),
+    Map("a" -> "p2"),
+    Map("b" -> "p3"),
   )
 
   /// One draw in `SLOW` (four times that in `contendStep`) lets time pass, and two let a
   /// refresh land or be answered.
   pure val SLOW: int = 3
 
+  /// The deltas a repack of the commit `base` may write: some of its big files, each to
+  /// the content it has (`relocation`), a nonempty set.
+  def relocations(base: CommitId): Set[Delta] = {
+    val bigs = PATHS.filter(p => isBig(treeOf(state.bucket, base).get(p)))
+    bigs.powerset().exclude(Set(Set())).map(ps => ps.mapBy(p => treeOf(state.bucket, base).get(p)))
+  }
+
   action step = {
     nondet c = CLIENTS.oneOf()
     nondet base = liveKeys(state.bucket.commits).oneOf()
-    nondet delta = DELTAS.oneOf()
+    nondet delta = DELTAS.union(relocations(base)).oneOf()
     nondet d = Set(Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
@@ -254,6 +271,7 @@ module pail {
       gcMark,
       gcListCommits,
       gcListPages,
+      gcListPacks,
       gcDone,
       graceElapses,
       all { slow == 1, tick },
@@ -264,8 +282,10 @@ module pail {
       // Only enabled while sweeping, and then the doomed set is non-empty.
       nondet id = state.collector.doomedCommits.union(Set(ROOT)).oneOf()
       gcDeleteCommit(id),
-      nondet t = state.collector.doomedPages.union(Set(ROOT_TREE)).oneOf()
+      nondet t = state.collector.doomedPages.union(Set(ROOT_PAGE)).oneOf()
       gcDeletePage(t),
+      nondet k = state.collector.doomedPacks.union(Set(ROOT)).oneOf()
+      gcDeletePack(k),
     }
   }
 
@@ -275,7 +295,7 @@ module pail {
   action contendStep = {
     nondet c = CLIENTS.oneOf()
     nondet base = liveKeys(state.bucket.commits).oneOf()
-    nondet delta = DELTAS.oneOf()
+    nondet delta = DELTAS.union(relocations(base)).oneOf()
     nondet d = Set(Answered, Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
@@ -327,6 +347,22 @@ module pail {
 
   /// Every commit a ref reaches, and its page, is stored: no ref dangles.
   val branchIsComplete: bool = branchIsStored(state.bucket)
+
+  /// Every pack the pages of the commits a ref reaches (or a record reaches) name is
+  /// stored: no page points into a pack that is gone.
+  val packsAreStored: bool =
+    packsStored(state.bucket, refsReach(state.bucket).union(reflogReaches(state.bucket)))
+
+  /// Every big file reads back its content through its page's pack, a relocated file
+  /// too: moving a file between packs (a commit writing a path to the content it has)
+  /// changes no content.
+  val relocateKeepsContent: bool =
+    packsHold(state.bucket, refsReach(state.bucket).union(reflogReaches(state.bucket)))
+
+  /// gc sweeping packs has doomed none that a commit a ref reaches names.
+  val gcSparesNamedPacks: bool =
+    state.collector.phase == GcSweepingPacks
+      implies state.collector.doomedPacks.intersect(packsNamedBy(state.bucket, refsReach(state.bucket))) == Set()
 
   /// Every move of the ref keeps what it named before, unless a rewrite's record names
   /// the move: nothing published is overwritten unaccounted for.
@@ -481,6 +517,9 @@ module pail {
   val safety: bool = and {
     gcRunsAlone,
     branchIsComplete,
+    packsAreStored,
+    relocateKeepsContent,
+    gcSparesNamedPacks,
     refOnlyMovesForward,
     publishedIsOnBranch,
     recentIsTruthful,
