@@ -74,6 +74,8 @@ pub struct Store {
     /// The credential provider's cache, dropped when the store answers 401 so the next request
     /// fetches a fresh credential (a provider's idea of expiry can be wrong).
     creds: Option<Arc<crate::creds::Source>>,
+    /// The time leases are judged by (`lease`); the system's unless a test moves its own.
+    clock: Arc<dyn crate::clock::Clock>,
 }
 
 impl Store {
@@ -117,6 +119,7 @@ impl Store {
                     url: url.to_string(),
                     stats,
                     creds: None,
+                    clock: crate::clock::system(),
                 })
             }
             "s3" => {
@@ -135,6 +138,7 @@ impl Store {
                     url: url.to_string(),
                     stats,
                     creds: helper,
+                    clock: crate::clock::system(),
                 })
             }
             "gs" => {
@@ -155,6 +159,7 @@ impl Store {
                     url: url.to_string(),
                     stats,
                     creds: helper,
+                    clock: crate::clock::system(),
                 })
             }
             "https" | "http" => {
@@ -170,6 +175,7 @@ impl Store {
                     url: url.to_string(),
                     stats,
                     creds: helper,
+                    clock: crate::clock::system(),
                 })
             }
             s => bail!("unsupported store scheme {s}:// (use file://, s3://, gs:// or https://)"),
@@ -186,7 +192,18 @@ impl Store {
             url: url.to_string(),
             stats: Arc::new(Stats::default()),
             creds: None,
+            clock: crate::clock::system(),
         }
+    }
+
+    /// This store judging leases by `clock` (see [`crate::clock`]).
+    pub fn with_clock(mut self, clock: Arc<dyn crate::clock::Clock>) -> Store {
+        self.clock = clock;
+        self
+    }
+
+    pub fn clock(&self) -> &Arc<dyn crate::clock::Clock> {
+        &self.clock
     }
 
     /// The shortest sustainable interval between writes to one object: GCS allows about one

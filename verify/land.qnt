@@ -33,14 +33,14 @@ module land {
   pure def stackCan(s: State, c: str): bool = and {
     client(s, c).phase == Idle,
     not(s.bucket.refs.keys().contains(c)),
-    not(leasedByOthers(s.bucket, c, Set(Exclusive))),
+    not(leasedByOthers(s.bucket, c, Set(Exclusive), s.now)),
   }
 
   pure def stackNext(s: State, c: str, delta: Delta): State = {
     val on = tip(s.bucket).commit
     val id = on.append(c)
-    val stored = unleased(uploaded(leased(s.bucket, c, Shared), id, on, delta), c)
-    val b = unleased(leased(stored, c, Shared), c)
+    val stored = unleased(uploaded(leased(s.bucket, c, Shared, s.now), id, on, delta), c)
+    val b = unleased(leased(stored, c, Shared, s.now), c)
     {
       ...s,
       bucket: { ...b, refs: created(b.refs, c, { commit: id, recent: Map(), lineage: NO_LINEAGE }) },
@@ -92,15 +92,20 @@ module land {
     // The stack's one commit is below the fork point, or the branch has a copy above it.
     if (base == t or above.exists(x => authorsOf(x).contains(c)))
       finished(s, c, { ...client(s, c), phase: Done, outcome: Published, ld: seen })
-    else if (base == cur.commit)
-      withClient(s, c, { ...client(s, c), phase: LdSwapping, ld: { ...seen, tip: t } })
+    else if (base == cur.commit) {
+      val after = withClient(s, c, { ...client(s, c), phase: LdSwapping, ld: { ...seen, tip: t } })
+      guarded(after, c, ldSwapNext(after, c, Dropped))
+    }
     else Set(deltaOf(s.bucket, t, parentOf(s.bucket, t))).fold(s, (n, d) =>
       if (d.keys().exists(p => treeOf(s.bucket, base).get(p) != treeOf(s.bucket, cur.commit).get(p)))
         finished(s, c, { ...client(s, c), phase: Done, outcome: Conflicted, ld: seen })
       else Set(remade(c, t, cur.commit)).fold(s, (n2, id) => {
-        ...s,
-        bucket: uploaded(s.bucket, id, cur.commit, d),
-        clients: s.clients.set(c, { ...client(s, c), phase: LdSwapping, ld: { ...seen, tip: id } }),
+        val after = {
+          ...s,
+          bucket: uploaded(s.bucket, id, cur.commit, d),
+          clients: s.clients.set(c, { ...client(s, c), phase: LdSwapping, ld: { ...seen, tip: id } }),
+        }
+        guarded(after, c, ldSwapNext(after, c, Dropped))
       })
     )
   }

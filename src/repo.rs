@@ -370,6 +370,11 @@ impl Repo {
         Ok(crate::lease::Writing::new(self.leases.clone()))
     }
 
+    /// The write lease this client holds, if any, for tests to read its age from.
+    pub fn lease_probe(&self) -> Option<crate::lease::Probe> {
+        self.leases.probe()
+    }
+
     /// Run `op` holding the write lease.
     async fn with_lease<T>(&self, op: impl std::future::Future<Output = Result<T>>) -> Result<T> {
         self.leases.enter(&self.store, self.lease_wait).await?;
