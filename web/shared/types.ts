@@ -83,15 +83,24 @@ export interface PrRecord {
   base: string;
   author: string;
   state: "open" | "merged" | "closed";
+  /** Not mergeable until marked ready. */
+  draft?: boolean;
   created?: number;
+  updated?: number;
+  closed_at?: number;
+  closed_by?: string;
   merged_commit?: string;
   merged_by?: string;
   merged_at?: number;
 }
 
-export interface Review { who: string; verdict: "approve" | "changes"; comment: string; at?: number }
+/** `who` is the name to show; `byAuthor` is true when the PR's author wrote it (it does not count). */
+export interface Review { who: string; verdict: "approve" | "changes"; comment: string; at?: number; byAuthor: boolean }
 
-export interface PrSummary extends PrRecord { headCommit: string | null; checks?: CheckRollup; approvals: number; changesRequested: number }
+/** `_meta:prs/<n>/comments/<ms>-<who>.json` */
+export interface PrComment { id: string; who: string; body: string; at?: number }
+
+export interface PrSummary extends PrRecord { headCommit: string | null; checks?: CheckRollup; approvals: number; changesRequested: number; comments: number }
 
 export interface Policy { approvals: number; required_checks: string[] }
 
@@ -100,12 +109,31 @@ export interface PrDetail {
   headCommit: string | null;
   baseCommit: string | null;
   reviews: Review[];
+  comments: PrComment[];
   commits: CommitSummary[];
   checks: CheckResult[];
   policy: Policy;
   readiness: { ready: boolean; problems: string[] };
   actions: boolean;
 }
+
+/** base...head: what a pull request from head into base would contain. */
+export interface Compare {
+  base: string;
+  head: string;
+  baseCommit: string;
+  headCommit: string;
+  commits: CommitSummary[];
+  patch: string;
+  truncated: boolean;
+  /** An open pull request for the same head and base. */
+  existing: number | null;
+  /** The first commit's subject and body: the defaults for a new pull request. */
+  title: string;
+  body: string;
+}
+
+export interface NewPr { title: string; body?: string; head: string; base: string; draft?: boolean }
 
 export interface PrDiff { patch: string; from: string | null; to: string | null; truncated: boolean }
 

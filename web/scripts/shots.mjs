@@ -36,6 +36,21 @@ shot("commits", `/${repo}/commits/main`);
 shot("pull-request", `/${repo}/pull/2`);
 shot("pull-request-changes", `/${repo}/pull/2?tab=changes`);
 shot("checks", `/${repo}/checks`);
+// With actions on (`PAIL_WEB_ACTIONS=1`): the compare page, and a draft PR with a comment. This
+// opens the PR on the demo repository if there is none for the branch yet.
+const cfg = JSON.parse(execFileSync("curl", ["-s", `${base}/api/config`], { encoding: "utf8" }));
+if (cfg.actions) {
+  const head = "fix/typo-in-design";
+  const post = (path, body) => execFileSync("curl", ["-s", "-X", "POST", "-H", "Content-Type: application/json", "-d", JSON.stringify(body), `${base}/api/repos/${repo}${path}`], { encoding: "utf8" });
+  shot("compare", `/${repo}/compare?base=main&head=${head}`);
+  let pr = JSON.parse(execFileSync("curl", ["-s", `${base}/api/repos/${repo}/prs`], { encoding: "utf8" })).find((p) => p.head === head && p.state === "open");
+  if (!pr) {
+    pr = JSON.parse(post("/prs", { title: "Fix typo in design notes", body: "One word: *heartbeating* reads badly.\n\nOpened as a draft while I look for more of these.", head, base: "main", draft: true })).pr;
+    post(`/prs/${pr.id}/comments`, { body: "Found two more in `docs/design.md`; I will fold them in before marking this ready." });
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000); // let the "branch moved" toast go
+  shot("pull-request-draft", `/${repo}/pull/${pr.id}`);
+}
 shot("repo-home-dark", `/${repo}`, { theme: "dark" });
 shot("commit-diff-dark", `/${repo}/commit/${squash}`, { theme: "dark" });
 shot("mobile-home", `/${repo}`, { w: 390, h: 844 });

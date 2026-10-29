@@ -20,7 +20,7 @@ events   pail events [--branch GLOB] [--gcs-subscription SUB]
 | `pr/<anything>` | a branch proposed for review (convention only; any branch can be a PR head) |
 | `_meta` | a branch holding records, not code: PRs, reviews, check results. Writes are commits, so they are atomic, versioned and conflict-checked |
 | `_meta:prs/<n>.json` | a pull request: `id, title, body, head, base, author, state` (`open`, `closed`, `merged`), `draft`, `created`, `updated`, `closed_at`, `closed_by`, `merged_at`, `merged_by`, `merged_commit`. Times are epoch seconds; everything after `state` is optional, so older records stay valid |
-| `_meta:prs/<n>/reviews/<who>.json` | a review: `{"verdict": "approve"\|"changes", "comment", "at"}`; one per person, a new review replaces theirs |
+| `_meta:prs/<n>/reviews/<who>.json` | a review: `{"verdict": "approve"\|"changes", "comment", "at", "who"}` (`who` is the display name, optional); one per person, a new review replaces theirs |
 | `_meta:prs/<n>/comments/<ms>-<who>.json` | a comment: `{"who", "body", "at"}`. `<ms>` is epoch milliseconds, zero-padded to 13 digits, so names sort in time order; claimed with `--if-absent` (on a clash, try `ms+1`) |
 | `_meta:checks/<commit>/<check>.json` | a check result for a commit: pending, success or failure, with a log tail |
 | `<branch>:pail.ci.json` | the checks a commit declares: `{"checks": {"test": "cargo test"}, "required": ["test"]}` |

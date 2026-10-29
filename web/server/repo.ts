@@ -4,19 +4,39 @@ import type { RepoConfig } from "./config.js";
 import { PailError, type PailRunner } from "./pail.js";
 import type {
   BlobView, BranchInfo, CheckResult, CheckRollup, CheckState, CommitSummary, LogPage, Policy,
-  PrDetail, PrDiff, PrRecord, PrSummary, Review, TreeEntry, TreeListing,
+  Compare, NewPr, PrComment, PrDetail, PrDiff, PrRecord, PrSummary, Review, TreeEntry, TreeListing,
 } from "../shared/types.js";
 
 export const META = "_meta";
 const HEX64 = /^[0-9a-f]{64}$/;
 const IMAGE = /\.(png|jpe?g|gif|webp|avif|ico|bmp|svg)$/i;
 const MAX_TEXT = 1024 * 1024;
+export const MAX_TITLE = 256;
+export const MAX_BODY = 60_000;
+
+/** A person's name as a file name, the way `pail pr` writes it: `Alice Smith` is `Alice-Smith`. */
+export function slug(name: string): string {
+  return name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "").slice(0, 64) || "user";
+}
+
+/** A one-line title or a body, within the limits `pail pr` applies. */
+export function checkText(label: string, v: unknown, max: number, oneLine: boolean, required = false): string {
+  if (v === undefined || v === null) v = "";
+  if (typeof v !== "string") throw new HttpError(400, `${label} must be text`);
+  const t = oneLine ? v.trim() : v;
+  if (oneLine && /[\r\n\0]/.test(t)) throw new HttpError(400, `${label} must be one line`);
+  if (t.length > max) throw new HttpError(400, `${label} is too long (max ${max} characters)`);
+  if (required && !t.trim()) throw new HttpError(400, `${label} is required`);
+  return t;
+}
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) {
     super(message);
   }
 }
+
+interface RawReview { key: string; who: string; verdict: "approve" | "changes"; comment: string; at?: number }
 
 interface RawCommit {
   id: string; parent: string | null; author: string; author_date: string; committer: string;
@@ -399,44 +419,56 @@ export class Repo {
     return { approvals: pol?.approvals ?? 1, required_checks: pol?.required_checks ?? ci.required };
   }
 
-  private async prIndex(tip: string): Promise<{ records: PrRecord[]; reviews: Map<number, Review[]> }> {
+  private async prIndex(tip: string): Promise<{ records: PrRecord[]; reviews: Map<number, RawReview[]>; comments: Map<number, PrComment[]> }> {
     return this.cache.get(this.k("prindex", tip), async () => {
       const paths = await this.lsRecursive(tip, "prs");
       const prFiles = paths.filter((p) => /^\d+\.json$/.test(p));
       const revFiles = paths.filter((p) => /^\d+\/reviews\/[^/]+\.json$/.test(p));
-      const got = await this.readMany(tip, [...prFiles, ...revFiles].map((p) => `prs/${p}`));
+      const comFiles = paths.filter((p) => /^\d+\/comments\/[^/]+\.json$/.test(p)).sort();
+      const got = await this.readMany(tip, [...prFiles, ...revFiles, ...comFiles].map((p) => `prs/${p}`));
       const records: PrRecord[] = [];
       for (const f of prFiles) {
         try { records.push(JSON.parse(got.get(`prs/${f}`)!.toString())); } catch { /* skip */ }
       }
-      const reviews = new Map<number, Review[]>();
+      const reviews = new Map<number, RawReview[]>();
       for (const f of revFiles) {
         const [n, , file] = f.split("/");
         try {
           const r = JSON.parse(got.get(`prs/${f}`)!.toString());
-          reviews.set(Number(n), [...(reviews.get(Number(n)) ?? []), { who: file.slice(0, -5), verdict: r.verdict, comment: r.comment ?? "", at: r.at }]);
+          const key = file.slice(0, -5);
+          reviews.set(Number(n), [...(reviews.get(Number(n)) ?? []), { key, who: typeof r.who === "string" && r.who ? r.who : key, verdict: r.verdict, comment: r.comment ?? "", at: r.at }]);
+        } catch { /* skip */ }
+      }
+      const comments = new Map<number, PrComment[]>();
+      for (const f of comFiles) {
+        const [n, , file] = f.split("/");
+        try {
+          const c = JSON.parse(got.get(`prs/${f}`)!.toString());
+          if (typeof c.body !== "string") continue;
+          comments.set(Number(n), [...(comments.get(Number(n)) ?? []), { id: file.slice(0, -5), who: typeof c.who === "string" && c.who ? c.who : file.slice(0, -5).replace(/^\d+-/, ""), body: c.body, at: c.at }]);
         } catch { /* skip */ }
       }
       records.sort((a, b) => b.id - a.id);
-      return { records, reviews };
+      return { records, reviews, comments };
     });
   }
 
   async prs(): Promise<PrSummary[]> {
     const tip = await this.metaTip();
     if (!tip) return [];
-    const { records, reviews } = await this.prIndex(tip);
+    const { records, reviews, comments } = await this.prIndex(tip);
     const refs = await this.refs();
     return Promise.all(
       records.map(async (pr) => {
         const headCommit = refs.branches.find((b) => b.name === pr.head)?.commit ?? null;
-        const revs = (reviews.get(pr.id) ?? []).filter((r) => r.who !== pr.author);
+        const revs = (reviews.get(pr.id) ?? []).filter((r) => r.key !== slug(pr.author));
         return {
           ...pr,
           headCommit,
           checks: pr.state === "open" && headCommit ? await this.rollup(headCommit) : undefined,
           approvals: revs.filter((r) => r.verdict === "approve").length,
           changesRequested: revs.filter((r) => r.verdict === "changes").length,
+          comments: comments.get(pr.id)?.length ?? 0,
         };
       }),
     );
@@ -461,15 +493,16 @@ export class Repo {
     }
     const checkCommit = headCommit ?? pr.merged_commit ?? null;
     const checks = checkCommit ? await this.checks(checkCommit, policy.required_checks) : [];
-    const reviews = (idx?.reviews.get(n) ?? []).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
-    const approvals = reviews.filter((r) => r.verdict === "approve" && r.who !== pr.author).length;
+    const reviews: Review[] = (idx?.reviews.get(n) ?? []).sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map(({ key, ...r }) => ({ ...r, byAuthor: key === slug(pr.author) }));
+    const approvals = reviews.filter((r) => r.verdict === "approve" && !r.byAuthor).length;
     const problems: string[] = [];
     const failing = policy.required_checks.filter((c) => checks.find((x) => x.name === c)?.state !== "success");
     if (failing.length) problems.push(`required checks not passing: ${failing.join(", ")}`);
     if (approvals < policy.approvals) problems.push(`${approvals} of ${policy.approvals} approvals`);
     if (pr.state !== "open") problems.push(`pull request is ${pr.state}`);
+    else if (pr.draft) problems.push("pull request is a draft");
     if (!headCommit && pr.state === "open") problems.push(`branch ${pr.head} no longer exists`);
-    return { pr, headCommit, baseCommit, reviews, commits, checks, policy, readiness: { ready: !problems.length, problems }, actions: this.actionsOn };
+    return { pr, headCommit, baseCommit, reviews, comments: idx?.comments.get(n) ?? [], commits, checks, policy, readiness: { ready: !problems.length, problems }, actions: this.actionsOn };
   }
 
   async prDiff(n: number): Promise<PrDiff> {
@@ -483,12 +516,33 @@ export class Repo {
     return this.rangeDiff(fork, d.headCommit);
   }
 
+  // ---- compare: what a pull request from head into base would contain ---------------------------
+
+  private async branchTip(name: string, label: string): Promise<string> {
+    if (typeof name !== "string" || !name || name.startsWith("-") || name.startsWith("_") || /[\s\0]/.test(name) || name.length > 300) throw new HttpError(400, `bad ${label} branch "${String(name).slice(0, 80)}"`);
+    const b = (await this.refs()).branches.find((x) => x.name === name);
+    if (!b) throw new HttpError(404, `no ${label} branch "${name}"`);
+    return b.commit;
+  }
+
+  async compare(base: string, head: string): Promise<Compare> {
+    const [baseCommit, headCommit] = await Promise.all([this.branchTip(base, "base"), this.branchTip(head, "head")]);
+    const commits = baseCommit === headCommit ? [] : (await this.log({ ref: headCommit, range: `${baseCommit}..${headCommit}`, limit: 200 })).commits;
+    let diff: PrDiff = { patch: "", from: null, to: headCommit, truncated: false };
+    if (commits.length) diff = await this.rangeDiff(commits[commits.length - 1].parent ?? baseCommit, headCommit);
+    const tip = await this.metaTip();
+    const existing = tip ? (await this.prIndex(tip)).records.find((p) => p.state === "open" && p.head === head && p.base === base)?.id ?? null : null;
+    const first = commits[commits.length - 1];
+    return { base, head, baseCommit, headCommit, commits, patch: diff.patch, truncated: diff.truncated, existing, title: first?.subject ?? "", body: first?.body ?? "" };
+  }
+
   // ---- actions (opt-in) ------------------------------------------------------------------------
 
   private requireActions() {
     if (!this.actionsOn) throw new HttpError(403, "actions are disabled: set \"actions\": true in the config");
   }
 
+  /** The name to show for who acts, and the file-name form of it. */
   private who() {
     const a = this.author ?? process.env.PAIL_AUTHOR;
     return (a ? a.split("<")[0].trim() : process.env.USER ?? "web") || "web";
@@ -500,30 +554,127 @@ export class Repo {
     if (files.length !== 1) throw new Error("one file per put");
     args.push("--file", `${files[0][0]}=-`);
     if (ifAbsent) args.push("--if-absent");
-    await this.run(args, files[0][1]);
+    try {
+      await this.run(args, files[0][1]);
+    } finally {
+      this.invalidateRefs();
+    }
+  }
+
+  /** A fresh read of one open-or-not record, for a change to it (not the 3-second-old ref). */
+  private async fresh(n: number): Promise<PrDetail> {
     this.invalidateRefs();
+    return this.pr(n);
+  }
+
+  private async saveRecord(rec: PrRecord, message: string) {
+    await this.put(message, [[`prs/${rec.id}.json`, JSON.stringify({ ...rec, updated: now() }, null, 1)]]);
+  }
+
+  /** Open a pull request: the same record `pail pr create` writes, its id claimed with --if-absent. */
+  async createPr(input: Partial<NewPr>): Promise<PrRecord> {
+    this.requireActions();
+    const title = checkText("title", input.title, MAX_TITLE, true, true);
+    const body = checkText("body", input.body, MAX_BODY, false);
+    const draft = input.draft === true;
+    const head = String(input.head ?? "");
+    const base = String(input.base ?? "");
+    const c = await this.compare(base, head);
+    if (head === base) throw new HttpError(400, "head and base are the same branch");
+    if (!c.commits.length) throw new HttpError(400, `no commits between ${base} and ${head}`);
+    if (c.existing) throw new HttpError(409, `pull request #${c.existing} is already open for ${head} into ${base}`);
+    this.invalidateRefs();
+    const tip = await this.metaTip();
+    let n = Math.max(0, ...(tip ? (await this.prIndex(tip)).records.map((p) => p.id) : [])) + 1;
+    for (let tries = 0; tries < 50; tries++, n++) {
+      const t = now();
+      const rec: PrRecord = { id: n, title, body, head, base, author: this.who(), state: "open", draft, created: t, updated: t };
+      try {
+        await this.put(`Open PR ${n}: ${title}`, [[`prs/${n}.json`, JSON.stringify(rec, null, 1)]], true);
+        return rec;
+      } catch (e) {
+        if (!(e instanceof PailError && e.code === 4)) throw e; // 4: someone claimed this id first
+      }
+    }
+    throw new HttpError(503, "could not claim a pull request id");
   }
 
   async review(n: number, verdict: "approve" | "changes", comment: string) {
     this.requireActions();
     await this.pr(n);
-    const rec = { verdict, comment, at: Math.floor(Date.now() / 1000) };
-    await this.put(`Review PR ${n}: ${verdict}`, [[`prs/${n}/reviews/${this.who()}.json`, JSON.stringify(rec)]]);
+    const who = this.who();
+    const rec = { verdict, comment: checkText("comment", comment, MAX_BODY, false), at: now(), who };
+    await this.put(`Review PR ${n}: ${verdict}`, [[`prs/${n}/reviews/${slug(who)}.json`, JSON.stringify(rec)]]);
+  }
+
+  async comment(n: number, body: string): Promise<PrComment> {
+    this.requireActions();
+    await this.pr(n);
+    const text = checkText("comment", body, MAX_BODY, false, true);
+    const who = this.who();
+    let ms = Date.now();
+    for (let tries = 0; tries < 50; tries++, ms++) {
+      const id = `${String(ms).padStart(13, "0")}-${slug(who)}`;
+      const rec = { who, body: text, at: now() };
+      try {
+        await this.put(`Comment on PR ${n}`, [[`prs/${n}/comments/${id}.json`, JSON.stringify(rec)]], true);
+        return { id, ...rec };
+      } catch (e) {
+        if (!(e instanceof PailError && e.code === 4)) throw e;
+      }
+    }
+    throw new HttpError(503, "could not store the comment");
+  }
+
+  async edit(n: number, input: { title?: unknown; body?: unknown }) {
+    this.requireActions();
+    const { pr } = await this.fresh(n);
+    if (input.title === undefined && input.body === undefined) throw new HttpError(400, "nothing to change");
+    const rec = { ...pr };
+    if (input.title !== undefined) rec.title = checkText("title", input.title, MAX_TITLE, true, true);
+    if (input.body !== undefined) rec.body = checkText("body", input.body, MAX_BODY, false);
+    await this.saveRecord(rec, `Edit PR ${n}`);
+  }
+
+  async setDraft(n: number, draft: boolean) {
+    this.requireActions();
+    const { pr } = await this.fresh(n);
+    if (pr.state !== "open") throw new HttpError(409, `pull request is ${pr.state}`);
+    await this.saveRecord({ ...pr, draft }, `PR ${n} ${draft ? "back to draft" : "ready for review"}`);
+  }
+
+  async close(n: number) {
+    this.requireActions();
+    const { pr } = await this.fresh(n);
+    if (pr.state !== "open") throw new HttpError(409, `pull request is ${pr.state}`);
+    await this.saveRecord({ ...pr, state: "closed", closed_at: now(), closed_by: this.who() }, `Close PR ${n}`);
+  }
+
+  async reopen(n: number) {
+    this.requireActions();
+    const d = await this.fresh(n);
+    if (d.pr.state !== "closed") throw new HttpError(409, `pull request is ${d.pr.state}; only a closed one can be reopened`);
+    if (!d.headCommit) throw new HttpError(409, `branch ${d.pr.head} no longer exists`);
+    const { closed_at: _a, closed_by: _b, ...rec } = d.pr;
+    await this.saveRecord({ ...rec, state: "open" }, `Reopen PR ${n}`);
   }
 
   async merge(n: number, force: boolean) {
     this.requireActions();
-    const d = await this.pr(n);
+    const d = await this.fresh(n);
     if (d.pr.state !== "open") throw new HttpError(409, `pull request is ${d.pr.state}`);
+    if (d.pr.draft) throw new HttpError(409, "pull request is a draft: mark it ready for review first");
+    if (!d.headCommit) throw new HttpError(409, `branch ${d.pr.head} no longer exists`);
     if (!d.readiness.ready && !force) throw new HttpError(409, `cannot merge: ${d.readiness.problems.join("; ")}`);
     const out = (await this.run(["land", d.pr.head, "--stack", "--onto", d.pr.base])).toString();
     this.invalidateRefs();
     const tip = (await this.refs()).branches.find((b) => b.name === d.pr.base)?.commit;
-    const rec = { ...d.pr, state: "merged", merged_commit: tip, merged_by: this.who(), merged_at: Math.floor(Date.now() / 1000) };
-    await this.put(`Merge PR ${n}`, [[`prs/${n}.json`, JSON.stringify(rec, null, 1)]]);
+    await this.saveRecord({ ...d.pr, state: "merged", merged_commit: tip, merged_by: this.who(), merged_at: now() }, `Merge PR ${n}`);
     return out.trim();
   }
 }
+
+const now = () => Math.floor(Date.now() / 1000);
 
 export function rollupOf(states: CheckState[]): CheckRollup {
   const failed = states.filter((s) => s === "failure").length;

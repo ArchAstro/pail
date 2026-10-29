@@ -8,7 +8,7 @@ write is a `pail put` (an atomic commit), ids are claimed with `--if-absent`, an
     _meta:prs/<n>.json                       the PR: id, title, body, head, base, author, state,
                                              draft, created, updated, closed_at/by,
                                              merged_at/by, merged_commit
-    _meta:prs/<n>/reviews/<who>.json         {"verdict": "approve"|"changes", "comment", "at"}
+    _meta:prs/<n>/reviews/<who>.json         {"verdict": "approve"|"changes", "comment", "at", "who"}
     _meta:prs/<n>/comments/<ms>-<who>.json   {"who", "body", "at"}
     _meta:checks/<commit>/<check>.json       written by CI (pail-ci)
     <base>:pail.pr.json                      policy: {"approvals": 1, "required_checks": ["test"]}
@@ -345,7 +345,7 @@ def view_json(d):
     head, checks, pol, problems = readiness(d)
     return {
         "pr": d["pr"], "head_commit": head, "checks": checks, "policy": pol,
-        "reviews": [dict(r, who=w) for w, r in sorted(d["reviews"].items())],
+        "reviews": [dict(r, who=r.get("who") or w, key=w) for w, r in sorted(d["reviews"].items())],
         "comments": d["comments"], "ready": not problems, "problems": problems,
     }
 
@@ -373,7 +373,7 @@ def cmd_view(a):
     if d["reviews"]:
         print("\nreviews:")
         for who, r in sorted(d["reviews"].items()):
-            print(f"  {who:12} {r['verdict']}" + (f": {r['comment']}" if r.get("comment") else ""))
+            print(f"  {r.get('who') or who:12} {r['verdict']}" + (f": {r['comment']}" if r.get("comment") else ""))
     if d["comments"]:
         print("\ncomments:")
         for c in d["comments"]:
@@ -430,7 +430,7 @@ def message_arg(a, label, required):
 def cmd_review(a):
     rec = get_pr(a.n, full=False)
     verdict = "approve" if a.approve else "changes"
-    r = {"verdict": verdict, "comment": message_arg(a, "comment", False), "at": now()}
+    r = {"verdict": verdict, "comment": message_arg(a, "comment", False), "at": now(), "who": user()}
     put(f"Review PR {a.n}: {verdict}", f"prs/{a.n}/reviews/{slug(user())}.json", json.dumps(r))
     print(f"reviewed PR {a.n}: {verdict}" + (" (your own approval does not count)" if verdict == "approve" and slug(rec["author"]) == slug(user()) else ""))
 
