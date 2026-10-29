@@ -2368,3 +2368,105 @@ fn json_log_and_branches_for_browsers() {
     assert_eq!(v["branches"][0]["name"], "main");
     assert_eq!(v["branches"][0]["commit"], all[0]["id"]);
 }
+
+/// `pail <name>` runs `pail-<name>` from PATH with the store and the pail binary in its
+/// environment, forwards its exit code, and lists it in `pail help` and `pail --list`.
+#[cfg(unix)]
+#[test]
+fn plugins_run_from_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let bin = t.join("bin");
+    let script = bin.join("pail-hello");
+    write(
+        &script,
+        "#!/bin/sh\necho \"args=$* store=$PAIL_STORE bin=$PAIL_BIN\"\nexit ${HELLO_EXIT:-0}\n",
+    );
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Not executable, and a credential provider: neither is a plugin.
+    write(&bin.join("pail-plain"), "#!/bin/sh\n");
+    write(&bin.join("pail-credential-x"), "#!/bin/sh\n");
+    std::fs::set_permissions(
+        &bin.join("pail-credential-x"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let store = format!("file://{}", t.join("bucket").display());
+    let with_path = |args: &[&str]| {
+        let mut c = cmd(&t, args);
+        c.env("PATH", &path);
+        c
+    };
+    pail(&t, &["init", &store]);
+
+    // Arguments pass through (including flags pail itself would reject); the store is the
+    // --store flag's, and PAIL_BIN is this binary.
+    let out = with_path(&["--store", &store, "hello", "a", "--flag", "-m", "x y"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("args=a --flag -m x y"), "{s}");
+    assert!(s.contains(&format!("store={store}")), "{s}");
+    assert!(s.contains(env!("CARGO_BIN_EXE_pail")), "{s}");
+
+    // PAIL_STORE from the environment, and the store of the working copy we are in.
+    let out = with_path(&["hello"])
+        .env("PAIL_STORE", &store)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("store={store}")));
+    pail(&t, &["clone", &store, "w"]);
+    let out = with_path(&["hello"])
+        .current_dir(t.join("w"))
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("store={store}")),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // The exit code is the plugin's.
+    let out = with_path(&["hello"])
+        .env("HELLO_EXIT", "7")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7));
+
+    // Listed, minus non-plugins.
+    let help = String::from_utf8_lossy(&with_path(&[]).output().unwrap().stdout).to_string();
+    assert!(
+        help.contains("Plugins") && help.contains("pail-hello"),
+        "{help}"
+    );
+    assert!(
+        !help.contains("pail-plain") && !help.contains("credential-x"),
+        "{help}"
+    );
+    let list =
+        String::from_utf8_lossy(&with_path(&["--list"]).output().unwrap().stdout).to_string();
+    assert!(
+        list.starts_with("hello") && list.contains("pail-hello"),
+        "{list}"
+    );
+    assert!(!list.contains("plain"), "{list}");
+
+    // Built-ins win over a plugin of the same name; unknown names are still errors.
+    write(&bin.join("pail-log"), "#!/bin/sh\necho shadowed\n");
+    std::fs::set_permissions(
+        &bin.join("pail-log"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let out = with_path(&["--store", &store, "log"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("shadowed"));
+    let out = with_path(&["nosuchthing"]).output().unwrap();
+    assert!(!out.status.success());
+}
