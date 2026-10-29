@@ -561,6 +561,40 @@ enum CacheCmd {
     },
 }
 
+/// Say so when the working copy's tip keeps its files in many small packs (`pail
+/// maintenance repack` merges them). `status` says it at most once a day; a threshold of 0
+/// (`maintenance.warnSmallPacks`) turns it off. Advice never fails a command.
+async fn warn_small_packs(wt: &Worktree, rate_limited: bool) {
+    let Some(base) = wt.head.base else { return };
+    let cfg = Config::load(Some(&wt.local.dir));
+    let threshold = cfg
+        .get("maintenance.warnSmallPacks")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(pail::repack::ADVISE_PACKS);
+    let marker = wt.local.dir.join("repack-advice");
+    if rate_limited
+        && std::fs::metadata(&marker)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < std::time::Duration::from_secs(86_400))
+    {
+        return;
+    }
+    let advice = async {
+        let root = wt.repo.commit_obj(&base).await?.root;
+        anyhow::Ok(pail::repack::advice(
+            &wt.repo.entries(root).await?,
+            threshold,
+        ))
+    }
+    .await;
+    if let Ok(Some(a)) = advice {
+        eprintln!("warning: {}", a.message());
+        let _ = std::fs::write(&marker, base.hex());
+    }
+}
+
 fn parse_size(s: &str) -> Result<u64> {
     let s = s.trim();
     let (num, mult) = match s.chars().last().map(|c| c.to_ascii_uppercase()) {
@@ -1212,6 +1246,7 @@ async fn run(cli: Cli) -> Result<()> {
                 fmt_bytes(down),
                 checkout_summary(&co)
             );
+            warn_small_packs(&wt, false).await;
             wt.hooks().notify(
                 "post-checkout",
                 &[&pail::hooks::id(None), &wt.head.base.unwrap().hex(), "1"],
@@ -1221,6 +1256,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Status => {
             let wt = Worktree::open(&cwd()?)?;
             let st = wt.status().await?;
+            warn_small_packs(&wt, true).await;
             println!(
                 "on {} @ {}",
                 wt.head.branch,

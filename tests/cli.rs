@@ -2270,3 +2270,49 @@ fn repack_changes_layout_not_content() {
         "{help}"
     );
 }
+
+/// A clone whose tip is spread over many small packs says so, once; `status` repeats it at
+/// most daily; `maintenance.warnSmallPacks` sets or silences it.
+#[test]
+fn small_packs_are_warned_about_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "alice"]);
+    let a = t.join("alice");
+    for i in 0..5 {
+        write(
+            &a.join(format!("f{i}.txt")),
+            &format!("file {i} {}\n", "x".repeat(200)),
+        );
+        pail(&a, &["add", "-A"]);
+        pail(&a, &["commit", "-m", &format!("add {i}")]);
+    }
+    let global = t.join("gconfig");
+    std::fs::write(&global, "[maintenance]\n\twarnSmallPacks = 3\n").unwrap();
+    let with = |dir: &Path, args: &[&str]| {
+        let out = cmd(dir, args)
+            .env("PAIL_CONFIG_GLOBAL", &global)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    let err = with(&t, &["clone", &store, "carol"]);
+    assert!(
+        err.contains("warning: 5 of this tip's 5 packs") && err.contains("maintenance repack"),
+        "{err}"
+    );
+    let c = t.join("carol");
+    assert!(!with(&c, &["status"]).contains("warning"), "once per day");
+    std::fs::remove_file(c.join(".pail/repack-advice")).unwrap();
+    assert!(with(&c, &["status"]).contains("warning"));
+    // Below the threshold, or switched off, it stays quiet.
+    std::fs::write(&global, "[maintenance]\n\twarnSmallPacks = 0\n").unwrap();
+    assert!(!with(&t, &["clone", &store, "dave"]).contains("warning"));
+    pail(&a, &["maintenance", "repack"]);
+    std::fs::write(&global, "[maintenance]\n\twarnSmallPacks = 3\n").unwrap();
+    assert!(!with(&t, &["clone", &store, "erin"]).contains("warning"));
+}
