@@ -198,6 +198,10 @@ module pail {
     Map("b" -> "1"),
   )
 
+  /// One draw in `SLOW` (four times that in `contendStep`) lets time pass, and two let a
+  /// refresh land or be answered.
+  pure val SLOW: int = 3
+
   action step = {
     nondet c = CLIENTS.oneOf()
     nondet base = liveKeys(state.bucket.commits).oneOf()
@@ -205,6 +209,10 @@ module pail {
     nondet d = Set(Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
+    // Time and its stalls are enabled in a fraction of the draws: otherwise a tick is as
+    // likely as any step, leases go stale before the writers get anywhere, and combining,
+    // rewrites and gc's deletes are rarely reached.
+    nondet slow = 1.to(SLOW).oneOf()
     any {
       begin(c, base, delta),
       nondet from = CLIENTS.oneOf()
@@ -248,11 +256,11 @@ module pail {
       gcListPages,
       gcDone,
       graceElapses,
-      tick,
-      refreshAck(c),
-      refreshAck(GC),
-      refreshLand(c, d),
-      refreshLand(GC, d),
+      all { slow == 1, tick },
+      all { slow <= 2, refreshAck(c) },
+      all { slow <= 2, refreshAck(GC) },
+      all { slow <= 2, refreshLand(c, d) },
+      all { slow <= 2, refreshLand(GC, d) },
       // Only enabled while sweeping, and then the doomed set is non-empty.
       nondet id = state.collector.doomedCommits.union(Set(ROOT)).oneOf()
       gcDeleteCommit(id),
@@ -271,6 +279,10 @@ module pail {
     nondet d = Set(Answered, Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
+    // Time and its stalls are enabled in a fraction of the draws: otherwise a tick is as
+    // likely as any step, leases go stale before the writers get anywhere, and combining,
+    // rewrites and gc's deletes are rarely reached.
+    nondet slow = 1.to(4 * SLOW).oneOf()
     any {
       begin(c, base, delta),
       nondet from = CLIENTS.oneOf()
@@ -305,9 +317,9 @@ module pail {
       ldSwap(c, d),
       ldRecheck(c),
       locate(c),
-      tick,
-      refreshAck(c),
-      refreshLand(c, d),
+      all { slow == 1, tick },
+      all { slow <= 2, refreshAck(c) },
+      all { slow <= 2, refreshLand(c, d) },
     }
   }
 

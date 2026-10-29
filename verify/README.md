@@ -108,7 +108,12 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 
 `npm run simulate` checks them over random interleavings of four clients and gc,
 including crashes, the clock ticking, stalled refreshers and the grace period passing at any
-moment (simulation, not proof: it samples behaviours rather than exhausting them). Two mutations confirm it is
+moment (simulation, not proof: it samples behaviours rather than exhausting them). Time
+and its stalls are enabled in a fraction of the draws (`SLOW` in `pail.qnt`): a tick as likely
+as any step let leases go stale before writers reached combining, rewrites or gc's deletes
+(`contendStep` then ran 30x faster than before the clock, a sign of runs that stopped
+mattering). Witness invariants (negations of: a combined commit, a rewrite, a gc delete, a
+lease expiring under a live holder) are found within seconds of `step` / `contendStep`. Two mutations confirm it is
 not vacuous: gc ignoring writers' leases, or writers ignoring gc's, each break
 `branchIsComplete` within seconds.
 
