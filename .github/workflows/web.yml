@@ -3,9 +3,9 @@ name: web
 on:
   push:
     branches: [main]
-    paths: ["web/**", ".github/workflows/web.yml"]
+    paths: ["web/**", "src/**", "Cargo.*", ".dockerignore", ".github/workflows/web.yml"]
   pull_request:
-    paths: ["web/**", ".github/workflows/web.yml"]
+    paths: ["web/**", "src/**", "Cargo.*", ".dockerignore", ".github/workflows/web.yml"]
 concurrency:
   group: web-${{ github.ref }}
   cancel-in-progress: true
@@ -33,3 +33,10 @@ jobs:
         env:
           PAIL_BIN: ${{ github.workspace }}/target/release/pail
       - run: npm run build
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t pail-web -f web/Dockerfile .
+      # The image's pail must have the flags the UI reads.
+      - run: docker run --rm --entrypoint pail pail-web log --help | grep -q -- --json

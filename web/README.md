@@ -27,7 +27,13 @@ PAIL_WEB_REPOS="app=gs://acme-vcs/app,infra=s3://acme-vcs/infra" npm start
 npm run dev         # API with reload, plus Vite with hot reload on :5173
 ```
 
-Docker: `docker build -t pail-web -f web/Dockerfile web`.
+Docker (from the repository root; the image builds pail from this checkout, so the CLI matches the UI):
+
+```sh
+docker build -t pail-web -f web/Dockerfile .
+docker run -p 4747:4747 -e PAIL_WEB_REPOS="app=gs://bucket/app" \
+  -v ~/.config/gcloud:/home/node/.config/gcloud:ro pail-web     # GCS credentials; use AWS_* env for S3
+```
 
 ## Configuration
 
