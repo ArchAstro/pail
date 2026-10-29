@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { BlobView, LogPage, TreeListing } from "../../shared/types";
+import type { BlobView, LogPage, PrSummary, TreeListing } from "../../shared/types";
 import { q, repoApi, useGet } from "../api";
 import { CodeView } from "../components/CodeView";
 import { CopyButton, ErrorNote, Loading, Tabs, Time, useDocumentTitle } from "../components/Bits";
@@ -10,14 +10,17 @@ import { RefPicker } from "../components/RefPicker";
 import { TreeTable } from "../components/TreeTable";
 import { Avatar } from "../components/Avatar";
 import { bytes } from "../lib/format";
-import { blobPath, commitPath, commitsPath, rawUrl, treePath } from "../lib/routes";
+import { blobPath, commitPath, commitsPath, comparePath, pullPath, rawUrl, treePath } from "../lib/routes";
 import { useCurrentRef, useRepo } from "../repoContext";
 
 export default function CodePage({ kind }: { kind: "tree" | "blob" }) {
-  const { repo, overview, resolve } = useRepo();
+  const { repo, overview, resolve, actions } = useRepo();
   const params = useParams();
   const nav = useNavigate();
   const { ref, path } = resolve(params["*"] ?? "");
+  const prs = useGet<PrSummary[]>(repoApi(repo, "/prs"));
+  const openPr = prs.data?.find((p) => p.head === ref && p.state === "open");
+  const isBranch = ref !== overview.default && overview.branches.some((b) => b.name === ref);
   useCurrentRef(ref);
   useDocumentTitle(`${path || repo} at ${ref.slice(0, 12)}`);
   const crumbs = path.split("/").filter(Boolean);
@@ -41,6 +44,8 @@ export default function CodePage({ kind }: { kind: "tree" | "blob" }) {
           })}
         </nav>
         <span className="top__fill" />
+        {isBranch && openPr && <Link className="btn btn--small" to={pullPath(repo, openPr.id)}><Icon name="pr" size={14} />Pull request #{openPr.id}</Link>}
+        {isBranch && !openPr && actions && <Link className="btn btn--small btn--primary" to={comparePath(repo, overview.default, ref)}><Icon name="pr" size={14} />Compare &amp; open pull request</Link>}
         <Link className="btn btn--small" to={commitsPath(repo, ref, path)}><Icon name="clock" size={14} />History</Link>
       </div>
       {kind === "tree" ? <TreeBody repo={repo} refName={ref} path={path} /> : <BlobBody repo={repo} refName={ref} path={path} />}

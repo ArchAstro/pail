@@ -5,11 +5,11 @@ import { Avatar } from "../components/Avatar";
 import { CheckBadge } from "../components/Checks";
 import { Time, useDocumentTitle } from "../components/Bits";
 import { Icon } from "../components/Icon";
-import { commitPath, commitsPath, pullPath, treePath } from "../lib/routes";
+import { commitPath, commitsPath, comparePath, pullPath, treePath } from "../lib/routes";
 import { useRepo } from "../repoContext";
 
 export default function BranchesPage() {
-  const { repo, overview } = useRepo();
+  const { repo, overview, actions } = useRepo();
   useDocumentTitle("Branches");
   const prs = useGet<PrSummary[]>(repoApi(repo, "/prs"));
   return (
@@ -34,6 +34,7 @@ export default function BranchesPage() {
                   {b.date && <Time iso={b.date} />}
                 </div>
               </div>
+              {actions && !b.isDefault && !pr && <Link className="btn btn--small btn--primary" to={comparePath(repo, overview.default, b.name)}><Icon name="pr" size={14} />Compare &amp; open pull request</Link>}
               <Link className="btn btn--small" to={commitsPath(repo, b.name)}>History</Link>
             </li>
           );

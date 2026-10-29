@@ -55,7 +55,7 @@ environment overrides. Defaults < file < environment < flags (`--config`, `--sto
 | `repos[].tokenEnv` / `token` | bearer token for an `https://` store (prefer `tokenEnv`; it never reaches argv or the UI) |
 | `repos[].env` | extra environment for that repo's pail processes, e.g. `{"AWS_PROFILE": "ci"}` |
 | `discover[].store` | a bucket prefix or directory: each child that is a pail repository is listed (needs `gcloud` or `aws` on `PATH` for `gs://` and `s3://`; `file://` needs nothing) |
-| `actions` | `true` enables review and merge buttons (off by default; the UI is read-only) |
+| `actions` | `true` enables the write side: open, edit, comment on, review, close, reopen and merge pull requests (off by default; the UI is read-only) |
 | `author` | identity for actions, `Name <email>` (else `PAIL_AUTHOR`) |
 | `pail` | the binary (default `pail`; also `PAIL_BIN`) |
 | `cacheDir`, `localCache` | where bare clones live and whether to use them (see Caching) |
@@ -84,11 +84,11 @@ to localhost or put it behind your own proxy (`PAIL_WEB_HOST=0.0.0.0` exposes it
 | history, commit | `log --json [--maintenance] [-n N --skip S] <commit> [-- path]` |
 | commit diff | `show <commit> --pretty=format: -p` |
 | tree, file | `ls -l <commit>:<dir>`, `cat-file -s/-p <commit>:<path>`, `ls -r <commit>` |
-| PRs, reviews, checks | `ls -r _meta:prs`, `cat-file --batch` over `_meta:prs/*.json`, `_meta:checks/<commit>/*.json` |
-| PR diff | `log --name-only base..head`, then the blobs on both sides, diffed in Node |
+| PRs, reviews, comments, checks | `ls -r _meta:prs`, `cat-file --batch` over `_meta:prs/<n>.json`, `…/reviews/*.json`, `…/comments/*.json`, `_meta:checks/<commit>/*.json` |
+| compare, PR diff | `log --name-only base..head`, then the blobs on both sides, diffed in Node |
 | policy, CI | `<base>:pail.pr.json`, `<commit>:pail.ci.json` |
 | live updates | `events` → Server-Sent Events |
-| actions | `put _meta --file prs/<n>/reviews/<who>.json=-`, `land <head> --stack --onto <base>` |
+| actions | `put _meta --file prs/<n>.json=- [--if-absent]` (open, edit, close, reopen, draft), `…/comments/<ms>-<who>.json=- --if-absent`, `…/reviews/<who>.json=-`, `land <head> --stack --onto <base>` |
 
 Two small CLI additions made this possible without parsing human text: `pail log --json` (pail ids and
 commit `meta`: `pail.maintenance`, `rewritten.from`, `landed.from`) and `pail branch --json`.
@@ -112,16 +112,26 @@ fetched twice, even across restarts. This matters on large repositories: see Per
   (branch names may contain slashes), history of a path. pail has no blame, so there is none here.
 - **Commits**: paginated log, commit page with unified or split diff, maintenance (repack) commits hidden
   behind a toggle, "squashed from" and "rewritten from" links from `rewritten.from`, "landed from" from `landed.from`.
-- **Pull requests** (`_meta:prs/<n>.json`): open, merged, closed filters; description, reviews, checks,
-  commits, diff against the base, and the merge policy from `<base>:pail.pr.json` with what is missing.
+- **Pull requests** (`_meta:prs/<n>.json`): open, merged, closed filters and a draft state; description,
+  reviews, comments, checks, commits, diff against the base, and the merge policy from
+  `<base>:pail.pr.json` with what is missing. Everything the `pail pr` plugin writes shows here, live.
 - **CI**: results per commit (`_meta:checks/<commit>/<check>.json`) with the log tail, declared checks
   (`pail.ci.json`), required versus optional, and status badges on commits, branches and PRs.
-- **Actions** (opt-in): approve or request changes, and merge with `pail land --stack`, through the same
-  CLI paths as `extensions/pail-pr`.
+- **Actions** (opt-in, `"actions": true`): on a branch, **Compare & open pull request** leads to a compare
+  page (base...head: commits and diff, then title, description and draft, then create). On a pull request:
+  comment, approve or request changes, edit the title and description, mark ready or back to draft, close
+  and reopen, and merge with `pail land --stack`. Each is one `pail put` of the same record
+  [`pail pr`](../docs/extending.md) writes (ids claimed with `--if-absent`, retried on a clash), so a PR
+  opened in the terminal is live here and the other way around.
 - **Keyboard**: `t` find a file, `/` search files, branches and PRs, `g c|b|p|k|h` go to commits, branches,
   pull requests, checks, home; `?` lists them. Light and dark themes (follows the system, toggle in the bar).
 
 ![Commit diff](docs/screenshots/commit-diff.png)
+
+Opening a pull request (with actions on), and a draft with a comment:
+
+![Compare and open a pull request](docs/screenshots/compare.png)
+![A draft pull request](docs/screenshots/pull-request-draft.png)
 
 ## Develop
 
@@ -129,16 +139,22 @@ fetched twice, even across restarts. This matters on large repositories: see Per
 npm run dev          # API on :4747 (tsx watch) and Vite on :5173, proxied
 npm run typecheck
 npm test             # vitest: API, components, and an end-to-end smoke over the demo repository
-npm run shots        # screenshots into docs/screenshots (needs agent-browser and a running server)
+npm run shots        # screenshots into docs/screenshots (needs agent-browser and a running server;
+                     # with PAIL_WEB_ACTIONS=1 it also shoots the compare page and a draft PR)
 ```
 
-The tests build the demo repository with the real `pail` binary (`PAIL_BIN`, else this checkout's
+`test/plugin.test.ts` drives the real `pail pr` plugin (needs `python3`) and the API against one store, in both
+directions. The tests build the demo repository with the real `pail` binary (`PAIL_BIN`, else this checkout's
 `target/release/pail`, else `PATH`). Layout: `server/` (Express, the pail runner, caches), `src/`
 (React), `shared/` (API types), `scripts/` (demo data), `test/`.
 
 ## Security notes
 
-- Everything is read-only unless `"actions": true`.
+- Everything is read-only unless `"actions": true`. With it, writes are `pail put`/`pail land` commands run
+  with an argument list (no shell). Branch names must exist in the repository, may not start with `-` or `_`,
+  titles are one line of at most 256 characters, bodies and comments at most 60,000; ids and numbers are
+  integers; names used as file names are reduced to `[A-Za-z0-9._-]`. There is no per-user auth: whoever
+  can reach the server acts as `author`, so keep it on localhost or behind your own proxy.
 - Repository text is untrusted: Markdown is sanitized (DOMPurify), and `/raw` serves plain text or
   images with `nosniff` and a sandbox CSP, so a repo cannot run script in this origin.
 - Refs and paths from the URL are validated before they reach the CLI; no shell is involved.

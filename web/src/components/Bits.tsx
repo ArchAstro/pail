@@ -58,8 +58,9 @@ export function Sha({ id, to }: { id: string; to?: string }) {
   return to ? <Link to={to} className="sha-link">{inner}</Link> : inner;
 }
 
-export function PrState({ state }: { state: "open" | "merged" | "closed" }) {
-  return <span className={`pill pill--${state}`}><Icon name={state === "merged" ? "merge" : "pr"} size={13} />{state}</span>;
+export function PrState({ state, draft }: { state: "open" | "merged" | "closed"; draft?: boolean }) {
+  const shown = state === "open" && draft ? "draft" : state;
+  return <span className={`pill pill--${shown}`}><Icon name={state === "merged" ? "merge" : "pr"} size={13} />{shown}</span>;
 }
 
 export function Tabs<T extends string>({ tabs, value, onChange, label }: { tabs: { id: T; label: string; count?: number }[]; value: T; onChange: (t: T) => void; label: string }) {

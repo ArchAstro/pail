@@ -17,8 +17,10 @@ export async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> 
   return res.json() as Promise<T>;
 }
 
-export async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+export const postJson = <T,>(url: string, body: unknown) => fetchJson<T>(url, "POST", body);
+
+export async function fetchJson<T>(url: string, method: "POST" | "PATCH", body: unknown): Promise<T> {
+  const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const data = (await res.json().catch(() => ({}))) as { error?: string } & T;
   if (!res.ok) throw new ApiError(res.status, data.error ?? res.statusText);
   return data;
