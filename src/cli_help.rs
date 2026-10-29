@@ -185,6 +185,8 @@ VISUAL or EDITOR for messages.";
 pub const GIT_READS: &str = "\
 Takes Git's options and prints Git's output (byte for byte) for pail history; Git's
 documentation applies. --ids git prints the Git ids of commits mirrored from Git.
+`log` hides maintenance commits (`pail maintenance repack`), which change no file;
+--maintenance shows them.
   pail log --oneline -20
   pail log -p --stat -- src/parser.rs
   pail log --format='%h %an %s' main..feature

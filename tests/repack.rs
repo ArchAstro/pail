@@ -501,3 +501,44 @@ fn the_plan_needs_two_small_packs_and_is_path_ordered() {
     full.full = true;
     assert_eq!(plan(&entries, &sizes, &full).moves.len(), 4);
 }
+
+#[tokio::test]
+async fn a_mirror_resumes_below_maintenance_commits() {
+    let (_d, repo) = temp_repo();
+    let work = history(&repo, 6, 2).await;
+    let sha = repo.commit_obj(&work).await.unwrap().meta["git.commit"].clone();
+    let (_, repack1, ..) = done(
+        pail::repack::repack(&repo, &opts(), &who(), None)
+            .await
+            .unwrap(),
+    );
+    // More small commits, then a second repack: two maintenance commits in the history.
+    let mut rng = StdRng::seed_from_u64(5);
+    let mut last = repack1;
+    for c in 0..3 {
+        let files = vec![(format!("late/c{c}.rs"), noise(&mut rng, 300))];
+        last = commit(
+            &repo,
+            &files,
+            &[("git.commit", &format!("{:040x}", 100 + c))],
+        )
+        .await;
+    }
+    let (_, repack2, ..) = done(
+        pail::repack::repack(&repo, &opts(), &who(), None)
+            .await
+            .unwrap(),
+    );
+
+    let (h, c) = pail::repack::skip_maintenance(&repo, repack1)
+        .await
+        .unwrap();
+    assert_eq!((h, c.meta["git.commit"].clone()), (work, sha));
+    let (h, c) = pail::repack::skip_maintenance(&repo, repack2)
+        .await
+        .unwrap();
+    assert_eq!(h, last);
+    assert_eq!(c.meta["git.commit"], format!("{:040x}", 102));
+    assert!(repo.commit_obj(&repack2).await.unwrap().is_maintenance());
+    assert!(!repo.commit_obj(&last).await.unwrap().is_maintenance());
+}

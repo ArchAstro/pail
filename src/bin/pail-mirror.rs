@@ -676,15 +676,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let mut needs_deep = true;
 
     let (mut head, mut mirrored) = match repo.read_ref(&c.pail_branch).await? {
-        Some((h, _)) => {
-            let pc = repo.commit_obj(&h).await?;
-            let g = pc
-                .meta
-                .get("git.commit")
-                .cloned()
-                .context("pail branch was not created by pail-mirror")?;
-            (h, g)
-        }
+        Some((h, _)) => (h, mirrored_sha(&repo, h).await?),
         None => {
             let start = match &args.start {
                 Some(s) => git.rev_parse(s)?,
@@ -830,10 +822,9 @@ async fn run(args: RunArgs) -> Result<()> {
                     );
                     eprintln!("  {}: {e:#}; retrying after the next poll", &sha[..10]);
                     if let Ok(Some((h, _))) = repo.read_ref(&c.pail_branch).await
-                        && let Ok(pc) = repo.commit_obj(&h).await
-                        && let Some(g) = pc.meta.get("git.commit")
+                        && let Ok(g) = mirrored_sha(&repo, h).await
                     {
-                        (head, mirrored) = (h, g.clone());
+                        (head, mirrored) = (h, g);
                     }
                     break;
                 }
@@ -935,6 +926,17 @@ fn record(dash: &Shared, state: &Path, rec: Record) -> Result<()> {
 // ---------------------------------------------------------------------------------------
 // Verify an existing mirror end to end.
 
+/// The Git commit the pail branch at `head` has mirrored: the newest non-maintenance
+/// commit's. A repack copies its parent's `git.*` meta, but resume does not rely on that: new
+/// commits parent on the repack, and the history below it is what was mirrored.
+async fn mirrored_sha(repo: &Repo, head: Hash) -> Result<String> {
+    let (_, pc) = pail::repack::skip_maintenance(repo, head).await?;
+    pc.meta
+        .get("git.commit")
+        .cloned()
+        .context("pail branch was not created by pail-mirror")
+}
+
 async fn verify(args: VerifyArgs) -> Result<()> {
     let c = &args.common;
     let git = Git::open(&c.git_dir)?;
@@ -947,6 +949,10 @@ async fn verify(args: VerifyArgs) -> Result<()> {
     let history = verifier.log(head, args.n.unwrap_or(usize::MAX)).await?;
     let (mut ok, mut bad) = (0, 0);
     for (h, pc) in history.iter().rev() {
+        // A repack changes no file and answers to no Git commit.
+        if pc.is_maintenance() {
+            continue;
+        }
         let sha = pc
             .meta
             .get("git.commit")

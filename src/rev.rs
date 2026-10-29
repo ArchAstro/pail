@@ -225,7 +225,8 @@ impl Ctx {
                             break;
                         }
                         let c = self.repo.commit_obj(&h).await?;
-                        if let Some(g) = c.meta.get("git.commit") {
+                        // A repack copies its parent's Git id: the id names the original.
+                        if let Some(g) = c.meta.get("git.commit").filter(|_| !c.is_maintenance()) {
                             idx.to_pail.insert(g.clone(), h);
                         }
                         cur = c.parent;
