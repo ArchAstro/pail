@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface RepoConfig {
   name: string;
@@ -47,6 +48,15 @@ export function parseStoreList(s: string): RepoConfig[] {
     });
 }
 
+/** `pail` on PATH, else a build in the pail checkout this server sits in, else plain `pail`. */
+export function defaultPail(env: NodeJS.ProcessEnv = process.env): string {
+  for (const dir of (env.PATH ?? "").split(delimiter)) if (dir && existsSync(join(dir, "pail"))) return "pail";
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 4; i++, dir = dirname(dir))
+    for (const p of ["target/release/pail", "target/debug/pail"]) if (existsSync(join(dir, p))) return join(dir, p);
+  return "pail";
+}
+
 /** Defaults < config file < environment < argv. */
 export function loadConfig(argv: string[] = [], env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): Config {
   let file: string | undefined = env.PAIL_WEB_CONFIG;
@@ -62,7 +72,7 @@ export function loadConfig(argv: string[] = [], env: NodeJS.ProcessEnv = process
   const cfg: Config = {
     port: Number(env.PAIL_WEB_PORT ?? raw.port ?? 4747),
     host: env.PAIL_WEB_HOST ?? raw.host ?? "127.0.0.1",
-    pail: env.PAIL_BIN ?? raw.pail ?? "pail",
+    pail: env.PAIL_BIN ?? raw.pail ?? defaultPail(env),
     actions: env.PAIL_WEB_ACTIONS ? /^(1|true|yes|on)$/i.test(env.PAIL_WEB_ACTIONS) : Boolean(raw.actions),
     author: env.PAIL_WEB_AUTHOR ?? raw.author,
     cacheMb: Number(raw.cacheMb ?? 128),
