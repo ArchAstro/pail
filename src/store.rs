@@ -268,6 +268,40 @@ impl Store {
         Ok(got)
     }
 
+    /// Requests worth keeping in flight at once when fetching many small objects. Remote
+    /// object stores take hundreds of parallel requests (latency, not bandwidth, bounds a
+    /// stream of small GETs); a local directory gains nothing past a few dozen.
+    /// `PAIL_FETCH_CONCURRENCY` overrides.
+    pub fn max_in_flight(&self) -> usize {
+        if let Some(n) = std::env::var("PAIL_FETCH_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+        {
+            return n;
+        }
+        match self.url.split(':').next().unwrap_or("") {
+            "gs" | "s3" => 256,
+            "https" | "http" => 128,
+            _ => 64,
+        }
+    }
+
+    /// One byte range of an object as a single request (no coalescing, no splitting).
+    pub async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Bytes> {
+        let _trace = Trace::start("range1", key);
+        self.stats.gets.fetch_add(1, Ordering::Relaxed);
+        let path = self.path(key);
+        let out = self
+            .retry(|| self.inner.get_range(&path, range.clone()))
+            .await
+            .with_context(|| format!("range read {key}"))?;
+        self.stats
+            .bytes_down
+            .fetch_add(out.len() as u64, Ordering::Relaxed);
+        Ok(out)
+    }
+
     /// Fetch several byte ranges of one object; adjacent ranges are coalesced into one request.
     pub async fn get_ranges(&self, key: &str, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
         let _trace = Trace::start("ranges", key);

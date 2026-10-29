@@ -15,6 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
@@ -329,71 +331,103 @@ impl Checkout {
 
     /// The donor's mtime for `path` if the donor holds the same content.
     fn donor_mtime(&self, e: &Entry) -> Option<std::time::SystemTime> {
-        let full = self.donor.as_ref()?.join(&e.path);
-        let md = std::fs::symlink_metadata(&full).ok()?;
-        if !md.is_file() || md.len() != e.size {
-            return None;
-        }
-        (Hash::of(&std::fs::read(&full).ok()?) == e.hash)
-            .then(|| md.modified().ok())
-            .flatten()
+        donor_mtime(self.donor.as_deref(), e)
     }
 
-    /// Write the given entries' contents to disk, fetching what the store lacks in
-    /// memory-bounded batches.
+    /// Write the given entries' contents to disk. What the store lacks is fetched in a
+    /// stream and each piece is stored and cloned into place while later requests are still
+    /// in flight, so memory stays bounded (see `Repo::read_stream`) and the disk works while
+    /// the network does.
     pub async fn materialize(&self, repo: &Repo, root: &Path, entries: &[Entry]) -> Result<()> {
         let Some(blobs) = &self.blobs else {
             return self.write_direct(repo, root, entries).await;
         };
+        use futures::StreamExt;
         // Symlinks and inline files carry their bytes in the manifest; nothing to share.
         let (direct, shared): (Vec<Entry>, Vec<Entry>) = entries
             .iter()
             .cloned()
             .partition(|e| e.kind == Kind::Symlink || matches!(e.loc, Loc::Inline(_)));
         self.write_direct(repo, root, &direct).await?;
-        let mut seen = HashSet::new();
-        let missing: Vec<Entry> = shared
-            .iter()
-            .filter(|e| seen.insert(e.hash) && !blobs.has(&e.hash))
-            .cloned()
-            .collect();
+        // Entries by content: one fetch and one blob per distinct hash, cloned to every path.
+        let mut groups: HashMap<Hash, Vec<Entry>> = HashMap::new();
+        for e in shared {
+            groups.entry(e.hash).or_default().push(e);
+        }
+        let (cached, missing): (Vec<_>, Vec<_>) =
+            groups.into_iter().partition(|(h, _)| blobs.has(h));
         let threads = std::thread::available_parallelism()
             .map_or(4, |n| n.get())
             .min(16);
-        for batch in batches(&missing) {
-            let data = repo.read_files(batch).await?;
-            let items: Vec<(&Entry, Bytes)> = batch.iter().zip(data).collect();
-            let per = items.len().div_ceil(threads).max(1);
-            std::thread::scope(|s| {
-                let jobs: Vec<_> = items
-                    .chunks(per)
-                    .map(|chunk| {
-                        s.spawn(move || chunk.iter().try_for_each(|(e, d)| blobs.put(&e.hash, d)))
-                    })
-                    .collect();
-                jobs.into_iter()
-                    .try_for_each(|j| j.join().expect("blob writer panicked"))
-            })?;
+        let sink = Arc::new(Sink {
+            root: root.to_path_buf(),
+            blobs: blobs.clone(),
+            donor: self.donor.clone(),
+            stats: CloneStats::default(),
+            dirs: Default::default(),
+        });
+        let mut work = futures::stream::FuturesUnordered::new();
+        // Contents already on this machine are cloned while the rest is fetched.
+        let cached: Vec<Entry> = cached.into_iter().flat_map(|(_, v)| v).collect();
+        for chunk in cached.chunks(cached.len().div_ceil(threads).max(1)) {
+            let (sink, chunk) = (sink.clone(), chunk.to_vec());
+            work.push(tokio::task::spawn_blocking(move || {
+                chunk.iter().try_for_each(|e| sink.checkout(e))
+            }));
         }
-        let per = shared.len().div_ceil(threads).max(1);
-        std::thread::scope(|s| {
-            let jobs: Vec<_> = shared
-                .chunks(per)
-                .map(|chunk| {
-                    s.spawn(move || -> Result<()> {
-                        for e in chunk {
-                            let full = prepare_path(root, &e.path)?;
-                            blobs.checkout(&e.hash, &full, &self.stats)?;
-                            set_mode(&full, e.kind)?;
-                            set_mtime(&full, self.donor_mtime(e))?;
-                        }
-                        Ok(())
-                    })
-                })
-                .collect();
-            jobs.into_iter()
-                .try_for_each(|j| j.join().expect("checkout thread panicked"))
-        })
+        let mut by_hash: HashMap<Hash, Vec<Entry>> = HashMap::new();
+        let mut reps: Vec<Entry> = vec![];
+        for (h, v) in missing {
+            reps.push(v[0].clone());
+            by_hash.insert(h, v);
+        }
+        let by_hash = Arc::new(by_hash);
+        let rep_hashes: Arc<Vec<Hash>> = Arc::new(reps.iter().map(|e| e.hash).collect());
+        let mut stream = std::pin::pin!(repo.read_stream(&reps));
+        let mut fetched = Ok(());
+        while let Some(batch) = stream.next().await {
+            let batch = match batch {
+                Ok(b) => b,
+                Err(e) => {
+                    fetched = Err(e);
+                    break;
+                }
+            };
+            // Let the writers catch up before taking more: held batches are the memory.
+            while work.len() >= threads * 2 {
+                work.next().await.expect("nonempty")??;
+            }
+            let (sink, by_hash, rep_hashes) = (sink.clone(), by_hash.clone(), rep_hashes.clone());
+            work.push(tokio::task::spawn_blocking(move || {
+                for (i, data, _) in &batch.items {
+                    let h = &rep_hashes[*i];
+                    let (first, rest) = by_hash[h].split_first().expect("a group has an entry");
+                    sink.install(first, data)?;
+                    for e in rest {
+                        sink.checkout(e)?;
+                    }
+                }
+                drop(batch);
+                Ok(())
+            }));
+        }
+        while let Some(r) = work.next().await {
+            r??;
+        }
+        fetched?;
+        self.stats
+            .cloned
+            .fetch_add(sink.stats.cloned.load(Relaxed), Relaxed);
+        self.stats
+            .cloned_bytes
+            .fetch_add(sink.stats.cloned_bytes.load(Relaxed), Relaxed);
+        self.stats
+            .copied
+            .fetch_add(sink.stats.copied.load(Relaxed), Relaxed);
+        self.stats
+            .copied_bytes
+            .fetch_add(sink.stats.copied_bytes.load(Relaxed), Relaxed);
+        Ok(())
     }
 
     async fn write_direct(&self, repo: &Repo, root: &Path, entries: &[Entry]) -> Result<()> {
@@ -409,6 +443,87 @@ impl Checkout {
             }
         }
         Ok(())
+    }
+}
+
+fn donor_mtime(donor: Option<&Path>, e: &Entry) -> Option<std::time::SystemTime> {
+    let full = donor?.join(&e.path);
+    let md = std::fs::symlink_metadata(&full).ok()?;
+    if !md.is_file() || md.len() != e.size {
+        return None;
+    }
+    (Hash::of(&std::fs::read(&full).ok()?) == e.hash)
+        .then(|| md.modified().ok())
+        .flatten()
+}
+
+/// What a materialize worker thread needs to put one entry in place.
+struct Sink {
+    root: PathBuf,
+    blobs: Blobs,
+    donor: Option<PathBuf>,
+    stats: CloneStats,
+    /// Directories already made (and checked for files in the way) by this run.
+    dirs: std::sync::Mutex<HashSet<PathBuf>>,
+}
+
+impl Sink {
+    /// The path for `e`, free of anything in the way, with its directories made.
+    fn path_for(&self, e: &Entry) -> Result<PathBuf> {
+        let full = self.root.join(&e.path);
+        let parent = full.parent().map(Path::to_path_buf);
+        if let Some(p) = &parent
+            && self.dirs.lock().unwrap().contains(p)
+        {
+            if std::fs::symlink_metadata(&full).is_ok() {
+                return prepare_path(&self.root, &e.path);
+            }
+            return Ok(full);
+        }
+        let full = prepare_path(&self.root, &e.path)?;
+        let mut known = self.dirs.lock().unwrap();
+        let mut p = parent;
+        while let Some(d) = p.filter(|d| d.starts_with(&self.root) && *d != self.root) {
+            if !known.insert(d.clone()) {
+                break;
+            }
+            p = d.parent().map(Path::to_path_buf);
+        }
+        Ok(full)
+    }
+
+    /// Clone the (already stored) blob of `e` to its path.
+    fn checkout(&self, e: &Entry) -> Result<()> {
+        let full = self.path_for(e)?;
+        self.blobs.checkout(&e.hash, &full, &self.stats)?;
+        set_mode(&full, e.kind)?;
+        set_mtime(&full, donor_mtime(self.donor.as_deref(), e))
+    }
+
+    /// Write freshly fetched content to the path of `e` and make the blob cache share its
+    /// blocks (two directory entries per file rather than a store write plus a clone).
+    fn install(&self, e: &Entry, data: &[u8]) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let full = self.path_for(e)?;
+        let mode = if e.kind == Kind::Exec { 0o755 } else { 0o644 };
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&full)
+            .with_context(|| format!("creating {}", full.display()))?;
+        f.write_all(data)?;
+        drop(f);
+        // The umask may have narrowed the mode; a checkout always has exactly 0644 / 0755.
+        if std::fs::metadata(&full)?.permissions().mode() & 0o777 != mode {
+            set_mode(&full, e.kind)?;
+        }
+        if let Some(t) = donor_mtime(self.donor.as_deref(), e) {
+            set_mtime(&full, Some(t))?;
+        }
+        self.stats.add(false, e.size);
+        self.blobs.store_clone(&e.hash, &full, data)
     }
 }
 

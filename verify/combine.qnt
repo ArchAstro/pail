@@ -56,7 +56,13 @@ module combine {
   pure def pollRefNext(s: State, c: str): State =
     withClient(s, c, polled(s, c, {
       ...client(s, c),
-      comb: { ...client(s, c).comb, polledRef: true, head: tip(s.bucket), recent: recentOf(s.bucket) },
+      comb: {
+        ...client(s, c).comb,
+        polledRef: true,
+        head: tip(s.bucket),
+        recent: recentOf(s.bucket),
+        lineage: lineageOf(s.bucket),
+      },
     }))
 
   /// List the branch's intents.
@@ -184,7 +190,18 @@ module combine {
     finished(
       { ...s, bucket: intentsDeleted(s.bucket, cl.comb.batch.map(e => e.intent)) },
       c,
-      if (cl.comb.batch.exists(e => e.intent == c)) { ...cl, phase: Done, outcome: Published }
+      if (cl.comb.batch.exists(e => e.intent == c))
+        {
+          ...cl,
+          phase: Done,
+          outcome: Published,
+          known: knownOf(
+            withBatch(cl).get(c),
+            { commit: cl.comb.tip, version: cl.comb.head.version + 1 },
+            withBatch(cl),
+            cl.comb.lineage,
+          ),
+        }
       else { ...cl, phase: Polling, comb: NO_COMB },
     )
   }
@@ -196,7 +213,12 @@ module combine {
     val cl = client(s, c)
     finished(s, c,
       if (tip(s.bucket).commit == cl.comb.tip and recentOf(s.bucket).keys().contains(c))
-        { ...cl, phase: Done, outcome: Published }
+        {
+          ...cl,
+          phase: Done,
+          outcome: Published,
+          known: knownOf(recentOf(s.bucket).get(c), tip(s.bucket), recentOf(s.bucket), lineageOf(s.bucket)),
+        }
       else { ...cl, phase: Polling, comb: NO_COMB }
     )
   }
@@ -209,7 +231,14 @@ module combine {
     finished(
       { ...s, bucket: intentsDeleted(s.bucket, Set(c)) },
       c,
-      { ...cl, phase: Done, outcome: cl.comb.then },
+      {
+        ...cl,
+        phase: Done,
+        outcome: cl.comb.then,
+        known:
+          if (cl.comb.then == Published) knownOf(cl.comb.recent.get(c), cl.comb.head, cl.comb.recent, cl.comb.lineage)
+          else cl.known,
+      },
     )
   }
 }
