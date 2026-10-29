@@ -25,6 +25,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::clock::Clock;
+
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -58,21 +60,54 @@ struct Body {
     pid: u32,
 }
 
+/// When a lease counts as last refreshed, on its clock's [`Clock::instant`] scale.
+#[derive(Clone)]
+pub struct Probe(Stamp);
+
+impl Probe {
+    pub fn refreshed(&self) -> Duration {
+        self.0.get()
+    }
+}
+
 /// A held lease. Release it with [`Lease::release`]; dropped, it is deleted in the
 /// background (and otherwise expires).
 pub struct Lease {
     store: Store,
     pub key: String,
     pub kind: LeaseKind,
-    refreshed: Arc<Mutex<Instant>>,
+    refreshed: Stamp,
     refresher: Option<tokio::task::JoinHandle<()>>,
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+/// When a lease was last refreshed, by the holder's clock, and that clock.
+#[derive(Clone)]
+struct Stamp {
+    at: Arc<Mutex<Duration>>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Stamp {
+    fn get(&self) -> Duration {
+        *self.at.lock().unwrap()
+    }
+
+    /// A refresh sent at `sent` has been answered: the lease counts from `sent`, the start
+    /// of the put, which is no later than the LastModified it got. Not if the holder is
+    /// stale by now: the others may have stopped seeing the lease before the refresh landed,
+    /// and a late reply cannot take that back (`verify/clock.qnt`, `refreshAckNext`).
+    fn advance(&self, sent: Duration) {
+        let mut at = self.at.lock().unwrap();
+        if self.clock.instant().saturating_sub(*at) <= LEASE_TTL / 2 {
+            *at = sent;
+        }
+    }
+
+    fn age(&self) -> Duration {
+        self.clock
+            .instant()
+            .saturating_sub(*self.at.lock().unwrap())
+    }
 }
 
 /// The kind of the lease at `key`, by its name.
@@ -89,7 +124,7 @@ fn kind_of(key: &str) -> Option<LeaseKind> {
 
 /// Live leases other than `mine`: (key, kind).
 async fn others(store: &Store, mine: &str) -> Result<Vec<(String, LeaseKind)>> {
-    let now = now_secs();
+    let now = store.clock().unix_secs();
     Ok(store
         .list_meta(LOCKS)
         .await?
@@ -105,7 +140,10 @@ fn backoff(attempt: u32) -> Duration {
 }
 
 impl Lease {
-    async fn write(store: &Store, kind: LeaseKind) -> Result<String> {
+    /// Write a lease; also when the put started, by the store's clock, which is no later
+    /// than the LastModified it got: the lease counts from there, however long the put
+    /// and what follows it took ([`Lease::held`]).
+    async fn write(store: &Store, kind: LeaseKind) -> Result<(String, Duration)> {
         let key = format!(
             "{LOCKS}{}-{:020}-{:08x}",
             kind.name(),
@@ -119,24 +157,34 @@ impl Lease {
             kind,
             pid: std::process::id(),
         })?;
+        let sent = store.clock().instant();
         store.put(&key, Bytes::from(body)).await?;
-        Ok(key)
+        Ok((key, sent))
     }
 
-    fn held(store: &Store, key: String, kind: LeaseKind) -> Lease {
-        let refreshed = Arc::new(Mutex::new(Instant::now()));
+    /// The lease at `key`, written by a put that started at `sent`: its age counts from
+    /// there. Counting from now instead (after the put and the listing that followed) made
+    /// a holder that was slow to get here believe its lease younger than the store's
+    /// timestamp has it, so it could still swap a ref after others had stopped seeing it.
+    fn held(store: &Store, key: String, kind: LeaseKind, sent: Duration) -> Lease {
+        let clock = store.clock().clone();
+        let refreshed = Stamp {
+            at: Arc::new(Mutex::new(sent)),
+            clock,
+        };
         let refresher = tokio::runtime::Handle::try_current().ok().map(|rt| {
             let (store, key, refreshed) = (store.clone(), key.clone(), refreshed.clone());
             rt.spawn(async move {
                 loop {
-                    tokio::time::sleep(LEASE_TTL / 3).await;
+                    store.clock().sleep(LEASE_TTL / 3).await;
                     let body = serde_json::to_vec(&Body {
                         kind,
                         pid: std::process::id(),
                     })
                     .unwrap_or_default();
+                    let sent = store.clock().instant();
                     if store.put(&key, Bytes::from(body)).await.is_ok() {
-                        *refreshed.lock().unwrap() = Instant::now();
+                        refreshed.advance(sent);
                     }
                 }
             })
@@ -154,13 +202,13 @@ impl Lease {
     pub async fn shared(store: &Store, wait: Duration) -> Result<Lease> {
         let started = Instant::now();
         for attempt in 0.. {
-            let key = Lease::write(store, LeaseKind::Shared).await?;
+            let (key, sent) = Lease::write(store, LeaseKind::Shared).await?;
             let held_by_gc = others(store, &key)
                 .await?
                 .into_iter()
                 .find(|(_, k)| *k == LeaseKind::Exclusive);
             let Some((gc, _)) = held_by_gc else {
-                return Ok(Lease::held(store, key, LeaseKind::Shared));
+                return Ok(Lease::held(store, key, LeaseKind::Shared, sent));
             };
             store.delete(&key).await?;
             if started.elapsed() >= wait {
@@ -176,7 +224,7 @@ impl Lease {
         let started = Instant::now();
         let mut attempt = 0;
         'write: loop {
-            let key = Lease::write(store, LeaseKind::Exclusive).await?;
+            let (key, sent) = Lease::write(store, LeaseKind::Exclusive).await?;
             loop {
                 let others = others(store, &key).await?;
                 let blocked = if let Some((gc, _)) =
@@ -194,7 +242,7 @@ impl Lease {
                     others.len()
                 };
                 if blocked == 0 {
-                    return Ok(Lease::held(store, key, LeaseKind::Exclusive));
+                    return Ok(Lease::held(store, key, LeaseKind::Exclusive, sent));
                 }
                 if started.elapsed() >= wait {
                     store.delete(&key).await?;
@@ -209,7 +257,7 @@ impl Lease {
     /// Whether this lease is still certainly held: refreshed within half its lifetime. Call
     /// before every ref swap.
     pub fn check(&self) -> Result<()> {
-        let age = self.refreshed.lock().unwrap().elapsed();
+        let age = self.refreshed.age();
         if age > LEASE_TTL / 2 {
             bail!(
                 "lease {} not refreshed for {}s; refusing to move a ref",
@@ -218,6 +266,12 @@ impl Lease {
             );
         }
         Ok(())
+    }
+
+    /// A read-only view of when the lease counts as last refreshed (the refinement tests
+    /// compare it with the model's).
+    pub fn probe(&self) -> Probe {
+        Probe(self.refreshed.clone())
     }
 
     pub async fn release(mut self) -> Result<()> {
@@ -253,7 +307,7 @@ impl Drop for Lease {
 pub struct WriteLeases {
     held: tokio::sync::Mutex<(Option<Lease>, usize)>,
     /// The held lease's refresh time, for [`WriteLeases::check`] without awaiting.
-    refreshed: Mutex<Option<Arc<Mutex<Instant>>>>,
+    refreshed: Mutex<Option<Stamp>>,
     /// The store refused this client a lease (an enforcement point that predates
     /// `locks/`): it writes unleased, protected by gc's grace period alone.
     refused: std::sync::atomic::AtomicBool,
@@ -307,6 +361,11 @@ impl WriteLeases {
         }
     }
 
+    /// A view of the shared lease's last refresh, if one is held: see [`Lease::probe`].
+    pub fn probe(&self) -> Option<Probe> {
+        self.refreshed.lock().unwrap().clone().map(Probe)
+    }
+
     /// Fails unless a fresh shared lease is held: see [`Lease::check`].
     pub fn check(&self) -> Result<()> {
         if self.refused.load(std::sync::atomic::Ordering::Relaxed) {
@@ -315,7 +374,7 @@ impl WriteLeases {
         let Some(refreshed) = self.refreshed.lock().unwrap().clone() else {
             bail!("moving a ref without holding a write lease");
         };
-        let age = refreshed.lock().unwrap().elapsed();
+        let age = refreshed.age();
         if age > LEASE_TTL / 2 {
             bail!(
                 "write lease not refreshed for {}s; refusing to move a ref",

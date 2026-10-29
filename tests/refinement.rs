@@ -28,6 +28,7 @@ use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as StoreResult,
 };
+use pail::clock::Clock;
 use pail::hash::Hash;
 use pail::manifest::{Kind, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
@@ -47,6 +48,75 @@ const GC: &str = "gc";
 const GRACE: i64 = 1000;
 /// How long a released actor may take to reach its next request.
 const SETTLE: Duration = Duration::from_secs(20);
+/// A tick of the model's clock (`bucket.qnt`): a sixth of `LEASE_TTL`.
+const TICK_SECS: i64 = 100;
+/// The store's clock at tick 0, in unix seconds.
+const EPOCH: i64 = 1_700_000_000;
+/// `SKEW` in `bucket.qnt`: how far ahead of the store's clock the lister's runs, in ticks.
+const SKEW: i64 = 1;
+
+/// The clock every actor's store judges leases by: it stands still until the scenario
+/// `tick`s, and wakes the refreshers whose sleeps are over.
+#[derive(Default)]
+struct TestClock {
+    inner: Mutex<ClockState>,
+}
+
+#[derive(Default)]
+struct ClockState {
+    /// Seconds since tick 0.
+    secs: i64,
+    sleepers: Vec<(i64, oneshot::Sender<()>)>,
+}
+
+impl TestClock {
+    fn ticks(&self) -> i64 {
+        self.inner.lock().unwrap().secs / TICK_SECS
+    }
+
+    /// One tick on; how many sleeps ended.
+    fn advance(&self) -> usize {
+        let mut c = self.inner.lock().unwrap();
+        c.secs += TICK_SECS;
+        let now = c.secs;
+        let (due, later): (Vec<_>, Vec<_>) = c.sleepers.drain(..).partition(|(at, _)| *at <= now);
+        c.sleepers = later;
+        due.into_iter()
+            .filter(|(_, tx)| !tx.is_closed())
+            .map(|(_, tx)| tx.send(()).is_ok())
+            .filter(|woke| *woke)
+            .count()
+    }
+
+    /// Sleeps that are waiting (not abandoned by an aborted refresher).
+    fn sleeping(&self) -> usize {
+        let c = self.inner.lock().unwrap();
+        c.sleepers.iter().filter(|(_, tx)| !tx.is_closed()).count()
+    }
+}
+
+impl Clock for TestClock {
+    fn instant(&self) -> Duration {
+        Duration::from_secs(self.inner.lock().unwrap().secs as u64)
+    }
+
+    fn unix_secs(&self) -> i64 {
+        EPOCH + self.inner.lock().unwrap().secs + SKEW * TICK_SECS
+    }
+
+    fn sleep(
+        &self,
+        d: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let (tx, rx) = oneshot::channel();
+        let mut c = self.inner.lock().unwrap();
+        let at = c.secs + d.as_secs() as i64;
+        c.sleepers.push((at, tx));
+        Box::pin(async move {
+            let _ = rx.await;
+        })
+    }
+}
 
 #[test]
 fn pail_refines_the_model() {
@@ -59,7 +129,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        48,
+        59,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -87,6 +157,10 @@ enum Request {
     DeletePage,
     /// gc releasing its lease: its last request.
     DeleteLease,
+    /// A holder's refresher rewriting its lease, which the store applies on release...
+    RefreshLease,
+    /// ... and whose reply then comes back (`refreshAck`).
+    AckLease,
 }
 
 /// How the gate lets a held request through: `Delivery` in `store.qnt`.
@@ -140,6 +214,8 @@ enum Event {
         actor: String,
         known: Option<KnownHead>,
     },
+    /// gc took its exclusive lease.
+    GcHeld { probe: pail::lease::Probe },
     /// What a rebase built, before it leases.
     Planned {
         actor: String,
@@ -158,6 +234,9 @@ struct Book {
     versions: HashMap<String, i64>,
     written: HashMap<String, i64>,
     holders: HashMap<String, String>,
+    /// The tick each lease was last written (its LastModified).
+    leased_at: HashMap<String, i64>,
+    clock: Arc<TestClock>,
 }
 
 /// A writer's page puts wait for its commit uploads to be released: the model uploads a
@@ -211,6 +290,14 @@ fn lost_reply() -> object_store::Error {
     }
 }
 
+/// A failure `Store::put` returns at once instead of retrying.
+fn unretried(key: &str) -> object_store::Error {
+    object_store::Error::PermissionDenied {
+        path: key.to_owned(),
+        source: "request timed out".into(),
+    }
+}
+
 impl Gate {
     fn write_request(key: &str) -> Option<Request> {
         if key == format!("refs/{BRANCH}") {
@@ -258,7 +345,10 @@ impl Gate {
         if self.free {
             return Delivery::Answered;
         }
-        if request != Request::PutCommit {
+        if !matches!(
+            request,
+            Request::PutCommit | Request::RefreshLease | Request::AckLease
+        ) {
             self.uploads.lock().unwrap().open = false;
         }
         let (go, released) = oneshot::channel();
@@ -310,6 +400,8 @@ impl Gate {
         b.written.insert(key.to_owned(), epoch);
         if key.starts_with("locks/") {
             b.holders.insert(key.to_owned(), self.actor.clone());
+            let now = b.clock.ticks();
+            b.leased_at.insert(key.to_owned(), now);
         }
     }
 
@@ -333,6 +425,23 @@ impl Gate {
         meta
     }
 
+    /// A lease as the store stamped it: written at the tick it landed. The lister reads
+    /// its clock when it sends the request and the model lists at the tick the scenario
+    /// releases it, so the stamp moves back by the ticks the request waited: the lease is
+    /// then as old to the lister as the model's listing finds it. (Reading the clock early
+    /// only makes a lease look younger, so the real lister is the more cautious.)
+    fn stamped(&self, mut meta: ObjectMeta, waited: i64) -> ObjectMeta {
+        let b = self.book.lock().unwrap();
+        let at = b
+            .leased_at
+            .get(meta.location.as_ref())
+            .copied()
+            .unwrap_or(0);
+        meta.last_modified = chrono::DateTime::from_timestamp(EPOCH + (at - waited) * TICK_SECS, 0)
+            .expect("a timestamp");
+        meta
+    }
+
     async fn put(
         &self,
         location: &Path,
@@ -344,6 +453,34 @@ impl Gate {
             self.wrote(location.as_ref());
         }
         r
+    }
+
+    /// A refresher's put: held until released (`refreshLand`); if the store applies it and
+    /// answers, the reply is held again until `refreshAck`.
+    async fn refresh(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> StoreResult<PutResult> {
+        let key = location.as_ref();
+        let result = match self.hold(Request::RefreshLease, key).await {
+            Delivery::Answered => {
+                let r = self.put(location, payload, opts).await;
+                self.answered(Request::RefreshLease, key, None);
+                self.hold(Request::AckLease, key).await;
+                self.answered(Request::AckLease, key, None);
+                return r;
+            }
+            // An error `Store::put` does not retry: a retry would be another request.
+            Delivery::Lost => {
+                let _ = self.put(location, payload, opts).await;
+                Err(unretried(key))
+            }
+            Delivery::Dropped => Err(unretried(key)),
+        };
+        self.answered(Request::RefreshLease, key, None);
+        result
     }
 }
 
@@ -374,6 +511,10 @@ impl ObjectStore for Gate {
         let Some(request) = Gate::write_request(key) else {
             return self.put(location, payload, opts).await;
         };
+        if request == Request::PutLease && self.book.lock().unwrap().versions.contains_key(key) {
+            // A lease written already: its refresher rewriting it.
+            return self.refresh(location, payload, opts).await;
+        }
         let result = match self.hold(request, key).await {
             Delivery::Answered => self.put(location, payload, opts).await,
             Delivery::Lost => {
@@ -460,10 +601,12 @@ impl ObjectStore for Gate {
             request,
             Some(Request::ListCommits) | Some(Request::ListPages)
         );
+        let stamps = request == Some(Request::ListLeases);
         let gate = self.clone();
         let prefix = prefix.cloned();
         futures::stream::once(async move {
             let key = prefix.as_ref().map(|p| p.to_string()).unwrap_or_default();
+            let sent = gate.book.lock().unwrap().clock.ticks();
             if let Some(request) = request
                 && !matches!(gate.hold(request, &key).await, Delivery::Answered)
             {
@@ -477,9 +620,20 @@ impl ObjectStore for Gate {
                     .collect();
                 gate.answered_listing(request, &key, None, keys);
             }
+            let waited = gate.book.lock().unwrap().clock.ticks() - sent;
             let items = items
                 .into_iter()
-                .map(|m| m.map(|m| if ages { gate.aged(m) } else { m }))
+                .map(|m| {
+                    m.map(|m| {
+                        if ages {
+                            gate.aged(m)
+                        } else if stamps {
+                            gate.stamped(m, waited)
+                        } else {
+                            m
+                        }
+                    })
+                })
                 .collect::<Vec<_>>();
             futures::stream::iter(items)
         })
@@ -609,6 +763,9 @@ struct Progress {
     /// The requests it is waiting at (a writer makes some together: an upload and a
     /// listing, a ref read and a listing, a wave of commits or deletes).
     held: Vec<Held>,
+    /// The refresher's requests, which it makes beside the actor's own (`RefreshLease`,
+    /// then `AckLease`).
+    refresh: Vec<Held>,
     /// Requests released whose answers the harness has not yet seen.
     awaiting: usize,
     outcome: Option<&'static str>,
@@ -618,6 +775,21 @@ impl Progress {
     fn holds(&self, request: Request) -> bool {
         self.held.iter().any(|(r, _, _)| *r == request)
     }
+
+    fn refreshing(&self, request: Request) -> bool {
+        self.refresh.iter().any(|(r, _, _)| *r == request)
+    }
+}
+
+/// What the harness knows of a lease holder's refresher: `Timing` in `world.qnt`, less what
+/// the lease itself tells (`running`, `refreshed`).
+#[derive(Clone, Default)]
+struct Refresher {
+    done: i64,
+    inflight: bool,
+    sent: i64,
+    landed: bool,
+    checked: i64,
 }
 
 /// Landed intents by writer: `Recent` in `bucket.qnt`.
@@ -703,12 +875,17 @@ struct Writer {
     /// Its intent's id and the time the scenario gave it.
     intent: Option<(String, i64)>,
     round: Round,
+    /// An attempt's ref read was let through and its swap not yet: a ref read next means
+    /// the swap never left (the lease check refused it), so the read is a recheck.
+    reading: bool,
 }
 
 /// The collector's run, as read off its requests.
 #[derive(Default)]
 struct Collector {
     running: bool,
+    /// Its lease, once it holds it.
+    probe: Option<pail::lease::Probe>,
     progress: Progress,
     marked: Option<(BTreeSet<Id>, BTreeSet<Tree>)>,
     doomed_commits: BTreeSet<String>,
@@ -743,6 +920,17 @@ struct Harness {
     ref_commits: Mutex<Vec<Hash>>,
     /// Each version's body.
     ref_values: Mutex<Vec<RefValue>>,
+    /// The clock every actor's store judges leases by.
+    clock: Arc<TestClock>,
+    /// The latest client each actor runs, to read its lease from.
+    repos: Mutex<HashMap<String, Arc<Repo>>>,
+    /// Each running lease holder's refresher.
+    refreshers: Mutex<HashMap<String, Refresher>>,
+    /// Refresh requests refreshers have made (and the harness has seen).
+    refresh_requests: usize,
+    /// The tick each writer's lease put arrived at the gate (`Timing.sent` until it holds
+    /// the lease): `Lease::write` takes its instant before the put.
+    lease_sent: Mutex<HashMap<String, i64>>,
 }
 
 impl Drop for Harness {
@@ -772,7 +960,47 @@ impl Harness {
             uploads: Arc::default(),
             free,
         };
-        Store::from_object_store("memory://bucket", Arc::new(gate))
+        Store::from_object_store("memory://bucket", Arc::new(gate)).with_clock(self.clock.clone())
+    }
+
+    /// `actor`'s lease, if it holds one.
+    fn probe(&self, actor: &str) -> Option<pail::lease::Probe> {
+        if actor == GC {
+            self.collector.probe.clone()
+        } else {
+            self.repos
+                .lock()
+                .unwrap()
+                .get(actor)
+                .and_then(|r| r.lease_probe())
+        }
+    }
+
+    /// Start (or stop) tracking `actor`'s refresher as its lease comes (or goes): it sleeps
+    /// from the moment the lease is held.
+    fn note_running(&self, actor: &str) {
+        let running = self.probe(actor).is_some();
+        let mut refreshers = self.refreshers.lock().unwrap();
+        if running {
+            refreshers
+                .entry(actor.to_owned())
+                .or_insert_with(|| Refresher {
+                    done: self.clock.ticks(),
+                    ..Refresher::default()
+                });
+        } else {
+            refreshers.remove(actor);
+        }
+    }
+
+    /// A client for `actor` behind its gate, remembered for its lease.
+    fn client(&self, actor: &str) -> Arc<Repo> {
+        let repo = Arc::new(Repo::with_store(self.gate(actor), None));
+        self.repos
+            .lock()
+            .unwrap()
+            .insert(actor.to_owned(), repo.clone());
+        repo
     }
 
     fn files(&self, tree: &Tree) -> Result<Delta, String> {
@@ -893,8 +1121,39 @@ impl Harness {
                 key,
                 go,
             } => {
+                self.note_running(&actor);
+                let now = self.clock.ticks();
+                if request == Request::PutLease && actor != GC {
+                    self.lease_sent.lock().unwrap().insert(actor.clone(), now);
+                }
+                if matches!(request, Request::RefreshLease | Request::AckLease) {
+                    if request == Request::RefreshLease {
+                        let mut r = self.refreshers.lock().unwrap();
+                        let e = r.entry(actor.clone()).or_default();
+                        (e.inflight, e.sent) = (true, now);
+                        self.refresh_requests += 1;
+                    }
+                    self.progress(&actor)?.refresh.push((request, key, go));
+                    return Ok(());
+                }
+                if matches!(
+                    request,
+                    Request::Swap | Request::DeleteCommit | Request::DeletePage
+                ) && let Some(e) = self.refreshers.lock().unwrap().get_mut(&actor)
+                {
+                    // A request a passed `Lease::check` let go.
+                    e.checked = now;
+                }
                 if actor != GC {
                     let w = self.writer(&actor)?;
+                    if request == Request::ReadRef && w.reading && w.combining.is_none() {
+                        // The swap never left: the lease check refused it.
+                        w.rechecking = true;
+                        w.reading = false;
+                        if let Some(ld) = w.ld.as_mut() {
+                            ld.tip = Some(ld.stored.take().unwrap_or_else(|| ld.stack.clone()));
+                        }
+                    }
                     if request == Request::ReadRef
                         && !w.rechecking
                         && w.combining.is_none()
@@ -945,8 +1204,16 @@ impl Harness {
                 if actor == GC {
                     self.collector = Collector::default();
                 } else {
-                    self.writer(&actor)?.progress.outcome = Some(outcome);
+                    let p = &mut self.writer(&actor)?.progress;
+                    p.outcome = Some(outcome);
+                    p.refresh.clear();
+                    self.lease_sent.lock().unwrap().remove(&actor);
                 }
+                self.note_running(&actor);
+            }
+            Event::GcHeld { probe } => {
+                self.collector.probe = Some(probe);
+                self.note_running(GC);
             }
         }
         Ok(())
@@ -1136,7 +1403,9 @@ impl Harness {
             | Request::DeleteIntent
             | Request::PutLease
             | Request::ListLeases
-            | Request::DeleteLease => {}
+            | Request::DeleteLease
+            | Request::RefreshLease
+            | Request::AckLease => {}
         }
         Ok(())
     }
@@ -1162,7 +1431,7 @@ impl Harness {
     /// (unleased; it reports what it built), then lease, store it and `rewrite_ref`.
     fn rebase(&mut self, name: &str, plan: &'static str) -> Result<(), String> {
         use pail::rebase::{self as rb, Action, Step};
-        let repo = Repo::with_store(self.gate(name), None);
+        let repo = self.client(name);
         let events = self.sender.clone();
         let actor = name.to_owned();
         let committer = format!("{name} <{name}@example.com>");
@@ -1316,7 +1585,7 @@ impl Harness {
     /// `commit_opts` by `name`, reporting the head its publish leaves (`Event::Known`), then
     /// its outcome.
     fn spawn_commit(&self, name: &str, req: CommitRequest, known_head: Option<KnownHead>) {
-        let repo = Repo::with_store(self.gate(name), None);
+        let repo = self.client(name);
         let events = self.sender.clone();
         let actor = name.to_owned();
         self.rt().spawn(async move {
@@ -1507,6 +1776,16 @@ impl Harness {
                 p.outcome
             ));
         };
+        if actor != GC {
+            let w = self.writer(actor)?;
+            match expected {
+                Request::ReadRef if !w.rechecking && w.combining.is_none() => w.reading = true,
+                Request::ReadRef | Request::Swap | Request::PutLease | Request::ListLeases => {
+                    w.reading = false
+                }
+                _ => {}
+            }
+        }
         if actor != GC && expected == Request::Swap {
             // A lander rereads the branch after any swap it did not win, answered or not.
             let w = self.writer(actor)?;
@@ -1566,6 +1845,52 @@ impl Harness {
             });
         }
         Ok(())
+    }
+
+    /// Process requests until `h`'s refresher waits at `request`.
+    fn refresher_waits(&mut self, h: &str, request: Request) -> Result<(), String> {
+        loop {
+            let p = self.progress(h)?;
+            if p.refreshing(request) && p.awaiting == 0 {
+                return Ok(());
+            }
+            let event = self
+                .events
+                .recv_timeout(SETTLE)
+                .map_err(|_| format!("{h}'s refresher made no {request:?} within {SETTLE:?}"))?;
+            self.handle(event)?;
+        }
+    }
+
+    fn release_refresh(&mut self, h: &str, request: Request, how: Delivery) -> Result<(), String> {
+        let p = self.progress(h)?;
+        let i = p
+            .refresh
+            .iter()
+            .position(|(r, _, _)| *r == request)
+            .ok_or_else(|| format!("{h}'s refresher is not waiting at {request:?}"))?;
+        let (_, _, go) = p.refresh.remove(i);
+        p.awaiting += 1;
+        go.send(how)
+            .map_err(|_| format!("{h}'s refresher stopped waiting"))
+    }
+
+    /// Process requests until the refresher's request is answered and it sleeps again
+    /// (`sleepers` sleeps are waiting).
+    fn refresher_sleeps(&mut self, sleepers: usize) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        loop {
+            while let Ok(event) = self.events.try_recv() {
+                self.handle(event)?;
+            }
+            if self.clock.sleeping() >= sleepers {
+                return Ok(());
+            }
+            if started.elapsed() > SETTLE {
+                return Err("a refresher did not sleep again".into());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn actor_arg(arguments: &[RuntimeValue]) -> Result<String, String> {
@@ -1729,6 +2054,7 @@ impl Harness {
             .map(|(k, _)| format!("locks/{k}"))
             .collect();
         let book = self.book.lock().unwrap();
+        let mut at: HashMap<String, i64> = HashMap::new();
         let mut holders: BTreeMap<String, (i64, Option<&'static str>, &'static str)> =
             BTreeMap::new();
         for (key, holder) in &book.holders {
@@ -1740,6 +2066,8 @@ impl Harness {
             let h = holders.entry(holder.clone()).or_insert((0, None, kind));
             h.0 += book.versions.get(key).copied().unwrap_or(0);
             h.2 = kind;
+            let latest = at.entry(holder.clone()).or_default();
+            *latest = (*latest).max(book.leased_at.get(key).copied().unwrap_or(0));
             if live.contains(key) {
                 h.1 = Some(kind);
             }
@@ -1748,10 +2076,14 @@ impl Harness {
             holders
                 .into_iter()
                 .map(|(holder, (version, live, kind))| {
+                    let written = at.get(&holder).copied().unwrap_or(0);
                     (
                         RuntimeValue::Text(holder),
                         versioned(
-                            RuntimeValue::Text(live.unwrap_or(kind).to_owned()),
+                            record([
+                                ("kind", RuntimeValue::Text(live.unwrap_or(kind).to_owned())),
+                                ("at", RuntimeValue::Int(written)),
+                            ]),
                             version,
                             live.is_some(),
                         ),
@@ -2155,9 +2487,13 @@ impl Harness {
         };
         let (live_commits, live_pages) = c.marked.clone().unwrap_or_default();
         let (spared_pages, spared_commits) = c.spared.clone().unwrap_or_default();
+        // gc gives up at a delete its lease check refused, and releases its lease: what it
+        // listed is no longer its to delete.
+        let given_up = held == Some(Request::DeleteLease);
         let doomed_commits = c
             .doomed_commits
             .iter()
+            .filter(|_| !given_up)
             .map(|k| {
                 let h =
                     Hash::from_hex(k.trim_start_matches("commits/")).map_err(|e| e.to_string())?;
@@ -2167,6 +2503,7 @@ impl Harness {
         let doomed_pages = c
             .doomed_pages
             .iter()
+            .filter(|_| !given_up)
             .map(|k| self.tree(k).map(|t| tree_value(&t)))
             .collect::<Result<Vec<_>, String>>()?;
         Ok(record([
@@ -2202,12 +2539,56 @@ impl Harness {
                 self.writer_value(name, w)?,
             );
         }
+        let mut timing = BTreeMap::new();
+        for holder in self.writers.keys().map(String::as_str).chain([GC]) {
+            timing.insert(
+                RuntimeValue::Text(holder.to_owned()),
+                self.timing_value(holder),
+            );
+        }
         Ok(record([
             ("bucket", bucket),
             ("clients", RuntimeValue::Map(clients)),
             ("collector", self.collector_value()?),
+            ("now", RuntimeValue::Int(self.clock.ticks())),
+            ("timing", RuntimeValue::Map(timing)),
             ("history", RuntimeValue::List(history)),
         ]))
+    }
+
+    /// A holder's `Timing`: its lease's age from the lease itself, the rest as its
+    /// refresher's requests were let through.
+    fn timing_value(&self, holder: &str) -> RuntimeValue {
+        self.note_running(holder);
+        let refreshed = self
+            .probe(holder)
+            .map(|p| p.refreshed().as_secs() as i64 / TICK_SECS);
+        let r = self
+            .refreshers
+            .lock()
+            .unwrap()
+            .get(holder)
+            .cloned()
+            .unwrap_or_default();
+        let sent = match refreshed {
+            Some(_) => r.sent,
+            None => self
+                .lease_sent
+                .lock()
+                .unwrap()
+                .get(holder)
+                .copied()
+                .unwrap_or(0),
+        };
+        record([
+            ("running", RuntimeValue::Bool(refreshed.is_some())),
+            ("refreshed", RuntimeValue::Int(refreshed.unwrap_or(0))),
+            ("done", RuntimeValue::Int(r.done)),
+            ("inflight", RuntimeValue::Bool(r.inflight)),
+            ("sent", RuntimeValue::Int(sent)),
+            ("landed", RuntimeValue::Bool(r.landed)),
+            ("checked", RuntimeValue::Int(r.checked)),
+        ])
     }
 }
 
@@ -2226,6 +2607,7 @@ impl generated::Implementation for Harness {
             Store::from_object_store("memory://bucket", bucket.clone()),
             None,
         );
+        let clock = Arc::new(TestClock::default());
         let (sender, events) = mpsc::channel();
         let RuntimeValue::Map(clients) = field(initial, "clients")? else {
             return Err("expected a map of clients".into());
@@ -2237,7 +2619,10 @@ impl generated::Implementation for Harness {
         let mut h = Harness {
             rt: Some(rt),
             bucket,
-            book: Arc::default(),
+            book: Arc::new(Mutex::new(Book {
+                clock: clock.clone(),
+                ..Book::default()
+            })),
             observer,
             events,
             sender,
@@ -2252,6 +2637,11 @@ impl generated::Implementation for Harness {
             ref_etags: Mutex::default(),
             ref_commits: Mutex::default(),
             ref_values: Mutex::default(),
+            clock,
+            repos: Mutex::default(),
+            refreshers: Mutex::default(),
+            refresh_requests: 0,
+            lease_sent: Mutex::default(),
         };
         let bucket = field(initial, "bucket")?;
         let RuntimeValue::Map(refs) = field(bucket, "refs")? else {
@@ -2418,8 +2808,13 @@ impl generated::Implementation for Harness {
     fn gather(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
         let c = Harness::actor_arg(arguments)?;
         self.drain(&c, &[Request::GetIntent, Request::PutCommit])?;
-        if self.writer(&c)?.progress.holds(Request::Swap) {
+        let p = &self.writer(&c)?.progress;
+        if p.holds(Request::Swap) {
             self.writer(&c)?.combining = Some("BatchSwapping");
+            Ok(())
+        } else if p.holds(Request::ReadRef) && !p.holds(Request::ListIntents) {
+            // The swap never left (the lease check refused it): it reads the ref instead.
+            self.writer(&c)?.combining = Some("BatchRechecking");
             Ok(())
         } else {
             self.new_round(&c)
@@ -2483,7 +2878,7 @@ impl generated::Implementation for Harness {
     /// (`pail rebase --undo`).
     fn begin_undo(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
         let name = Harness::actor_arg(arguments)?;
-        let repo = Repo::with_store(self.gate(&name), None);
+        let repo = self.client(&name);
         let events = self.sender.clone();
         let actor = name.clone();
         let committer = format!("{name} <{name}@example.com>");
@@ -2520,7 +2915,7 @@ impl generated::Implementation for Harness {
             .map_err(|e| e.to_string())?
             .parent
             .ok_or("resetting the root")?;
-        let repo = Repo::with_store(self.gate(&name), None);
+        let repo = self.client(&name);
         let events = self.sender.clone();
         let actor = name.clone();
         let committer = format!("{name} <{name}@example.com>");
@@ -2608,7 +3003,7 @@ impl generated::Implementation for Harness {
             .ok_or(format!("{name} has no stack"))?;
         let v: RefValue = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
         let stack = self.name(&v.commit)?;
-        let repo = Repo::with_store(self.gate(&name), None);
+        let repo = self.client(&name);
         let events = self.sender.clone();
         let actor = name.clone();
         let committer = format!("{name} <{name}@example.com>");
@@ -2687,7 +3082,7 @@ impl generated::Implementation for Harness {
 
     fn gc_lease(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
         if !self.collector.running {
-            let repo = Repo::with_store(self.gate(GC), None);
+            let repo = self.client(GC);
             let events = self.sender.clone();
             self.rt().spawn(async move {
                 let opts = pail::gc::GcOptions {
@@ -2696,13 +3091,21 @@ impl generated::Implementation for Harness {
                     wait: Duration::from_secs(60),
                     now: None,
                 };
-                let outcome = match pail::gc::gc_with(&repo, &opts).await {
-                    Ok(_) => "Done",
-                    Err(_) => "Failed",
-                };
+                // `gc_with`, taking the lease apart so the harness can read its age.
+                let outcome = async {
+                    let lease = pail::lease::Lease::exclusive(&repo.store, opts.wait).await?;
+                    let _ = events.send(Event::GcHeld {
+                        probe: lease.probe(),
+                    });
+                    let report = pail::gc::gc_under(&repo, &opts, &lease).await;
+                    let released = lease.release().await;
+                    report?;
+                    released
+                }
+                .await;
                 let _ = events.send(Event::Finished {
                     actor: GC.to_owned(),
-                    outcome,
+                    outcome: if outcome.is_ok() { "Done" } else { "Failed" },
                 });
             });
             self.collector.running = true;
@@ -2756,6 +3159,56 @@ impl generated::Implementation for Harness {
 
     fn grace_elapses(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
         self.book.lock().unwrap().epoch += 1;
+        Ok(())
+    }
+
+    /// The clock moves on a tick, and every refresher whose sleep ended makes its request.
+    fn tick(&mut self, _arguments: &[RuntimeValue]) -> Result<(), String> {
+        let before = self.refresh_requests;
+        let woke = self.clock.advance();
+        while self.refresh_requests - before < woke {
+            let event = self.events.recv_timeout(SETTLE).map_err(|_| {
+                format!(
+                    "{woke} refreshers woke, {} asked",
+                    self.refresh_requests - before
+                )
+            })?;
+            self.handle(event)?;
+        }
+        Ok(())
+    }
+
+    /// A refresher's put reaches the store (or does not); answered, its reply then waits.
+    fn refresh_land(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let h = Harness::actor_arg(arguments)?;
+        let how = Delivery::of(arguments.get(1).ok_or("refreshLand takes a Delivery")?)?;
+        self.refresher_waits(&h, Request::RefreshLease)?;
+        let asleep = self.clock.sleeping();
+        self.release_refresh(&h, Request::RefreshLease, how)?;
+        if matches!(how, Delivery::Answered) {
+            self.refresher_waits(&h, Request::AckLease)?;
+            self.refreshers.lock().unwrap().entry(h).or_default().landed = true;
+        } else {
+            self.refresher_sleeps(asleep + 1)?;
+            let now = self.clock.ticks();
+            let mut r = self.refreshers.lock().unwrap();
+            let r = r.entry(h).or_default();
+            (r.inflight, r.sent, r.done) = (false, 0, now);
+        }
+        Ok(())
+    }
+
+    /// The reply of a refresh arrives, and the refresher sleeps again.
+    fn refresh_ack(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let h = Harness::actor_arg(arguments)?;
+        self.refresher_waits(&h, Request::AckLease)?;
+        let asleep = self.clock.sleeping();
+        self.release_refresh(&h, Request::AckLease, Delivery::Answered)?;
+        self.refresher_sleeps(asleep + 1)?;
+        let now = self.clock.ticks();
+        let mut r = self.refreshers.lock().unwrap();
+        let r = r.entry(h).or_default();
+        (r.inflight, r.sent, r.landed, r.done) = (false, 0, false, now);
         Ok(())
     }
 }

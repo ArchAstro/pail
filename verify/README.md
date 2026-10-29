@@ -23,7 +23,8 @@ publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, exp
 combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
 rewrite.qnt   rewrite_ref steps for rebase, undo, reset (read, lease, store, read + carry + record, swap, recheck)
 land.qnt      land_stack steps (make the stack; lease, read + fork point + copy, swap, recheck)
-gc.qnt        gc steps (exclusive lease, drain, mark, list, delete, release)
+gc.qnt        gc steps (exclusive lease, drain, mark, list, check, delete, release)
+clock.qnt     time: the tick, the refreshers that keep leases alive
    ▲
 pail.qnt      the steps as actions, any interleaving (`step`), the properties
 ```
@@ -47,14 +48,15 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `store.qnt` | The object store, independent of pail: `Space[k, b]` of versioned objects, writes, `Delivery` |
 | `store_spec.qnt` | One action per `Store` method, each recording its reply in `state.reply` |
 | `store_scenarios.qnt` | `@conformance` runs: the store contract every backend must follow, reply for reply |
-| `bucket.qnt` | Pail's spaces in the store and the operators on them (`uploaded`, `refSwapped`, `leased`) |
-| `world.qnt` | The state every feature acts on (`State`, `Client`, `Collector`) |
+| `bucket.qnt` | Pail's spaces in the store and the operators on them (`uploaded`, `refSwapped`, `leased`), and the time constants |
+| `world.qnt` | The state every feature acts on (`State`, `Client`, `Collector`, each holder's `Timing`) |
 | `publish.qnt` | Writers running `commit_opts`, one store request per step |
 | `combine.qnt` | Writers that lost their direct attempts, running `commit_combining` |
 | `rewrite.qnt` | A client rewording the tip, undoing the last rewrite or resetting the tip, running `rewrite_ref` |
 | `land.qnt` | A client making a stack (a branch of its own) and landing it with `land_stack` |
 | `locate.qnt` | A writer finding where the commit it read is after rewrites (`Repo::successor`) |
 | `gc.qnt` | The collector running `gc::gc_with`, one store request per step |
+| `clock.qnt` | Time: `tick`, and each lease holder's refresher (`refreshLand`, `refreshAck`) |
 | `pail.qnt` | Actions, `step`, and the properties (`safety`) |
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
 | `policy.qnt` | Branch policy: parsing `policy.json`, `decide`, `request_op` |
@@ -92,7 +94,8 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
    an undo or reset took it off since).
 4. `conflictedHasNothingOnBranch`: a client told "conflict" landed nothing.
 5. `landsAtMostOnce`: one `commit` call lands at most one commit.
-6. `gcRunsAlone`: while gc marks and deletes, no writer is between its first read and its
+6. `gcRunsAlone`: while gc is about to delete (its lease check passed), no writer that can
+   still move a ref (its lease fresh, or a swap on its way) is between its first read and its
    return.
 7. `recentIsTruthful`, and the rewrite properties `lineageNamesItsRecord`,
    `recordsAreChained`, `reflogIsStored`, `rewriteOutcomeIsTruthful`,
@@ -103,9 +106,14 @@ CI runs all four (`npm run check` in place of `compile`, failing on stale genera
 9. `locatedOnBranch`, `locateKeepsChanges`: see the successor walks section.
 10. `knownHeadsAreTrue`: see the known heads section.
 
-`npm run simulate` checks them over random interleavings of three writers and gc,
-including crashes, expired leases and the grace period passing at any moment (simulation,
-not proof: it samples behaviours rather than exhausting them). Two mutations confirm it is
+`npm run simulate` checks them over random interleavings of four clients and gc,
+including crashes, the clock ticking, stalled refreshers and the grace period passing at any
+moment (simulation, not proof: it samples behaviours rather than exhausting them). Time
+and its stalls are enabled in a fraction of the draws (`SLOW` in `pail.qnt`): a tick as likely
+as any step let leases go stale before writers reached combining, rewrites or gc's deletes
+(`contendStep` then ran 30x faster than before the clock, a sign of runs that stopped
+mattering). Witness invariants (negations of: a combined commit, a rewrite, a gc delete, a
+lease expiring under a live holder) are found within seconds of `step` / `contendStep`. Two mutations confirm it is
 not vacuous: gc ignoring writers' leases, or writers ignoring gc's, each break
 `branchIsComplete` within seconds.
 
@@ -196,6 +204,12 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | `gcDeleteCommit(id)` / `gcDeletePage(t)` | gc's next DELETE, which must be of that object |
 | `gcDone` | gc's DELETE of its lease, its last request |
 | `graceElapses` | every object's LastModified, as gc lists it, moves back past the grace period |
+| action `tick` | the test clock (`Store::with_clock`) moves 100 s on; every refresher whose sleep ended makes its `PUT locks/<holder>` and waits at the gate |
+| action `refreshLand(h, d)` | that refresher PUT released (`d` as for a swap); answered, its reply then waits at the gate |
+| action `refreshAck(h)` | that reply let through, and the refresher sleeps again |
+| `now` | the test clock, in ticks |
+| `locks` (by holder) `.at` | the tick the holder's lease was last written: the LastModified the gate gives it in listings |
+| `timing` (by holder) | `refreshed`: the lease's own record of its last refresh (`Lease::probe`, `Repo::lease_probe`); the rest as the refresher's requests were let through: `inflight`/`sent`/`landed`/`done`, and `checked`, the tick a swap or delete request arrived at the gate (a passed `Lease::check` precedes it) |
 | `CommitId` (writers from the root) | the commit hash, named by its parent's name and who uploaded it |
 | `Tree` (page key) | the page's hash, named by the tree it holds |
 | `locks` (by holder) | the holder's lease objects: one version per lease written or deleted |
@@ -253,6 +267,27 @@ objects map to `store.qnt` tombstones.
    recheck asks `landed_since`, as a writer's does.
 
 Scenarios 3, 4 and 7 diverge from the unfixed code at the recheck, 5 at bob's read.
+
+Lease timing (`clock.qnt`, below) found three more, each in `src/lease.rs` or `src/gc.rs`:
+
+8. `staleGcRefusesToDeleteRun`: gc marked, then stalled: its refresh never landed, so by
+   `TTL` the writers no longer saw its lease and alice made a stack. gc resumed, listed her
+   commit as unreachable (it marked before) and deleted it under her ref: `branchIsComplete`.
+   gc never called `Lease::check`. It now does before each delete, and a gc that finds
+   itself stale gives up (`gc_under`).
+9. `gcLeaseCountsFromItsWriteRun`: a lease counted its age from when `Lease::held` ran,
+   after the put and the listing that followed, but its LastModified is the put's. gc, slow
+   to list, passed its check at tick 6 on a lease the others had stopped seeing at tick 6;
+   a refresher's reply likewise stamped the time it came back. Leases now count from the
+   instant before the put (`Lease::write`, the refresher).
+10. `lateRefreshDoesNotReviveRun`: with 9 fixed, a refresh sent at tick 6 for a lease
+    written at tick 0 still made gc fresh again when it landed, after alice had made her
+    stack and the others had stopped seeing the lease. A refresh answered after its holder
+    went stale is now ignored (`Stamp::advance`): the others may have stopped seeing the lease
+    before it landed, and a reply cannot take that back.
+
+Each was a counterexample of `quint run` (branchIsComplete / safety within seconds), with
+the fix undone, before it was a fix.
 
 ## Combining (`combine.qnt`)
 
@@ -436,8 +471,87 @@ loses the swap: the second attempt reads the ref and replays as usual.
 ## Not modelled yet
 
 1. Packs and chunks (files are inline in the model's trees).
-2. Lease timing: a live holder is assumed to refresh within the lease's lifetime
-   (`Lease::check` refuses a ref swap otherwise); only dead holders' leases expire.
+
+## Lease timing (`clock.qnt`)
+
+A lease is rewritten every `LEASE_TTL / 3` by its holder's refresher. The others ignore it
+once its LastModified is older than `TTL` by their clock. The holder trusts it, for a ref
+swap or a gc delete, while `Lease::check` finds it refreshed within `TTL / 2`. So a holder
+that stalls looks dead to the others (at `TTL`) only after it knows it (at `TTL / 2`), and the
+`TTL / 2` between is the margin for everything the model cannot see.
+
+Time is a count of ticks, a sixth of `TTL` each (`TTL` 6, a refresh every 2, a check at 3),
+so simulation stays fast; the harness maps a tick to 100 s.
+
+```text
+  t=0     the refresh lands (LastModified)
+  t=3     a holder's last chance to pass Lease::check          ┐ LATENCY (D): the swap or
+  t=3+D   ... and the last tick its request can land           ┘ delete it checked for lands
+  t=6-S+1 the first tick a lister, its clock S ahead, may ignore the lease
+
+  safe  ⇔  D + S ≤ MAX_AGE (= TTL / 2, in ticks)
+```
+
+1. State: `now`, and per holder (clients and gc) `timing`: `running` (its lease is held:
+   its refresher runs), `refreshed` (what `check` measures from), `done`, and the refresh
+   in flight (`inflight`, `sent`, `landed`; before the lease is held, `sent` is when its first
+   put was sent). A lease object in `locks` carries `at`, its
+   LastModified, and `leasedByOthers` filters by it.
+2. `tick`: time passes; a holder whose refresh is due (`REFRESH` after its last) sends it.
+   `refreshLand(h, d)` is the put reaching the store, whenever (a stall is a refresh that
+   never lands, or lands late); `refreshAck(h)` is its reply.
+3. Every request guarded by `Lease::check` is guarded in the step that sends it
+   (`guarded`): the commit's, a combining round's and a landing's swap (`advance_ref`), a
+   rewrite's swap (`rewrite_ref`) and each of gc's deletes. A refused swap through
+   `advance_ref` is an error, which `commit_opts`, the combiner and `land_stack` take as an
+   unknown outcome and recheck: the model's `Dropped`. A refused `rewrite_ref` returns the
+   error (`Unknown`); a refused gc stops and releases its lease.
+4. The lease counts from the instant before its put (`holding`: the lease's `at`;
+   `refreshAckNext`: `sent`), and a refresh answered after the holder went stale does not
+   count.
+
+Assumptions, named so the model can say when it is safe:
+
+| | | Model | Checked |
+|---|---|---|---|
+| D | `LATENCY`: ticks a request may take to land after the check that allowed it (a stall between check and request) | 1 | `tickCan` blocks time while a checked swap or delete is on its way for D ticks |
+| S | `SKEW`: how far the lister's clock may run ahead of the store's stamping LastModified | 1 | `leasedByOthers` adds it to a lease's age; the harness's test clock runs it ahead |
+| | clocks otherwise run at the same rate (no drift) | | |
+| | the lister reads its clock once per listing (the real one reads it when it sends the request, which only makes leases look younger: more cautious); the listing is one step | | the gate shifts LastModified by the ticks a listing waited |
+
+Safety holds iff `D + S ≤ TTL / 2`. `quint run pail.qnt --invariant=safety` with each pair
+(`LATENCY`, `SKEW` edited), 60,000 runs of 60 steps: no violation for (D, S) = (0, 0), (1, 1),
+(2, 1), (1, 2), (3, 0), (0, 3); 400,000 runs break `safety` for (2, 2), (3, 1), (4, 0) and
+fewer for (1, 3), (0, 4), (5, 0). In seconds of the real
+constants: a process may be paused up to 5 minutes between check and request, less any skew
+between machines. A pause longer than `TTL / 2` in `Lease::check` itself, a swap that waits
+longer in a retry, or a clock that jumps are what no margin protects against. Put latency
+is not in the bound: a lease counts from before its put.
+
+- Scenarios: `expiredLeaseIsIgnoredRun` (a dead holder ignored at `TTL` on the lister's
+  clock, not before), `staleWriterRefusesSwapRun`, `staleRewriterRefusesRun`,
+  `staleLanderRefusesRun`, `staleCombinerRefusesRun` (each swap site refuses a stale
+  holder), `swapAtTheEdgeOfTheMarginRun` (age `MAX_AGE` passes), `refreshCountsFromItsSendRun`,
+  `leaseCountsFromItsPutRun`, `gcLeaseCountsFromItsWriteRun`, `lateRefreshDoesNotReviveRun`,
+  `staleGcRefusesToDeleteRun`.
+- Mutants of `src/lease.rs`, `src/gc.rs` and `src/repo.rs`: fourteen, each undone after the run. Thirteen fail a scenario: gc without its check
+  (`staleGcRefusesToDeleteRun`), a lease counting from after its put (`leaseCountsFromItsPutRun`)
+  or from after its listing (`expiredLeaseIsIgnoredRun`), a refresh counting from its reply
+  (`refreshCountsFromItsSendRun`), a late refresh reviving (`lateRefreshDoesNotReviveRun`),
+  `Lease::check` against `TTL` instead of `TTL / 2` (both copies: `staleGcRefusesToDeleteRun`,
+  `staleWriterRefusesSwapRun`) or refusing at `MAX_AGE` (`swapAtTheEdgeOfTheMarginRun`), a
+  lease expiring at `TTL` rather than after it, or never (`expiredLeaseIsIgnoredRun`, both), a
+  refresher every `TTL / 2` (`expiredLeaseIsIgnoredRun`), and no check before `advance_ref`'s
+  swap or `rewrite_ref`'s (`staleWriterRefusesSwapRun`, `staleRewriterRefusesRun`). The
+  fourteenth survives: no check before `create_branch`'s ref write, a step the model takes
+  whole
+- Simplifications: the stack's own leases (`write_commit`, `create_branch`, with the
+  check before `create_branch`'s ref write) are taken and released inside one step, so
+  they take no time; a gc that waits longer than `MAX_AGE` for writers' leases to go has
+  an unrefreshed lease from the start, so it finds itself stale at its first delete (it
+  gives up and is run again); `Lease::shared`/`exclusive`'s `wait` and backoff use real
+  time; a holder that dies stops its refresher with it (`crash`), and a stalled one
+  (refreshes not landing) is the other way to go stale.
 
 ## Notes
 

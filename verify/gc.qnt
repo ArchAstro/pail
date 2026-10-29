@@ -27,7 +27,7 @@ module gc {
 
   pure def gcLeaseNext(s: State): State = {
     ...s,
-    bucket: leased(s.bucket, GC, Exclusive),
+    bucket: leased(s.bucket, GC, Exclusive, s.now),
     collector: { ...s.collector, phase: GcDraining },
   }
 
@@ -36,10 +36,10 @@ module gc {
   pure def gcCheckLeasesCan(s: State): bool = s.collector.phase == GcDraining
 
   pure def gcCheckLeasesNext(s: State): State =
-    if (leasedByOthers(s.bucket, GC, Set(Exclusive)))
-      { ...s, bucket: unleased(s.bucket, GC), collector: GC_IDLE }
-    else if (leasedByOthers(s.bucket, GC, Set(Shared))) s
-    else { ...s, collector: { ...s.collector, phase: GcLocked } }
+    if (leasedByOthers(s.bucket, GC, Set(Exclusive), s.now))
+      notHolding({ ...s, bucket: unleased(s.bucket, GC), collector: GC_IDLE }, GC)
+    else if (leasedByOthers(s.bucket, GC, Set(Shared), s.now)) s
+    else holding({ ...s, collector: { ...s.collector, phase: GcLocked } }, GC)
 
   /// Read the refs, then every reflog record, and walk what they reach (commits, then each
   /// commit's root page): a rewrite's old history stays, for successor walks and undo.
@@ -60,7 +60,7 @@ module gc {
   /// was young then is spared even if the grace period elapses mid-run.
   pure def gcListCommitsCan(s: State): bool = s.collector.phase == GcMarked
 
-  pure def gcListCommitsNext(s: State): State = {
+  pure def gcListCommitsNext(s: State): State = gcGuarded({
     ...s,
     collector: {
       ...s.collector,
@@ -70,22 +70,22 @@ module gc {
         not(s.collector.liveCommits.contains(id)) and not(s.bucket.young.commits.contains(id))
       ),
     },
-  }
+  })
 
   pure def gcDeleteCommitCan(s: State, id: CommitId): bool =
     s.collector.phase == GcSweepingCommits and s.collector.doomedCommits.contains(id)
 
-  pure def gcDeleteCommitNext(s: State, id: CommitId): State = {
+  pure def gcDeleteCommitNext(s: State, id: CommitId): State = gcGuarded({
     ...s,
     bucket: { ...s.bucket, commits: deleted(s.bucket.commits, id) },
     collector: { ...s.collector, doomedCommits: s.collector.doomedCommits.exclude(Set(id)) },
-  }
+  })
 
   /// List `pages/` once every doomed commit is gone.
   pure def gcListPagesCan(s: State): bool =
     s.collector.phase == GcSweepingCommits and s.collector.doomedCommits == Set()
 
-  pure def gcListPagesNext(s: State): State = {
+  pure def gcListPagesNext(s: State): State = gcGuarded({
     ...s,
     collector: {
       ...s.collector,
@@ -96,22 +96,33 @@ module gc {
           and not(s.bucket.young.pages.contains(t))
       ),
     },
-  }
+  })
 
   pure def gcDeletePageCan(s: State, t: Tree): bool =
     s.collector.phase == GcSweepingPages and s.collector.doomedPages.contains(t)
 
-  pure def gcDeletePageNext(s: State, t: Tree): State = {
+  pure def gcDeletePageNext(s: State, t: Tree): State = gcGuarded({
     ...s,
     bucket: { ...s.bucket, pages: deleted(s.bucket.pages, t) },
     collector: { ...s.collector, doomedPages: s.collector.doomedPages.exclude(Set(t)) },
-  }
+  })
 
   pure def gcDoneCan(s: State): bool =
     s.collector.phase == GcSweepingPages and s.collector.doomedPages == Set()
 
   pure def gcDoneNext(s: State): State =
-    { ...s, bucket: unleased(s.bucket, GC), collector: GC_IDLE }
+    notHolding({ ...s, bucket: unleased(s.bucket, GC), collector: GC_IDLE }, GC)
+
+  /// Before each delete gc checks its lease (`Lease::check`): once it has gone too long
+  /// without refreshing it, to the others it is dead, and what it marked may be stale. It
+  /// then deletes nothing more: it returns the error, releasing its lease.
+  pure def gcGuarded(s: State): State =
+    if (deleting(s.collector))
+      guarded(s, GC, {
+        ...s,
+        collector: { ...s.collector, phase: GcSweepingPages, doomedCommits: Set(), doomedPages: Set() },
+      })
+    else s
 
   /// The grace period passes: every object is now old. It can pass at any moment: the
   /// lease, not the grace period, keeps gc from deleting what a commit needs.
@@ -119,9 +130,9 @@ module gc {
     ...s,
     bucket: { ...s.bucket, young: { pages: Set(), commits: Set() } },
     // Mid-sweep, what is young now was young at `now` or written after it: either way
-    // newer than the cutoff.
+    // newer than the cutoff. (Before the first listing there is no cutoff yet.)
     collector:
-      if (s.collector.phase == GcIdle) s.collector
+      if (not(Set(GcSweepingCommits, GcSweepingPages).contains(s.collector.phase))) s.collector
       else {
         ...s.collector,
         spared: {

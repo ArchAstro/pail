@@ -52,17 +52,27 @@ pub async fn gc(repo: &Repo, grace_secs: i64, dry_run: bool) -> Result<GcReport>
 
 pub async fn gc_with(repo: &Repo, opts: &GcOptions) -> Result<GcReport> {
     if opts.dry_run {
-        return sweep(repo, opts).await;
+        return sweep(repo, opts, None).await;
     }
     let lease = Lease::exclusive(&repo.store, opts.wait).await?;
-    let report = sweep(repo, opts).await;
+    let report = gc_under(repo, opts, &lease).await;
     let released = lease.release().await;
     let report = report?;
     released?;
     Ok(report)
 }
 
-async fn sweep(repo: &Repo, opts: &GcOptions) -> Result<GcReport> {
+/// [`gc_with`] under a lease the caller took (`Lease::exclusive`) and will release.
+pub async fn gc_under(repo: &Repo, opts: &GcOptions, lease: &Lease) -> Result<GcReport> {
+    sweep(repo, opts, Some(lease)).await
+}
+
+/// Mark, then delete. Under a `lease`, each delete first checks it ([`Lease::check`]): a gc
+/// that stalled (a long pause, a slow listing) may have lost its lease without knowing it,
+/// if the others stopped seeing it, took shared ones and reused objects it had marked
+/// unreachable. Its marks are stale then, so it deletes nothing more
+/// (`verify/gc.qnt`, `staleGcRefusesToDeleteRun`).
+async fn sweep(repo: &Repo, opts: &GcOptions, lease: Option<&Lease>) -> Result<GcReport> {
     let (grace_secs, dry_run) = (opts.grace_secs, opts.dry_run);
     let mut roots: Vec<Hash> = repo
         .list_refs()
@@ -152,6 +162,9 @@ async fn sweep(repo: &Repo, opts: &GcOptions) -> Result<GcReport> {
                 continue;
             }
             if !dry_run {
+                if let Some(lease) = lease {
+                    lease.check()?;
+                }
                 repo.store.delete(&o.key).await?;
             }
             report.bytes_freed += o.size;

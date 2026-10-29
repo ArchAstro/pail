@@ -6,7 +6,7 @@
 ///   pages/<hash>     a tree's page, named by its content          Space[Tree, bool]
 ///   commits/<hash>   immutable, created once, named by content    Space[CommitId, Commit]
 ///   refs/<branch>    the one mutable object, moved by CAS         Space[str, RefBody]
-///   locks/<holder>   a lease: writers share, gc holds alone       Space[str, LeaseKind]
+///   locks/<holder>   a lease: writers share, gc holds alone       Space[str, Lease]
 ///   intents/<b>/<id> a combining writer's change, until it lands   Space[str, Intent]
 ///   reflog/<b>/<id>  a rewrite's record, created once, kept         Space[int, Rewrite]
 /// ```
@@ -73,6 +73,10 @@ module bucket {
   /// A lease's kind: writers hold shared leases together; gc holds an exclusive one alone.
   type LeaseKind = Shared | Exclusive
 
+  /// A lease object (`locks/<holder>`): its kind, and the time it was last written, which
+  /// is its LastModified in the store. Others ignore it once it is older than `TTL`.
+  type Lease = { kind: LeaseKind, at: int }
+
   /// Objects written since the gc grace period last elapsed (by their LastModified).
   /// Creating an object that exists already does not write it, so does not make it young.
   type Young = { pages: Set[Tree], commits: Set[CommitId] }
@@ -81,11 +85,31 @@ module bucket {
     pages: Space[Tree, bool],
     commits: Space[CommitId, Commit],
     refs: Space[str, RefBody],
-    locks: Space[str, LeaseKind],
+    locks: Space[str, Lease],
     intents: Space[str, Intent],
     reflog: Space[int, Rewrite],
     young: Young,
   }
+
+  // ---------- time ----------
+  //
+  // Time is a count of ticks, a sixth of `LEASE_TTL` each (100 s). The constants mirror
+  // lease.rs; `LATENCY` and `SKEW` are the assumptions the lease margin rests on
+  // (`world.qnt`'s `tickCan`, README "Lease timing").
+
+  /// `LEASE_TTL`: a lease not rewritten for longer is ignored.
+  pure val TTL: int = 6
+  /// `LEASE_TTL / 3`: how often the refresher rewrites a lease.
+  pure val REFRESH: int = 2
+  /// `LEASE_TTL / 2`: `Lease::check` refuses a ref swap once the lease is older than this.
+  pure val MAX_AGE: int = 3
+  /// The most ticks a request can take to land after the check that allowed it: a
+  /// process may stall between `Lease::check` and the store applying the swap, but not
+  /// for long (assumption D).
+  pure val LATENCY: int = 1
+  /// How far the lister's clock may run ahead of the store's, which stamps LastModified
+  /// (assumption S).
+  pure val SKEW: int = 1
 
   pure val BRANCH: str = "main"
   pure val PATHS: Set[str] = Set("a", "b")
@@ -227,14 +251,24 @@ module bucket {
   pure def intentsDeleted(b: Bucket, ws: Set[str]): Bucket =
     { ...b, intents: ws.fold(b.intents, (acc, w) => deleted(acc, w)) }
 
-  /// Whether a lease other than `holder`'s is live (of `kinds`).
-  pure def leasedByOthers(b: Bucket, holder: str, kinds: Set[LeaseKind]): bool =
-    liveKeys(b.locks).exists(k => k != holder and kinds.contains(body(b.locks, k)))
+  /// Whether a lease other than `holder`'s is live (of `kinds`) at time `now` (`others`
+  /// in lease.rs): not deleted, and not older than `TTL` by the lister's clock, which is
+  /// `SKEW` ahead of the store's.
+  pure def leasedByOthers(b: Bucket, holder: str, kinds: Set[LeaseKind], now: int): bool =
+    liveKeys(b.locks).exists(k => and {
+      k != holder,
+      kinds.contains(body(b.locks, k).kind),
+      now + SKEW - body(b.locks, k).at <= TTL,
+    })
 
-  pure def leased(b: Bucket, holder: str, kind: LeaseKind): Bucket =
-    { ...b, locks: written(b.locks, holder, kind) }
+  /// `holder`'s lease written (or rewritten) at `now`.
+  pure def leased(b: Bucket, holder: str, kind: LeaseKind, now: int): Bucket =
+    { ...b, locks: written(b.locks, holder, { kind: kind, at: now }) }
 
   pure def unleased(b: Bucket, holder: str): Bucket = { ...b, locks: deleted(b.locks, holder) }
+
+  /// When `holder`'s lease was last written: its LastModified.
+  pure def leasedAt(b: Bucket, holder: str): int = body(b.locks, holder).at
 
   /// Whether each of `ids`, and its page, is stored.
   pure def allStored(b: Bucket, ids: Set[CommitId]): bool =

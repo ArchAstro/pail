@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
 /// Pail as a whole: every feature's steps (`publish.qnt`, `combine.qnt`, `rewrite.qnt`,
-/// `land.qnt`, `locate.qnt`, `gc.qnt`) as actions on one
+/// `land.qnt`, `locate.qnt`, `gc.qnt`, `clock.qnt`) as actions on one
 /// state, a `step` that interleaves them freely, and the properties that must hold in
 /// every reachable state. `npm run simulate` checks them; `scenarios.qnt` holds runs the
 /// real code is checked against.
@@ -14,6 +14,7 @@ module pail {
   import land.* from "./land"
   import locate.* from "./locate"
   import gc.* from "./gc"
+  import clock.* from "./clock"
 
   var state: State
 
@@ -39,11 +40,6 @@ module pail {
   }
 
   action crash(c: str): bool = all { crashCan(state, c), state' = crashNext(state, c) }
-
-  action leaseExpires(c: str): bool = all {
-    leaseExpiresCan(state, c),
-    state' = leaseExpiresNext(state, c),
-  }
 
   action readRef(c: str): bool = all {
     readRefCan(state, c),
@@ -180,6 +176,17 @@ module pail {
 
   action graceElapses: bool = state' = graceElapsesNext(state)
 
+  // ---------- time ----------
+
+  action tick: bool = all { tickCan(state), state' = tickNext(state) }
+
+  action refreshLand(h: str, d: Delivery): bool = all {
+    refreshLandCan(state, h),
+    state' = refreshLandNext(state, h, d),
+  }
+
+  action refreshAck(h: str): bool = all { refreshAckCan(state, h), state' = refreshAckNext(state, h) }
+
   // ---------- any interleaving ----------
 
   /// Deltas a simulated writer may write. None writes a path's root content, so a landed
@@ -191,6 +198,10 @@ module pail {
     Map("b" -> "1"),
   )
 
+  /// One draw in `SLOW` (four times that in `contendStep`) lets time pass, and two let a
+  /// refresh land or be answered.
+  pure val SLOW: int = 3
+
   action step = {
     nondet c = CLIENTS.oneOf()
     nondet base = liveKeys(state.bucket.commits).oneOf()
@@ -198,6 +209,10 @@ module pail {
     nondet d = Set(Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
+    // Time and its stalls are enabled in a fraction of the draws: otherwise a tick is as
+    // likely as any step, leases go stale before the writers get anywhere, and combining,
+    // rewrites and gc's deletes are rarely reached.
+    nondet slow = 1.to(SLOW).oneOf()
     any {
       begin(c, base, delta),
       nondet from = CLIENTS.oneOf()
@@ -205,7 +220,6 @@ module pail {
       lease(c),
       checkLeases(c),
       crash(c),
-      leaseExpires(c),
       readRef(c),
       upload(c),
       swap(c, d),
@@ -242,6 +256,11 @@ module pail {
       gcListPages,
       gcDone,
       graceElapses,
+      all { slow == 1, tick },
+      all { slow <= 2, refreshAck(c) },
+      all { slow <= 2, refreshAck(GC) },
+      all { slow <= 2, refreshLand(c, d) },
+      all { slow <= 2, refreshLand(GC, d) },
       // Only enabled while sweeping, and then the doomed set is non-empty.
       nondet id = state.collector.doomedCommits.union(Set(ROOT)).oneOf()
       gcDeleteCommit(id),
@@ -260,6 +279,10 @@ module pail {
     nondet d = Set(Answered, Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
+    // Time and its stalls are enabled in a fraction of the draws: otherwise a tick is as
+    // likely as any step, leases go stale before the writers get anywhere, and combining,
+    // rewrites and gc's deletes are rarely reached.
+    nondet slow = 1.to(4 * SLOW).oneOf()
     any {
       begin(c, base, delta),
       nondet from = CLIENTS.oneOf()
@@ -294,6 +317,9 @@ module pail {
       ldSwap(c, d),
       ldRecheck(c),
       locate(c),
+      all { slow == 1, tick },
+      all { slow <= 2, refreshAck(c) },
+      all { slow <= 2, refreshLand(c, d) },
     }
   }
 
@@ -441,10 +467,16 @@ module pail {
         lineageOf(state.bucket) == client(state, c).known.lineage,
       })
 
-  /// While gc marks and deletes, no writer is between its first read and its return.
+  /// Whether `c` can still move a ref: in flight (past its first read), with a swap on its
+  /// way or a lease fresh enough to pass the check before one.
+  def canSwap(c: str): bool =
+    not(Set(Idle, Stacked, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
+      and (swapping(client(state, c)) or fresh(state, c))
+
+  /// While gc is about to delete (its lease checked), no writer that can move a ref is in
+  /// flight: the others saw gc's lease, or gc's lease is too old to pass the check.
   val gcRunsAlone: bool =
-    Set(GcLocked, GcMarked, GcSweepingCommits, GcSweepingPages).contains(state.collector.phase)
-      implies CLIENTS.forall(c => Set(Idle, Stacked, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
+    deleting(state.collector) implies CLIENTS.forall(c => not(canSwap(c)))
 
   val safety: bool = and {
     gcRunsAlone,
