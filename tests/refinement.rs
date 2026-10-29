@@ -59,7 +59,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        43,
+        48,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -517,6 +517,22 @@ fn id_value(id: &Id) -> RuntimeValue {
 
 /// The writer or intent whose change a commit makes: its name's last part, before any
 /// rewriter's mark (`tagOf`).
+/// The tags of the commits melded into `id`, oldest first (`world.qnt` `meldedTags`).
+fn melded(id: &Id) -> Vec<String> {
+    let own = match id.as_slice() {
+        [.., mark] if mark.starts_with('~') => id.len() - 2,
+        _ => id.len().saturating_sub(1),
+    };
+    let mut out = vec![];
+    let mut k = own;
+    while k >= 2 && id[k - 1] == "&" {
+        out.push(id[k - 2].clone());
+        k -= 2;
+    }
+    out.reverse();
+    out
+}
+
 fn tag(id: &Id) -> String {
     match id.as_slice() {
         [.., t, mark] if mark.starts_with('~') => t.clone(),
@@ -1049,11 +1065,7 @@ impl Harness {
                     // (and keeps the original's `pail.intent`); a combining round's commit is
                     // its intent writer's, not the uploader's.
                     match (c.meta.get("rewritten.from"), c.meta.get("pail.intent")) {
-                        (Some(from), _) => {
-                            let from = Hash::from_hex(from).map_err(|e| e.to_string())?;
-                            id.push(tag(&self.name(&from)?));
-                            id.push(format!("~{actor}"));
-                        }
+                        (Some(from), _) => id = self.rewritten_name(id, from, actor)?,
                         (None, Some(intent)) => {
                             id.push(format!("{}+", self.intent_writer(intent)?))
                         }
@@ -1175,6 +1187,8 @@ impl Harness {
                     let steps = match plan {
                         "dropParent" => vec![step(Action::Drop, p), step(Action::Pick, t)],
                         "dropTip" => vec![step(Action::Pick, p), step(Action::Drop, t)],
+                        "squash" => vec![step(Action::Pick, p), step(Action::Fixup, t)],
+                        "squashUnder" => vec![step(Action::Pick, t), step(Action::Fixup, p)],
                         _ => vec![step(Action::Pick, t), step(Action::Pick, p)],
                     };
                     (g, steps)
@@ -1227,6 +1241,33 @@ impl Harness {
         Ok(())
     }
 
+    /// The model's name for a commit `actor`'s rewrite made on `parent` of the commits
+    /// `rewritten.from` names (`world.qnt` `remade`, `meldedId`): the commits melded into
+    /// the first as `[tag, "&"]` pairs (theirs, and what was melded into each, in order),
+    /// then the first's own, then the rewriter's mark.
+    fn rewritten_name(&self, mut id: Id, from: &str, actor: &str) -> Result<Id, String> {
+        let sources: Vec<Id> = from
+            .split_whitespace()
+            .map(|h| self.name(&Hash::from_hex(h).map_err(|e| e.to_string())?))
+            .collect::<Result<_, _>>()?;
+        let (lead, members) = sources
+            .split_first()
+            .ok_or("rewritten.from names nothing")?;
+        let mut tags = vec![];
+        for m in members {
+            tags.extend(melded(m));
+            tags.push(tag(m));
+        }
+        tags.extend(melded(lead));
+        for t in tags {
+            id.push(t);
+            id.push("&".to_owned());
+        }
+        id.push(tag(lead));
+        id.push(format!("~{actor}"));
+        Ok(id)
+    }
+
     /// What a rebase built: its commits named (as stored ones are), its tip, map and the
     /// commits it makes.
     fn planned(
@@ -1243,10 +1284,8 @@ impl Harness {
                 .meta
                 .get("rewritten.from")
                 .ok_or("a planned commit names no original")?;
-            let from = Hash::from_hex(from).map_err(|e| e.to_string())?;
-            let mut id = self.name(&c.parent.ok_or("a planned root")?)?;
-            id.push(tag(&self.name(&from)?));
-            id.push(format!("~{actor}"));
+            let parent = self.name(&c.parent.ok_or("a planned root")?)?;
+            let id = self.rewritten_name(parent, from, actor)?;
             self.names.insert(h, id.clone());
             self.hashes.insert(id.clone(), h);
             made.insert(id);
@@ -2433,6 +2472,8 @@ impl generated::Implementation for Harness {
             Some("dropParent") => "dropParent",
             Some("dropTip") => "dropTip",
             Some("reorder") => "reorder",
+            Some("squash") => "squash",
+            Some("squashUnder") => "squashUnder",
             other => return Err(format!("unknown plan {other:?}")),
         };
         self.rebase(&name, plan)

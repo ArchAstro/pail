@@ -92,20 +92,52 @@ module rewrite {
       )
     )
 
+  /// The group so far with `x`'s change from its parent added, if it applies over the tree
+  /// so far with the group's changes before it (`Repo::check_applies` with an overlay).
+  pure def meldStep(b: Bucket, tree: Tree, x: CommitId, g: { ok: bool, d: Delta }): { ok: bool, d: Delta } =
+    Set(parentOf(b, x)).fold(g, (n0, p) =>
+      Set(deltaOf(b, x, p)).fold(g, (n1, d) =>
+        if (not(g.ok) or conflicts(d, treeOf(b, p), overlay(tree, g.d))) { ...g, ok: false }
+        else { ...g, d: d.keys().fold(g.d, (m, q) => m.put(q, d.get(q))) }
+      )
+    )
+
+  /// Meld `member` into `lead` onto the plan so far (a squash or fixup group): each one's
+  /// change, lead first, must apply; the group is one new commit, both one's successor, or
+  /// dropped whole if together they change nothing.
+  pure def meld(b: Bucket, c: str, lead: CommitId, member: CommitId, a: Built): Built = {
+    val g = meldStep(b, a.tree, member, meldStep(b, a.tree, lead, { ok: true, d: Map() }))
+    val group = Set(lead, member)
+    if (not(a.ok)) a
+    else if (not(g.ok)) { ...a, ok: false }
+    else if (overlay(a.tree, g.d) == a.tree) { ...a, dropped: a.dropped.union(group) }
+    else Set(meldedId(c, lead, member, a.tip)).fold(a, (n, id) => {
+      ...a,
+      tip: id,
+      tree: overlay(a.tree, g.d),
+      ancestors: a.ancestors.union(Set(a.tip)),
+      successors: group.fold(a.successors, (m, x) => m.put(x, id)),
+      made: a.made.union(Set({ id: id, tree: overlay(a.tree, g.d), ancestors: a.ancestors.union(Set(a.tip)) })),
+    })
+  }
+
   /// `plan` carried out by `c` on the history at `t` (its tip `t`, parent `p`, grandparent
   /// `g`): `reword` t; `dropParent` (p dropped, t picked onto g); `dropTip` (p kept, t
-  /// dropped); `reorder` (t, then p, onto g).
+  /// dropped); `reorder` (t, then p, onto g); `squash` (t melded into p, onto g);
+  /// `squashUnder` (p melded into t, onto g: a fixup moved down past the commit above it).
   pure def planned(b: Bucket, c: str, plan: str, t: CommitId): Built =
     Set(parentOf(b, t)).fold(builtOn(b, t, Set()), (n0, p) =>
       Set(parentOf(b, p)).fold(n0, (n1, g) =>
         if (plan == "reword") pick(b, c, t, true, builtOn(b, p, Set()))
         else if (plan == "dropParent") pick(b, c, t, false, builtOn(b, g, Set(p)))
         else if (plan == "dropTip") pick(b, c, p, false, builtOn(b, g, Set(t)))
+        else if (plan == "squash") meld(b, c, p, t, builtOn(b, g, Set()))
+        else if (plan == "squashUnder") meld(b, c, t, p, builtOn(b, g, Set()))
         else pick(b, c, p, false, pick(b, c, t, false, builtOn(b, g, Set())))
       )
     )
 
-  pure val PLANS: Set[str] = Set("dropParent", "dropTip", "reorder")
+  pure val PLANS: Set[str] = Set("dropParent", "dropTip", "reorder", "squash", "squashUnder")
 
   /// Read the ref and carry out `plan` on its tip's commits (the reword needs one, the
   /// others two), unleased, as `pail rebase` builds before taking its lease. A commit that

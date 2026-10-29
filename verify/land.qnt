@@ -90,7 +90,7 @@ module land {
     val above = branch(s.bucket).exclude(historyAt(s.bucket, base))
     val seen = { ...client(s, c).ld, version: cur.version, lineage: lineageOf(s.bucket) }
     // The stack's one commit is below the fork point, or the branch has a copy above it.
-    if (base == t or above.exists(x => author(x) == c))
+    if (base == t or above.exists(x => authorsOf(x).contains(c)))
       finished(s, c, { ...client(s, c), phase: Done, outcome: Published, ld: seen })
     else if (base == cur.commit)
       withClient(s, c, { ...client(s, c), phase: LdSwapping, ld: { ...seen, tip: t } })

@@ -321,7 +321,7 @@ module pail {
       droppedBy(state.bucket, recordOf(state.bucket, id)).contains(c),
       or {
         recordOf(state.bucket, id).op != "rebase",
-        recordOf(state.bucket, id).dropped.exists(x => author(x) == c),
+        recordOf(state.bucket, id).dropped.exists(x => authorsOf(x).contains(c)),
       },
     })
 
@@ -331,7 +331,7 @@ module pail {
   val publishedIsOnBranch: bool =
     CLIENTS.forall(c =>
       client(state, c).outcome == Published
-        implies (branch(state.bucket).exists(id => author(id) == c) or dropped(c))
+        implies (branch(state.bucket).exists(id => authorsOf(id).contains(c)) or dropped(c))
     )
 
   /// Each call publishes a client's change at most once (a move no record names enters
@@ -356,7 +356,7 @@ module pail {
   val recentIsTruthful: bool =
     recentOf(state.bucket).keys().forall(w => and {
       author(recentOf(state.bucket).get(w)) == w,
-      branch(state.bucket).exists(id => author(id) == w) or dropped(w),
+      branch(state.bucket).exists(id => authorsOf(id).contains(w)) or dropped(w),
     })
 
   /// A rebase takes off the branch only the changes of the commits its record says it
@@ -366,7 +366,7 @@ module pail {
     state.bucket.reflog.keys().forall(id =>
       if (recordOf(state.bucket, id).op == "rebase")
         droppedBy(state.bucket, recordOf(state.bucket, id))
-          .forall(w => recordOf(state.bucket, id).dropped.exists(x => author(x) == w))
+          .forall(w => recordOf(state.bucket, id).dropped.exists(x => authorsOf(x).contains(w)))
       else droppedBy(state.bucket, recordOf(state.bucket, id)).size() <= 1
     )
 
@@ -375,12 +375,12 @@ module pail {
   val conflictedHasNothingOnBranch: bool =
     CLIENTS.forall(c =>
       client(state, c).outcome == Conflicted
-        implies branch(state.bucket).forall(id => author(id) != c)
+        implies branch(state.bucket).forall(id => not(authorsOf(id).contains(c)))
     )
 
   /// One call to `commit` lands at most one commit.
   val landsAtMostOnce: bool =
-    CLIENTS.forall(c => branch(state.bucket).filter(id => author(id) == c).size() <= 1)
+    CLIENTS.forall(c => branch(state.bucket).filter(id => authorsOf(id).contains(c)).size() <= 1)
 
   /// The ref's lineage names the last rewrite: its record, of the same epoch, whose new
   /// tip the branch still has. No rewrite yet: epoch 0.

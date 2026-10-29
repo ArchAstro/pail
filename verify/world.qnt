@@ -257,20 +257,56 @@ module world {
     if (MARK.keys().exists(c => MARK.get(c) == id[length(id) - 1])) id[length(id) - 2]
     else id[length(id) - 1]
 
-  /// The commit a rewrite by `c` makes of `id`'s change on top of `onto`.
+  /// The tags of the commits melded into `id` (a squash or fixup), oldest first: the
+  /// `[t, "&"]` pairs just before its own tag, as in `[.., t, "&", lead, mark]` (at most
+  /// four; one per writer).
+  pure def meldedTags(id: CommitId): List[str] = {
+    val at = if (MARK.keys().exists(c => MARK.get(c) == id[length(id) - 1])) length(id) - 2 else length(id) - 1
+    val a1 = at >= 2 and id[at - 1] == "&"
+    val a2 = a1 and at >= 4 and id[at - 3] == "&"
+    val a3 = a2 and at >= 6 and id[at - 5] == "&"
+    val a4 = a3 and at >= 8 and id[at - 7] == "&"
+    val l4 = if (a4) List(id[at - 8]) else List()
+    val l3 = if (a3) l4.append(id[at - 6]) else l4
+    val l2 = if (a2) l3.append(id[at - 4]) else l3
+    if (a1) l2.append(id[at - 2]) else l2
+  }
+
+  /// `onto` with `tags` appended, each followed by `"&"`.
+  pure def withMelded(onto: CommitId, tags: List[str]): CommitId = {
+    val o1 = if (length(tags) > 0) onto.append(tags[0]).append("&") else onto
+    val o2 = if (length(tags) > 1) o1.append(tags[1]).append("&") else o1
+    val o3 = if (length(tags) > 2) o2.append(tags[2]).append("&") else o2
+    if (length(tags) > 3) o3.append(tags[3]).append("&") else o3
+  }
+
+  /// The commit a rewrite by `c` makes of `id`'s change on top of `onto` (keeping what was
+  /// melded into it).
   pure def remade(c: str, id: CommitId, onto: CommitId): CommitId =
-    onto.append(tagOf(id)).append(MARK.get(c))
+    withMelded(onto, meldedTags(id)).append(tagOf(id)).append(MARK.get(c))
+
+  /// The commit a rewrite by `c` makes on `onto` of `lead` with `member` melded into it
+  /// (a squash or fixup group of two).
+  pure def meldedId(c: str, lead: CommitId, member: CommitId, onto: CommitId): CommitId =
+    withMelded(withMelded(onto, meldedTags(member)).append(tagOf(member)).append("&"), meldedTags(lead))
+      .append(tagOf(lead))
+      .append(MARK.get(c))
+
+  /// The writer a tag names: itself, or the writer of the intent it names.
+  pure def writerOf(tag: str): str =
+    CLIENTS.fold(tag, (a, c) => if (INTENT_NAME.get(c) == tag) c else a)
 
   /// Who wrote commit `id`'s change: its writer, directly or through its intent, however
   /// often it was rewritten since.
-  pure def author(id: CommitId): str = {
-    val last = tagOf(id)
-    CLIENTS.fold(last, (a, c) => if (INTENT_NAME.get(c) == last) c else a)
-  }
+  pure def author(id: CommitId): str = writerOf(tagOf(id))
+
+  /// Whose changes commit `id` makes: its author and those of the commits melded into it.
+  pure def authorsOf(id: CommitId): Set[str] =
+    Set(author(id)).union(meldedTags(id).indices().map(i => writerOf(meldedTags(id)[i])))
 
   /// The writers whose changes the history at `id` has.
   pure def authorsAt(b: Bucket, id: CommitId): Set[str] =
-    ancestorsOf(b, id).union(Set(id)).exclude(Set(ROOT)).map(x => author(x))
+    ancestorsOf(b, id).union(Set(id)).exclude(Set(ROOT)).fold(Set(), (acc, x) => acc.union(authorsOf(x)))
 
   /// The writers whose changes record `r` took off the branch.
   pure def droppedBy(b: Bucket, r: Rewrite): Set[str] =
