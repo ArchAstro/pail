@@ -306,6 +306,59 @@ fn build(
     Ok((delta, uploads))
 }
 
+/// Live bytes under which a pack counts as small when advising a repack.
+pub const SMALL_LIVE_BYTES: u64 = 256 << 10;
+/// Small packs at a tip from which a repack is advised (`maintenance.warnSmallPacks`).
+pub const ADVISE_PACKS: usize = 100;
+
+/// A tip whose files are spread over many small packs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advice {
+    /// Packs holding at most [`SMALL_LIVE_BYTES`] of the tip's bytes, and all packs the tip
+    /// names.
+    pub small_packs: usize,
+    pub packs: usize,
+    /// Files in the small packs.
+    pub small_files: usize,
+}
+
+impl Advice {
+    pub fn message(&self) -> String {
+        format!(
+            "{} of this tip's {} packs hold under {} KiB of it ({} files): a cold checkout              reads one object per pack. `pail maintenance repack --dry-run` shows what              merging them saves.",
+            self.small_packs,
+            self.packs,
+            SMALL_LIVE_BYTES >> 10,
+            self.small_files
+        )
+    }
+}
+
+/// Whether the tip's `entries` span at least `threshold` small packs (a pack's size here is
+/// the tip's bytes in it, so no listing is needed; 0 = never advise).
+pub fn advice(entries: &[Entry], threshold: usize) -> Option<Advice> {
+    if threshold == 0 {
+        return None;
+    }
+    let mut live: HashMap<Hash, (HashSet<u64>, u64, usize)> = HashMap::new();
+    for e in entries {
+        if let Some((pack, off, len)) = packed(e) {
+            let p = live.entry(pack).or_default();
+            if p.0.insert(off) {
+                p.1 += len;
+            }
+            p.2 += 1;
+        }
+    }
+    let small: Vec<&(HashSet<u64>, u64, usize)> =
+        live.values().filter(|p| p.1 <= SMALL_LIVE_BYTES).collect();
+    (small.len() >= threshold).then(|| Advice {
+        small_packs: small.len(),
+        packs: live.len(),
+        small_files: small.iter().map(|p| p.2).sum(),
+    })
+}
+
 /// The newest commit at or below `h` that is not maintenance, with its hash: where a mirror
 /// resumes, and what history views show first.
 pub async fn skip_maintenance(repo: &Repo, mut h: Hash) -> Result<(Hash, Arc<Commit>)> {
