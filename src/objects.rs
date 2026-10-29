@@ -162,7 +162,16 @@ impl FileState {
     }
 }
 
+/// The meta key marking a commit as maintenance (a repack): it changes how files are stored,
+/// not what they are, so history views hide it and a mirror's resume steps over it.
+pub const MAINTENANCE_META: &str = "pail.maintenance";
+
 impl Commit {
+    /// Whether this commit is maintenance (`pail maintenance repack`), not work.
+    pub fn is_maintenance(&self) -> bool {
+        self.meta.contains_key(MAINTENANCE_META)
+    }
+
     pub fn encode(&self) -> (Hash, Bytes) {
         let data = serde_json::to_vec(self).expect("commit serializes");
         (Hash::of(&data), Bytes::from(data))

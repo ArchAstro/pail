@@ -78,6 +78,8 @@ pub struct LogOpts {
     pub color: Option<bool>,
     pub diff: DiffOpts,
     pub full_diff: bool,
+    /// Show maintenance commits (repacks), which are hidden by default.
+    pub maintenance: bool,
 }
 
 impl Default for LogOpts {
@@ -110,6 +112,7 @@ impl Default for LogOpts {
             color: None,
             diff: DiffOpts::default(),
             full_diff: false,
+            maintenance: false,
         }
     }
 }
@@ -317,6 +320,7 @@ impl LogOpts {
                     "--color" => o.color = Some(true),
                     "--no-color" => o.color = Some(false),
                     "--full-diff" => o.full_diff = true,
+                    "--maintenance" => o.maintenance = true,
                     _ => return Err(fatal(format!("unrecognized argument: {a}"))),
                 }
             }
@@ -579,7 +583,7 @@ pub async fn walk(ctx: &Ctx, o: &LogOpts, spec: &Pathspec, need_diff: bool) -> R
             if nparents < o.min_parents || o.max_parents.is_some_and(|m| nparents > m) {
                 continue;
             }
-            if !matchers.accepts(o, &c) {
+            if !matchers.accepts(o, &c) || (c.is_maintenance() && !o.maintenance) {
                 continue;
             }
             batch.push((h, c));
