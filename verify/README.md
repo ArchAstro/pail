@@ -659,7 +659,7 @@ so a reused file keeps its reused location through combining.
 - Simplifications: reuse is of a path other than the one written; only commits a working copy
   makes reuse (a stack's commit, rewrites and landing do not: the latter copy entries).
 
-## Amortized compaction: soft relocations (`soft_scenarios.qnt`, `publish.qnt`, `bucket.qnt`)
+## Amortized compaction: soft relocations (`scenarios.qnt`, `publish.qnt`, `bucket.qnt`)
 
 A commit may carry, besides its delta, a bounded list of old files of its base to move into
 the pack it uploads anyway (`CommitOptions::relocs`; the client re-encodes clean local copies,
@@ -684,7 +684,7 @@ so it never decides whether the commit lands.
   `relocationsNeverConflict` (a client told it conflicted has a path of its own delta that
   the branch changed), `relocationsAreBudgeted` (at most as many big files as the delta's own;
   the real planner also has a floor, which two paths could not show).
-- Scenarios (`soft_scenarios.qnt`, run by `npm test`): `softKeptRun`,
+- Scenarios (`scenarios.qnt`, refined against `Repo::commit_opts`): `softKeptRun`,
   `softDroppedWhenHeadChangedRun` (the user's commit lands with its own change, the
   relocation of a path another commit changed is dropped), `softDroppedWhenHeadRelocatedRun`
   (a repack of the path landed first), `softDroppedInCombineRun` (the same through an intent).
@@ -694,8 +694,10 @@ so it never decides whether the commit lands.
   breaks `relocationsKeepContent`), ignoring the budget (`simulate` breaks
   `relocationsAreBudgeted`). Checking only the loc (not the content) is equivalent: a
   changed path is always another pack.
-- Not yet refined against the real code: these scenarios run in Quint only; the harness
-  reports `reloc` as empty (the code lands separately).
+- Refined against the real code: `Harness::begin_soft` runs `Repo::prepare_files_moving` and
+  `commit_opts` with `CommitOptions::relocs`, and reports the writer's relocations
+  (`reloc`) and, for an intent, the ones it stored. Real code: `src/amortize.rs` (which
+  files, how many), `Repo::kept_relocs` (the soft rule), `Worktree::commit` (the call).
 
 ## Not modelled yet
 

@@ -1,5 +1,6 @@
 //! pail: a simple version control system that lives in an object store.
 
+pub mod amortize;
 pub mod blobs;
 pub mod clock;
 pub mod config;

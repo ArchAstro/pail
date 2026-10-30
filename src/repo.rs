@@ -57,6 +57,7 @@ pub const COMMIT_DEADLINE: Duration = Duration::from_secs(60);
 pub type Delta = BTreeMap<String, Option<Entry>>;
 
 /// File contents to store.
+#[derive(Clone)]
 pub struct FileInput {
     pub path: String,
     pub kind: Kind,
@@ -140,9 +141,22 @@ pub struct KnownHead {
     pub lineage: Lineage,
 }
 
+/// A soft relocation: the entry `from` of the commit's base, written again as `to` (the same
+/// content, another place). It rides along with a commit and never decides whether it lands:
+/// on a head past the base it is kept only if the head still has the path exactly as `from`
+/// (the same content in the same place) and the commit's own delta does not write it;
+/// otherwise it is dropped silently ([`Repo::kept_relocs`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reloc {
+    pub from: Entry,
+    pub to: Entry,
+}
+
 /// Optional parts of a commit (see [`Repo::commit_opts`]).
 #[derive(Default)]
 pub struct CommitOptions<'a> {
+    /// Soft relocations of the base's files into `uploads` ([`Repo::prepare_files_moving`]).
+    pub relocs: Vec<Reloc>,
     pub check: Option<PublishCheck<'a>>,
     /// The files' objects ([`Repo::prepare_files`]), stored with the commit's own.
     pub uploads: Vec<Upload>,
@@ -1222,6 +1236,29 @@ impl Repo {
         inputs: &[FileInput],
         reuse: &HashMap<Hash, Loc>,
     ) -> (Vec<Entry>, Vec<Upload>) {
+        let (entries, _, uploads) = self.prepare_files_moving(inputs, reuse, &[]);
+        (entries, uploads)
+    }
+
+    /// [`Repo::prepare_files`], also writing `moving` (entries of the base with their
+    /// bytes, hash-checked by the caller) into the same packs, in path order among the new
+    /// files: the soft relocations to hand to [`CommitOptions::relocs`]. A moved blob is
+    /// always written (never reused from where it is), unless the same content is already
+    /// in a pack of this call.
+    pub fn prepare_files_moving(
+        &self,
+        new_files: &[FileInput],
+        reuse: &HashMap<Hash, Loc>,
+        moving: &[(Entry, Bytes)],
+    ) -> (Vec<Entry>, Vec<Reloc>, Vec<Upload>) {
+        let mut inputs: Vec<FileInput> = new_files.to_vec();
+        inputs.extend(moving.iter().map(|(e, data)| FileInput {
+            path: e.path.clone(),
+            kind: e.kind,
+            data: data.clone(),
+        }));
+        let moved_from = new_files.len();
+        let inputs = &inputs[..];
         enum Pending {
             Done(Loc),
             InPack { pack: usize, off: u64, len: u64 },
@@ -1239,7 +1276,19 @@ impl Repo {
         for i in order {
             let f = &inputs[i];
             let h = Hash::of(&f.data);
-            let slot = if f.kind == Kind::Symlink || f.data.len() <= INLINE_MAX {
+            let slot = if i >= moved_from {
+                if let Some(&(pack, off, len)) = in_push.get(&h) {
+                    Pending::InPack { pack, off, len }
+                } else {
+                    if packs.last().unwrap().len() >= PACK_MAX {
+                        packs.push(PackBuilder::default());
+                    }
+                    let pack = packs.len() - 1;
+                    let (off, len) = packs[pack].add(h, &f.data);
+                    in_push.insert(h, (pack, off, len));
+                    Pending::InPack { pack, off, len }
+                }
+            } else if f.kind == Kind::Symlink || f.data.len() <= INLINE_MAX {
                 Pending::Done(Loc::Inline(f.data.to_vec()))
             } else if let Some(loc) = reuse.get(&h) {
                 Pending::Done(loc.clone())
@@ -1293,7 +1342,7 @@ impl Repo {
             }))
             .collect();
 
-        let entries = inputs
+        let mut entries: Vec<Entry> = inputs
             .iter()
             .zip(slots)
             .map(|(f, (hash, slot))| {
@@ -1314,7 +1363,16 @@ impl Repo {
                 }
             })
             .collect();
-        (entries, uploads)
+        let moved = entries.split_off(moved_from);
+        let relocs = moving
+            .iter()
+            .zip(moved)
+            .map(|((from, _), to)| Reloc {
+                from: from.clone(),
+                to,
+            })
+            .collect();
+        (entries, relocs, uploads)
     }
 
     /// Store immutable objects, all at once.
@@ -1960,6 +2018,7 @@ impl Repo {
     ) -> Result<CommitOutcome> {
         validate_branch(&req.branch)?;
         let CommitOptions {
+            relocs,
             check,
             uploads,
             known_head,
@@ -2010,7 +2069,32 @@ impl Repo {
                 self.check_disjoint(&req.branch, base_root, parent, &req.delta)
                     .await?;
             }
-            let prepared = self.prepare_commit(parent, &req.delta, &fields).await?;
+            // The soft relocations that still apply on this head ride along with the delta.
+            let soft = if relocs.is_empty() {
+                Delta::new()
+            } else if parent == req.base {
+                relocs
+                    .iter()
+                    .filter(|r| !req.delta.contains_key(&r.to.path))
+                    .map(|r| (r.to.path.clone(), Some(r.to.clone())))
+                    .collect()
+            } else {
+                self.kept_relocs(self.root_of(parent).await?, &relocs, &req.delta)
+                    .await?
+            };
+            let with_soft: Delta;
+            let delta = if soft.is_empty() {
+                &req.delta
+            } else {
+                with_soft = req
+                    .delta
+                    .iter()
+                    .chain(soft.iter())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                &with_soft
+            };
+            let prepared = self.prepare_commit(parent, delta, &fields).await?;
             // Look for writers already combining while the objects upload (no extra round
             // trip): swapping past their pending intents would starve them, so join them.
             let (written, listed) = tokio::try_join!(
@@ -2101,8 +2185,38 @@ impl Repo {
                 }
             }
         }
-        self.commit_combining(&req, &fields, base_root, started, pages_written, checked)
-            .await
+        self.commit_combining(
+            &req,
+            &relocs,
+            &fields,
+            base_root,
+            started,
+            pages_written,
+            checked,
+        )
+        .await
+    }
+
+    /// The relocations of `relocs` that still apply on the tree `parent_root`: the path is
+    /// not written by `delta`, and the tree has it exactly as the relocation's base did. A
+    /// path that changed, or was moved elsewhere (a repack), is dropped without a word:
+    /// relocations are soft.
+    async fn kept_relocs(
+        &self,
+        parent_root: Hash,
+        relocs: &[Reloc],
+        delta: &Delta,
+    ) -> Result<Delta> {
+        let mut kept = Delta::new();
+        for r in relocs {
+            if delta.contains_key(&r.to.path) {
+                continue;
+            }
+            if self.get_entry(parent_root, &r.to.path).await?.as_ref() == Some(&r.from) {
+                kept.insert(r.to.path.clone(), Some(r.to.clone()));
+            }
+        }
+        Ok(kept)
     }
 
     /// Fail with a conflict if `delta` touches a path that changed between `base_root` and
@@ -2138,9 +2252,11 @@ impl Repo {
     /// base), stores them all in one wave and lands the whole batch with one compare-and-swap,
     /// recording the intents in the ref's `recent` list. Whoever wins lands everyone's pending
     /// work, so no writer can be starved and a lost race is usually someone landing yours.
+    #[allow(clippy::too_many_arguments)]
     async fn commit_combining(
         &self,
         req: &CommitRequest,
+        relocs: &[Reloc],
         fields: &CommitFields,
         base_root: Hash,
         started: std::time::Instant,
@@ -2149,7 +2265,7 @@ impl Repo {
     ) -> Result<CommitOutcome> {
         let id = intent_id();
         let key = intent_key(&req.branch, &id);
-        let mine = Intent::new(&id, req.base, &req.delta, fields);
+        let mine = Intent::new(&id, req.base, &req.delta, relocs, fields);
         self.store
             .put(&key, Bytes::from(serde_json::to_vec(&mine)?))
             .await?;
@@ -2351,6 +2467,13 @@ impl Repo {
             }
             let mut fields = intent.fields.to_fields();
             fields.meta.insert("pail.intent".into(), intent.id.clone());
+            let relocs = intent.relocs()?;
+            let mut delta = delta;
+            if !relocs.is_empty() {
+                let root = self.root_of(Some(parent)).await?;
+                let kept = self.kept_relocs(root, &relocs, &delta).await?;
+                delta.extend(kept);
+            }
             let p = self.prepare_commit(Some(parent), &delta, &fields).await?;
             parent = p.commit;
             batch.push(Landed {
@@ -2497,6 +2620,12 @@ struct Intent {
     /// The new entries, as an encoded leaf page (hex).
     puts: String,
     deletes: Vec<String>,
+    /// The soft relocations: the entries as the base had them, and as they are moved to (each
+    /// an encoded leaf page, hex).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    reloc_from: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    reloc_to: String,
     fields: IntentFields,
 }
 
@@ -2524,7 +2653,13 @@ impl IntentFields {
 }
 
 impl Intent {
-    fn new(id: &str, base: Option<Hash>, delta: &Delta, f: &CommitFields) -> Intent {
+    fn new(
+        id: &str,
+        base: Option<Hash>,
+        delta: &Delta,
+        relocs: &[Reloc],
+        f: &CommitFields,
+    ) -> Intent {
         let puts: Vec<Entry> = delta.values().flatten().cloned().collect();
         let deletes = delta
             .iter()
@@ -2536,6 +2671,8 @@ impl Intent {
             base,
             puts: hex::encode(crate::manifest::encode_page(&Page::Leaf(puts))),
             deletes,
+            reloc_from: leaf_hex(relocs.iter().map(|r| r.from.clone())),
+            reloc_to: leaf_hex(relocs.iter().map(|r| r.to.clone())),
             fields: IntentFields {
                 author: f.author.clone(),
                 author_date: f.author_date.clone(),
@@ -2545,6 +2682,22 @@ impl Intent {
                 meta: f.meta.clone(),
             },
         }
+    }
+
+    fn relocs(&self) -> Result<Vec<Reloc>> {
+        if self.reloc_to.is_empty() {
+            return Ok(vec![]);
+        }
+        let from = leaf_entries(&self.reloc_from)?;
+        let to = leaf_entries(&self.reloc_to)?;
+        if from.len() != to.len() {
+            bail!("intent {} has mismatched relocations", self.id);
+        }
+        Ok(from
+            .into_iter()
+            .zip(to)
+            .map(|(from, to)| Reloc { from, to })
+            .collect())
     }
 
     fn delta(&self) -> Result<Delta> {
@@ -2560,6 +2713,23 @@ impl Intent {
         }
         Ok(delta)
     }
+}
+
+/// Entries as a hex-encoded leaf page, sorted by path.
+fn leaf_hex(entries: impl Iterator<Item = Entry>) -> String {
+    let mut es: Vec<Entry> = entries.collect();
+    es.sort_by(|a, b| a.path.cmp(&b.path));
+    if es.is_empty() {
+        return String::new();
+    }
+    hex::encode(crate::manifest::encode_page(&Page::Leaf(es)))
+}
+
+fn leaf_entries(h: &str) -> Result<Vec<Entry>> {
+    let Page::Leaf(es) = crate::manifest::decode_page(&hex::decode(h)?)? else {
+        bail!("not an entry list");
+    };
+    Ok(es)
 }
 
 /// Apply sorted edits to a sorted entry list.
