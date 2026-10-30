@@ -48,7 +48,7 @@ pr_scenarios.qnt ──compile──▶ pr-refinements.json + tests/pr_refinemen
                                    │
 tests/pr_refinement.rs ── the real extensions/pail-pr, its put and land held by a shim ──▶ same records after every step
 
-actions.qnt ─── actions_sim.qnt ──quint run──▶ safety + history properties hold in every simulated interleaving
+actions/actions.qnt ─── actions_sim.qnt ──quint run──▶ safety + history properties hold in every simulated interleaving
    │
 actions_scenarios.qnt ──quint test──▶ the runs a refinement harness will follow (no code to refine yet)
 ```
@@ -77,9 +77,9 @@ actions_scenarios.qnt ──quint test──▶ the runs a refinement harness wi
 | `pr_scenarios.qnt` | `@conformance` runs: the interleavings the plugin must follow |
 | `pr_sim.qnt` | `pr.qnt` under random interleavings, with a ghost for the history properties |
 | `mutate_pr.sh` | Flips each design switch in a scratch copy and expects `pr_sim.qnt` to find a violation |
-| `actions.qnt` | pail Actions (not built yet): orchestrator replicas, runners, leases, results, the properties (`safety`) and the design switches |
-| `actions_scenarios.qnt` | `@conformance` runs: the interleavings the orchestrator and runner must follow (run by `quint test`; not yet compiled into a harness) |
-| `actions_sim.qnt` | `actions.qnt` under random interleavings, with a ghost for the history properties |
+| `actions/actions.qnt` | pail Actions (not built yet): orchestrator replicas, runners, leases, results, the properties (`safety`) and the design switches |
+| `actions/actions_scenarios.qnt` | `@conformance` runs: the interleavings the orchestrator and runner must follow (run by `quint test`; not yet compiled into a harness) |
+| `actions/actions_sim.qnt` | `actions.qnt` under random interleavings, with a ghost for the history properties |
 | `mutate_actions.sh` | Flips each design switch in a scratch copy and expects `actions_sim.qnt` to find a violation |
 | `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json`, `pr-refinements.json` | Generated scenario artifacts (do not edit) |
 | `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
@@ -836,7 +836,11 @@ crashes between a claim and its land; reviews or checks withdrawn while a merge 
 judging and claiming; policy files; pail-web (its server follows the same rules and is
 tested in `web/test`, not refined).
 
-## Actions (designed, not yet built) (`actions.qnt`)
+## Actions (designed, not yet built) (`actions/`)
+
+(The files live in `actions/`, not beside the others: `quint-refinements` digests every `.qnt`
+in the directory of the scenarios it compiles, so one more here would make all four generated
+artifacts drift.)
 
 pail Actions is a workflow system over a bucket: orchestrator replicas own run and job state
 on the `_actions` and `_checks` branches (Tier 1: commits, `put --expect`, `--if-absent`), and
@@ -893,7 +897,7 @@ a scratch copy and the simulation finds a violation:
 |---|---|
 | `CAS` | a stale replica overwrites a record with its read: a finished job restarted or concluded twice (`finality`, `atMostOneAccepted`) |
 | `IF_ABSENT` | two replicas claim one run id, or one key, and overwrite each other (`oneRunPerKey`, `oneCreationPerKey`) |
-| `GUARD_READS` | a commit expects only the records it writes: a sweep requeues a job of a run cancelled since it read, a rerun keeping its group does not see the group taken (`cancelledIsIdle`, `oneActivePerGroup`) |
+| `GUARD_READS` | a commit expects only the records it writes: a sweep requeues a job of a run cancelled since it read, a push does not see the run it found done restarted by a rerun (`cancelledIsIdle`, `oneActivePerGroup`) |
 | `LEASE_CREATE_ONLY` | a blind lease put: two runners hold one job under one seq (`leaseExclusive`) |
 | `FENCE` | any result of an in_progress job is accepted: a stalled runner's late result concludes the job its successor holds (`acceptedWasHolder`) |
 | `FENCE_ON_JOB` | intake also compares the live lease's seq (the plan's "lease seq matches"): a lease taken over after the job started strands the job (`noStranded`) |
@@ -905,9 +909,35 @@ a scratch copy and the simulation finds a violation:
 | `RERUN_NEW_ATTEMPT` | a rerun resets the attempt's jobs in place (`finality`, `attemptsAreFrozen`) |
 | `CHECK_FROM_JOB` | `_checks` is written from the runners' raw results: a late success becomes a check on a failed job (`checksEarned`) |
 
+No single switch breaks `atMostOneAccepted`: a result is accepted once by the fence (a job takes
+only the result under its holder and seq) and once by the guard on the job file (a second
+accept of a finished job conflicts). `mutate:actions` turns both off to show it can fail.
+
+What modelling found in the design (before any code), each now a rule of the model:
+
+1. A result path needs the lease seq (`results/<run>/<att>/<job>/<seq>`): with one create-only
+   path per job, a late result of a lost runner blocks the next holder's, and the sweep (which
+   sees "a result") leaves the job in_progress for good.
+2. Intake compares the result with the job file's holder and seq, not also with the live lease:
+   a lease can be taken over (the queue entry outlives the start) after the job file named the
+   first holder, and "the lease seq matches" would then strand the job.
+3. A lease's `seq` counts claims, not refreshes, and an expired lease is taken over by
+   generation match (not deleted and created again, which would reuse seq 1).
+4. A commit expects every record it read, not only those it writes. Simulation found two
+   races with only the written records guarded: a push that cancels run 1 did not expect the
+   job a sweep requeued meanwhile (a cancelled run kept a queued job: `cancelRacesSweepRun`),
+   and a push that found the previous run done did not expect the run a rerun then restarted
+   (two active runs in one group: `rerunRacesPushRun`). So a trigger or rerun expects the
+   group file, the group's previous holder and, when it cancels it, every job of it; a sweep
+   the run.
+5. A sweep of a cancelled run's job concludes it cancelled, not requeued.
+6. A rerun is a new commit into the concurrency group: it cancels a newer active run.
+7. `_checks` is projected from the accepted job in `_actions`, never from `results/`, and is
+   repaired by reconcile (it is a second branch, written after the first).
+
 Witnesses (`npm run witness:actions`): a lost runner's job is requeued and runs again, a run is
 cancelled, a run is rerun, an environment job is queued on an approval, a job is skipped.
-`actions_scenarios.qnt` has 16 runs, for the plan's UC1, UC2, UC3, UC4, UC6, UC7 and UC8
+`actions_scenarios.qnt` has 18 runs, for the plan's UC1, UC2, UC3, UC4, UC6, UC7 and UC8
 (and UC9's projection), written as single actions so that they compile with
 `quint-refinements` (checked by hand: the artifact is large, so none is committed). The
 refinement harness comes with the orchestrator (T1.7) and the runner (T2.5); until then the

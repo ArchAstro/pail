@@ -57,7 +57,8 @@ module actions {
   /// event and slot claims, the concurrency file.
   pure val IF_ABSENT = true
   /// A commit expects every record it read, not only those it writes (the concurrency file
-  /// on a rerun that keeps the holder; the run on a sweep).
+  /// on a rerun that keeps the holder; the run on a sweep; the group's previous holder; the
+  /// running jobs of a run it cancels).
   pure val GUARD_READS = true
   /// A runner claims a lease by create or generation match (else a blind put).
   pure val LEASE_CREATE_ONLY = true
@@ -153,7 +154,7 @@ module actions {
     | ICheck(JobKey)
 
   /// What a decision writes, and the records it read without writing them.
-  type Delta = { w: T1, rdRuns: Set[int], rdGroups: Set[str] }
+  type Delta = { w: T1, rdRuns: Set[int], rdJobs: Set[JobKey], rdGroups: Set[str] }
   type Dec = Refuse | Do(Delta)
   /// A commit held at its write: what Tier 1 was when it read, and what it writes.
   type Commit = { intent: Intent, snap: T1, d: Delta }
@@ -239,7 +240,7 @@ module actions {
 
   pure def jobDelta(jk: JobKey, j: Job): T1 = { ...EMPTY1, jobs: Map(jk -> j) }
   pure def runDelta(id: int, r: Run): T1 = { ...EMPTY1, runs: Map(id -> r) }
-  pure def doing(w: T1): Dec = Do({ w: w, rdRuns: Set(), rdGroups: Set() })
+  pure def doing(w: T1): Dec = Do({ w: w, rdRuns: Set(), rdJobs: Set(), rdGroups: Set() })
 
   /// A job's first state: queued at once if nothing holds it back, else pending.
   pure def freshJob(j: str): Job = {
@@ -265,7 +266,12 @@ module actions {
       jobs: doomed.mapBy(jk => { ...v.jobs.get(jk), status: Completed, concl: Cancelled }),
       groups: if (prev == id) Map() else Map(g -> id),
     }
-    { w: w, rdRuns: Set(), rdGroups: Set(g) }
+    // it read the previous holder (done, or not: a rerun of it that lands in between must be
+    // seen), and every job of the run it cancels (a running one decides the marker, and a
+    // sweep or a start of one that lands between must not be overwritten by a cancelled run's
+    // job going back to the queue)
+    val read = v.jobs.keys().filter(jk => cancelling and jk.rid == prev and jk.att == pr.att)
+    { w: w, rdRuns: if (prev != 0 and prev != id) Set(prev) else Set(), rdJobs: read, rdGroups: Set(g) }
   }
 
   pure def withBase(d: Delta, base: T1): Delta = { ...d, w: merge(d.w, base) }
@@ -329,7 +335,7 @@ module actions {
         if (r.cancel) { ...j, status: Completed, concl: Cancelled }
         else if (s.t2.started.contains({ jk: jk, seq: j.seq })) { ...j, status: Completed, concl: Failure, lost: j.lost + 1 }
         else { ...j, status: Queued, holder: "", lost: j.lost + 1 }
-      Do({ w: jobDelta(jk, nj), rdRuns: Set(jk.rid), rdGroups: Set() })
+      Do({ w: jobDelta(jk, nj), rdRuns: Set(jk.rid), rdJobs: Set(), rdGroups: Set() })
     }
   }
 
@@ -374,7 +380,7 @@ module actions {
       val ck: CheckKey = { sha: shaOf(r.key), job: jk.job }
       val ch: Check = { rid: jk.rid, att: jk.att, state: state }
       if (v.checks.keys().contains(ck) and v.checks.get(ck) == ch) Refuse
-      else Do({ w: { ...EMPTY1, checks: Map(ck -> ch) }, rdRuns: Set(jk.rid), rdGroups: Set() })
+      else Do({ w: { ...EMPTY1, checks: Map(ck -> ch) }, rdRuns: Set(jk.rid), rdJobs: Set(), rdGroups: Set() })
     }
   }
 
@@ -406,7 +412,7 @@ module actions {
   pure def landable(cur: T1, c: Commit): bool = all {
     guardOk(cur.runs, c.snap.runs, c.d.w.runs.keys(), c.d.rdRuns),
     guardOk(cur.claims, c.snap.claims, c.d.w.claims.keys(), Set()),
-    guardOk(cur.jobs, c.snap.jobs, c.d.w.jobs.keys(), Set()),
+    guardOk(cur.jobs, c.snap.jobs, c.d.w.jobs.keys(), c.d.rdJobs),
     guardOk(cur.groups, c.snap.groups, c.d.w.groups.keys(), c.d.rdGroups),
     guardOk(cur.checks, c.snap.checks, c.d.w.checks.keys(), Set()),
   }

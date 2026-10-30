@@ -54,8 +54,28 @@ module actionsSim {
 
   action simInit = all { state' = INITIAL, ghost' = GHOST0 }
 
+  /// A step's kind: a trace picks among the kinds that can happen, then a step of that kind,
+  /// so that the rare (a replica's write between a runner's steps) are not drowned by the many
+  /// (every intent a replica might read).
+  pure def kindOf(a: Act): int = match a {
+    | ATick => 0
+    | AFire(_) => 1
+    | AApprove(_) => 2
+    | ARead(_) => 3
+    | AWrite(_) => 4
+    | ASync => 5
+    | AClaimRead(_) => 6
+    | AClaimWrite(_) => 7
+    | ARefresh(_) => 8
+    | AStarted(_) => 9
+    | AResult(_) => 10
+    | ACrash(_) => 11
+  }
+
   action simStep = {
-    nondet a = acts(state).oneOf()
+    val all_ = acts(state)
+    nondet kind = all_.map(kindOf).oneOf()
+    nondet a = all_.filter(x => kindOf(x) == kind).oneOf()
     all {
       state' = apply(state, a),
       ghost' = ghostAfter(ghost, state, a, apply(state, a)),
