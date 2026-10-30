@@ -35,8 +35,8 @@ use pail::manifest::{Kind, Loc, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
 use pail::pack::{CHUNK_MAX, chunk_spans, decode_blob};
 use pail::repo::{
-    CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead, MovedError, Repo,
-    RewriteRequest, Upload,
+    CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead, MovedError, Reloc,
+    Repo, RewriteRequest, Upload,
 };
 use pail::store::Store;
 use quint_refinements::{NormalizedRuntimeEvidence, RuntimeValue};
@@ -131,7 +131,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        81,
+        85,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -1212,6 +1212,44 @@ impl Harness {
         actor: &str,
         base: Option<&Id>,
     ) -> Result<(Delta, Vec<Upload>, BTreeMap<String, Id>), String> {
+        let (delta, _, uploads, reused) = self.files_moving(tree, actor, base, &Tree::new())?;
+        Ok((delta, uploads, reused))
+    }
+
+    /// [`Harness::files`], also moving the files of `soft` (path to the content the base has
+    /// there) into the writer's pack: the soft relocations (`CommitOptions::relocs`).
+    #[allow(clippy::type_complexity)]
+    fn files_moving(
+        &self,
+        tree: &Tree,
+        actor: &str,
+        base: Option<&Id>,
+        soft: &Tree,
+    ) -> Result<(Delta, Vec<Reloc>, Vec<Upload>, BTreeMap<String, Id>), String> {
+        let moving: Vec<(pail::manifest::Entry, Bytes)> = match (base, soft.is_empty()) {
+            (Some(base), false) => {
+                let h = self.hashes.get(base).ok_or(format!("no commit {base:?}"))?;
+                let root = self
+                    .rt()
+                    .block_on(self.observer.commit_obj(h))
+                    .map_err(|e| e.to_string())?
+                    .root;
+                let entries = self
+                    .rt()
+                    .block_on(self.observer.entries(root))
+                    .map_err(|e| e.to_string())?;
+                soft.iter()
+                    .map(|(p, v)| {
+                        let e = entries
+                            .iter()
+                            .find(|e| e.path == *p)
+                            .ok_or(format!("the base has no entry {p}"))?;
+                        Ok((e.clone(), Bytes::from(real(v))))
+                    })
+                    .collect::<Result<_, String>>()?
+            }
+            _ => vec![],
+        };
         let (reuse, reused) = match base {
             Some(base) => self.reuse_of(base, tree)?,
             None => Default::default(),
@@ -1224,9 +1262,10 @@ impl Harness {
                 data: Bytes::from(real(data)),
             })
             .collect();
-        if tree
-            .iter()
-            .any(|(p, v)| is_big(v) && !reused.contains_key(p))
+        if !moving.is_empty()
+            || tree
+                .iter()
+                .any(|(p, v)| is_big(v) && !reused.contains_key(p))
         {
             let mut decoy = format!("decoy:{actor}\n").into_bytes();
             decoy.extend(std::iter::repeat_n(b'.', 80));
@@ -1236,13 +1275,15 @@ impl Harness {
                 data: Bytes::from(decoy),
             });
         }
-        let (entries, uploads) = self.observer.prepare_files(&inputs, &reuse);
+        let (entries, relocs, uploads) = self
+            .observer
+            .prepare_files_moving(&inputs, &reuse, &moving);
         let delta = entries
             .into_iter()
             .filter(|e| e.path != DECOY)
             .map(|e| (e.path.clone(), Some(e)))
             .collect();
-        Ok((delta, uploads, reused))
+        Ok((delta, relocs, uploads, reused))
     }
 
     /// What a writer based on commit `base` reuses for `delta` (`reuseOf` in `bucket.qnt`):
@@ -1913,6 +1954,7 @@ impl Harness {
         name: &str,
         req: CommitRequest,
         uploads: Vec<Upload>,
+        relocs: Vec<Reloc>,
         known_head: Option<KnownHead>,
     ) {
         let repo = self.client(name);
@@ -1921,6 +1963,7 @@ impl Harness {
         self.rt().spawn(async move {
             let opts = CommitOptions {
                 uploads,
+                relocs,
                 known_head,
                 ..CommitOptions::default()
             };
@@ -2711,6 +2754,8 @@ impl Harness {
         struct Stored {
             base: Option<Hash>,
             puts: String,
+            #[serde(default)]
+            reloc_to: String,
         }
         let i: Stored = serde_json::from_slice(data).map_err(|e| e.to_string())?;
         let page = hex::decode(&i.puts).map_err(|e| e.to_string())?;
@@ -2737,6 +2782,23 @@ impl Harness {
                 .ok_or_else(|| format!("{} is a chunked file the model does not know", e.path))?;
             delta.insert(e.path, (*content).to_owned());
         }
+        let reloc: Tree = if i.reloc_to.is_empty() {
+            Tree::new()
+        } else {
+            let page = hex::decode(&i.reloc_to).map_err(|e| e.to_string())?;
+            let Page::Leaf(moved) = decode_page(&page).map_err(|e| e.to_string())? else {
+                return Err(format!("{writer}'s intent carries no relocation list"));
+            };
+            let data = self
+                .rt()
+                .block_on(self.observer.read_files(&moved))
+                .map_err(|e| e.to_string())?;
+            moved
+                .iter()
+                .zip(data)
+                .map(|(e, d)| (e.path.clone(), unpad(&d)))
+                .collect()
+        };
         let base = i.base.ok_or(format!("{writer}'s intent has no base"))?;
         let at = self
             .writers
@@ -2747,7 +2809,7 @@ impl Harness {
         Ok(record([
             ("base", id_value(&self.name(&base)?)),
             ("delta", tree_value(&delta)),
-            ("reloc", tree_value(&Tree::new())),
+            ("reloc", tree_value(&reloc)),
             (
                 "reuse",
                 RuntimeValue::Map(
@@ -3310,11 +3372,37 @@ impl generated::Implementation for Harness {
             .ok_or_else(|| format!("no commit {base:?}"))?;
         let (files, uploads, reuse) = self.files(&delta, &name, Some(&base))?;
         let req = self.request(&name, Some(base_hash), files);
-        self.spawn_commit(&name, req, uploads, None);
+        self.spawn_commit(&name, req, uploads, vec![], None);
         let w = self.writer(&name)?;
         w.reuse = reuse;
         w.base = Some(base);
         w.delta = delta;
+        w.found = None;
+        self.settle(&name)
+    }
+
+    /// `commit` with soft relocations: the files of `soft` (big files of the base, each to
+    /// the content it has) move into the writer's pack alongside its delta.
+    fn begin_soft(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let [c, base, delta, soft] = arguments else {
+            return Err(format!("beginSoft takes 4 arguments: {arguments:?}"));
+        };
+        let name = text(c)?.to_owned();
+        let base = id_of(base)?;
+        let (delta, soft) = (tree_of(delta)?, tree_of(soft)?);
+        let base_hash = *self
+            .hashes
+            .get(&base)
+            .ok_or_else(|| format!("no commit {base:?}"))?;
+        let (files, relocs, uploads, reuse) =
+            self.files_moving(&delta, &name, Some(&base), &soft)?;
+        let req = self.request(&name, Some(base_hash), files);
+        self.spawn_commit(&name, req, uploads, relocs, None);
+        let w = self.writer(&name)?;
+        w.reuse = reuse;
+        w.base = Some(base);
+        w.delta = delta;
+        w.reloc = soft;
         w.found = None;
         self.settle(&name)
     }
@@ -3335,7 +3423,7 @@ impl generated::Implementation for Harness {
         let seen = self.known_seen(&k)?;
         let (files, uploads, reuse) = self.files(&delta, &name, Some(&seen.0))?;
         let req = self.request(&name, Some(k.commit), files);
-        self.spawn_commit(&name, req, uploads, Some(k.clone()));
+        self.spawn_commit(&name, req, uploads, vec![], Some(k.clone()));
         let w = self.writer(&name)?;
         w.reuse = reuse;
         w.base = Some(seen.0.clone());

@@ -1201,11 +1201,26 @@ impl Worktree {
         // Content already in the store (moves, reverts to the base version) is reused. The
         // files' objects are stored with the commit's own, in one wave.
         let reuse = base.values().map(|e| (e.hash, e.loc.clone())).collect();
-        let (entries, uploads) = self.repo.prepare_files(&inputs, &reuse);
+        let cfg = crate::config::Config::load(Some(&self.local.dir));
+        // Amortized compaction: when the base's files sit in many small packs, move a bounded
+        // part of them into the pack this commit uploads anyway (clean local files only).
+        let settings = crate::amortize::Settings::from_config(&cfg);
+        let own: Vec<&str> = self.stage.keys().map(String::as_str).collect();
+        let cands = crate::amortize::candidates(&settings, &base, &own);
+        let moving = if cands.is_empty() {
+            vec![]
+        } else {
+            let budget = settings.budget(crate::amortize::new_bytes(
+                inputs.iter().map(|i| i.data.len() as u64),
+            ));
+            let root = self.root.clone();
+            tokio::task::spawn_blocking(move || crate::amortize::gather(&root, &cands, budget))
+                .await?
+        };
+        let (entries, relocs, uploads) = self.repo.prepare_files_moving(&inputs, &reuse, &moving);
         for e in entries {
             delta.insert(e.path.clone(), Some(e));
         }
-        let cfg = crate::config::Config::load(Some(&self.local.dir));
         let who = cfg.identity("author")?;
         let date = now_date();
         let pre_publish = |p: &crate::repo::Publish| -> Result<()> {
@@ -1235,6 +1250,7 @@ impl Worktree {
                     meta: BTreeMap::new(),
                 },
                 crate::repo::CommitOptions {
+                    relocs,
                     check,
                     uploads,
                     known_head: match (&self.head.known, self.head.base) {
