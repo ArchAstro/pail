@@ -22,6 +22,10 @@
 //!    old packs stay (history names them): the extra storage per commit is at most the budget.
 //! 3. Whole packs, smallest first (emptying a pack removes a checkout request); among packs of
 //!    similar size, those holding paths near the commit's own (a shared directory) first.
+//! 4. Moving a path rewrites the manifest leaf page that holds it, and that costs more upload
+//!    than the blob when the paths are scattered (measured on `firstlanding`: a third of the
+//!    extra bytes were pages). So each leaf the relocation touches beyond the ones the commit
+//!    touches anyway is charged its size ([`ENTRY_BYTES`] per entry) against the same budget.
 //!
 //! Opt out with `maintenance.amortize = false`.
 
@@ -45,6 +49,10 @@ pub const ALPHA: f64 = 1.0;
 pub const FLOOR_BYTES: u64 = 256 << 10;
 /// ... and at most this much (bounds a commit's extra upload).
 pub const CAP_BYTES: u64 = 4 << 20;
+/// Stored bytes of a manifest entry, about: what a leaf page the commit would not rewrite
+/// anyway costs against the budget is its entries times this (measured on `firstlanding`: a
+/// 256-entry leaf is 37 KB).
+pub const ENTRY_BYTES: u64 = 140;
 /// Candidate packs tried at most (a pack with a dirty file is skipped).
 const MAX_TRIES: usize = 64;
 
@@ -110,6 +118,36 @@ pub struct Candidate {
     /// The stored bytes of the distinct blobs the tip keeps in it.
     pub live: u64,
     pub entries: Vec<Entry>,
+    /// The manifest leaves (indices into the base's leaf list) holding those entries.
+    pub leaves: Vec<usize>,
+}
+
+/// The leaves of the base's manifest: each one's largest key and what rewriting it costs.
+#[derive(Debug, Clone, Default)]
+pub struct Leaves {
+    pub keys: Vec<String>,
+    pub cost: Vec<u64>,
+}
+
+impl Leaves {
+    /// From the base's leaf list (`Repo::leaf_refs`).
+    pub fn of(children: &[crate::manifest::Child]) -> Leaves {
+        Leaves {
+            keys: children.iter().map(|c| c.key.clone()).collect(),
+            cost: children.iter().map(|c| c.files * ENTRY_BYTES).collect(),
+        }
+    }
+
+    /// The leaf holding `path`.
+    pub fn of_path(&self, path: &str) -> usize {
+        self.keys
+            .partition_point(|k| k.as_str() < path)
+            .min(self.keys.len().saturating_sub(1))
+    }
+
+    fn cost_of(&self, leaf: usize) -> u64 {
+        self.cost.get(leaf).copied().unwrap_or(0)
+    }
 }
 
 fn packed(e: &Entry) -> Option<(Hash, u64, u64)> {
@@ -138,13 +176,18 @@ fn nearness(path: &str, dirs: &HashSet<&str>) -> usize {
 /// The small packs of `base` worth relocating from, best first, or none when the base has
 /// fewer than `min_packs` of them. `own` are the paths the commit writes or deletes (their old
 /// blobs are about to be dead, so they are not candidates).
-pub fn candidates(s: &Settings, base: &BTreeMap<String, Entry>, own: &[&str]) -> Vec<Candidate> {
+pub fn candidates<'a>(
+    s: &Settings,
+    base: impl Iterator<Item = &'a Entry>,
+    own: &[&str],
+    leaves: &Leaves,
+) -> Vec<Candidate> {
     if !s.enabled || s.min_packs == 0 {
         return vec![];
     }
     let own_set: HashSet<&str> = own.iter().copied().collect();
     let mut by_pack: HashMap<Hash, (HashSet<u64>, u64, Vec<&Entry>)> = HashMap::new();
-    for e in base.values() {
+    for e in base {
         if own_set.contains(e.path.as_str()) {
             continue;
         }
@@ -189,10 +232,16 @@ pub fn candidates(s: &Settings, base: &BTreeMap<String, Entry>, own: &[&str]) ->
     });
     small
         .into_iter()
-        .map(|(pack, live, es)| Candidate {
-            pack,
-            live,
-            entries: es.into_iter().cloned().collect(),
+        .map(|(pack, live, es)| {
+            let mut leaves: Vec<usize> = es.iter().map(|e| leaves.of_path(&e.path)).collect();
+            leaves.sort_unstable();
+            leaves.dedup();
+            Candidate {
+                pack,
+                live,
+                entries: es.into_iter().cloned().collect(),
+                leaves,
+            }
         })
         .collect()
 }
@@ -207,21 +256,41 @@ fn clean(root: &Path, e: &Entry) -> Option<Bytes> {
 /// The files to relocate, read from the working copy at `root`: whole candidate packs in
 /// order while the budget lasts, skipping a pack with a file that is missing, edited or
 /// excluded. Nothing is fetched.
-pub fn gather(root: &Path, cands: &[Candidate], budget: u64) -> Vec<(Entry, Bytes)> {
-    gather_with(cands, budget, |e| clean(root, e))
+pub fn gather(
+    root: &Path,
+    cands: &[Candidate],
+    leaves: &Leaves,
+    budget: u64,
+    touched: HashSet<usize>,
+) -> Vec<(Entry, Bytes)> {
+    gather_with(cands, leaves, budget, touched, |e| clean(root, e))
+}
+
+/// The manifest leaves holding the commit's own paths: it rewrites them anyway.
+pub fn touched_leaves<'a>(leaves: &Leaves, own: impl Iterator<Item = &'a str>) -> HashSet<usize> {
+    own.map(|p| leaves.of_path(p)).collect()
 }
 
 /// [`gather`] with the content of an entry supplied by `read` (None: not at hand). The caller
 /// vouches that what it returns hashes to the entry's `hash`.
 pub fn gather_with(
     cands: &[Candidate],
+    leaves: &Leaves,
     budget: u64,
+    mut touched: HashSet<usize>,
     mut read: impl FnMut(&Entry) -> Option<Bytes>,
 ) -> Vec<(Entry, Bytes)> {
     let mut left = budget;
     let mut out: Vec<(Entry, Bytes)> = vec![];
     for c in cands.iter().take(MAX_TRIES) {
-        if c.live > left {
+        let pages: u64 = c
+            .leaves
+            .iter()
+            .filter(|l| !touched.contains(l))
+            .map(|l| leaves.cost_of(*l))
+            .sum();
+        let cost = c.live + pages;
+        if cost > left {
             // Packs are sorted by size class: a later one may still fit.
             continue;
         }
@@ -231,7 +300,8 @@ pub fn gather_with(
             .map(|e| read(e).map(|d| (e.clone(), d)))
             .collect();
         let Some(files) = files else { continue };
-        left -= c.live;
+        left -= cost;
+        touched.extend(c.leaves.iter().copied());
         out.extend(files);
         if left == 0 {
             break;
@@ -295,8 +365,11 @@ mod tests {
     #[test]
     fn nothing_below_the_trigger() {
         let s = Settings::default();
-        assert!(candidates(&s, &tip(15, 100), &[]).is_empty());
-        assert_eq!(candidates(&s, &tip(16, 100), &[]).len(), 16);
+        assert!(candidates(&s, tip(15, 100).values(), &[], &Leaves::default()).is_empty());
+        assert_eq!(
+            candidates(&s, tip(16, 100).values(), &[], &Leaves::default()).len(),
+            16
+        );
     }
 
     #[test]
@@ -304,7 +377,7 @@ mod tests {
         let s = Settings::default();
         let mut base = tip(16, 100);
         base.insert("big".into(), entry("big", 99, 0, 2 << 20));
-        let c = candidates(&s, &base, &[]);
+        let c = candidates(&s, base.values(), &[], &Leaves::default());
         assert_eq!(c.len(), 16);
         assert!(c.iter().all(|c| c.live < SMALL_PACK_BYTES));
     }
@@ -315,7 +388,7 @@ mod tests {
             enabled: false,
             ..Settings::default()
         };
-        assert!(candidates(&s, &tip(40, 100), &[]).is_empty());
+        assert!(candidates(&s, tip(40, 100).values(), &[], &Leaves::default()).is_empty());
     }
 
     #[test]
@@ -327,7 +400,7 @@ mod tests {
         base.insert("d9/x/f".into(), entry("d9/x/f", 9, 0, 100_000));
         base.remove("d9/f");
         base.insert("d9/f".into(), entry("d9/f", 9, 0, 100_000));
-        let c = candidates(&s, &base, &["d9/x/new"]);
+        let c = candidates(&s, base.values(), &["d9/x/new"], &Leaves::default());
         assert_eq!(c[0].pack, pack(3), "smallest first");
         // Among the 100_000-byte packs, the one holding d9/x/f (shares d9/x) comes first.
         assert_eq!(c[1].pack, pack(9));
@@ -337,7 +410,7 @@ mod tests {
     fn own_paths_are_not_candidates() {
         let s = Settings::default();
         let base = tip(16, 100);
-        let c = candidates(&s, &base, &["d0/f"]);
+        let c = candidates(&s, base.values(), &["d0/f"], &Leaves::default());
         assert!(c.is_empty(), "15 small packs are left: below the trigger");
     }
 
@@ -364,23 +437,81 @@ mod tests {
             base.insert(path, e);
         }
         let s = Settings::default();
-        let c = candidates(&s, &base, &[]);
+        let c = candidates(&s, base.values(), &[], &Leaves::default());
         // 10_000 bytes of budget fits three whole 3000-byte packs, not a fourth.
-        let got = gather(dir.path(), &c, 10_000);
+        let got = gather(
+            dir.path(),
+            &c,
+            &Leaves::default(),
+            10_000,
+            HashSet::from([0]),
+        );
         assert_eq!(got.len(), 3);
         assert!(got.iter().all(|(e, d)| Hash::of(d) == e.hash));
         // An edited file skips its pack; a missing one too.
         let victim = &got[0].0.path.clone();
         std::fs::write(dir.path().join(victim), b"edited").unwrap();
-        let got2 = gather(dir.path(), &c, 10_000);
+        let got2 = gather(
+            dir.path(),
+            &c,
+            &Leaves::default(),
+            10_000,
+            HashSet::from([0]),
+        );
         assert_eq!(got2.len(), 3);
         assert!(got2.iter().all(|(e, _)| &e.path != victim));
         std::fs::remove_file(dir.path().join(&got2[0].0.path)).unwrap();
-        let got3 = gather(dir.path(), &c, 10_000);
+        let got3 = gather(
+            dir.path(),
+            &c,
+            &Leaves::default(),
+            10_000,
+            HashSet::from([0]),
+        );
         assert!(
             got3.iter()
                 .all(|(e, _)| e.path != got2[0].0.path && &e.path != victim)
         );
+    }
+
+    #[test]
+    fn scattered_leaves_are_charged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut base = BTreeMap::new();
+        // One leaf of 100 entries (14_000 bytes) per directory.
+        let leaves = Leaves {
+            keys: (0..16).map(|i| format!("d{i:02}/z")).collect(),
+            cost: vec![100 * ENTRY_BYTES; 16],
+        };
+        for i in 0..16u8 {
+            let path = format!("d{i:02}/f");
+            let data = vec![i + 1; 4000];
+            std::fs::create_dir_all(dir.path().join(format!("d{i:02}"))).unwrap();
+            std::fs::write(dir.path().join(&path), &data).unwrap();
+            base.insert(
+                path.clone(),
+                Entry {
+                    path,
+                    kind: Kind::File,
+                    size: 4000,
+                    hash: Hash::of(&data),
+                    loc: Loc::Pack {
+                        pack: pack(i),
+                        off: 0,
+                        len: 3000,
+                    },
+                },
+            );
+        }
+        let s = Settings::default();
+        // Each pack costs its 3000 bytes and a 14_000-byte leaf.
+        let c = candidates(&s, base.values(), &[], &leaves);
+        let got = gather(dir.path(), &c, &leaves, 40_000, HashSet::new());
+        assert_eq!(got.len(), 2, "40_000 / (3000 + 14_000) = 2 packs");
+        // Leaves the commit rewrites anyway are free.
+        let all: HashSet<usize> = (0..16).collect();
+        let got = gather(dir.path(), &c, &leaves, 40_000, all);
+        assert_eq!(got.len(), 13, "40_000 / 3000 = 13 packs");
     }
 
     #[test]
