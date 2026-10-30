@@ -306,7 +306,7 @@ def cmd_create(a):
     if a.json:
         print(json.dumps(rec))
     else:
-        print(f"opened PR #{n}{' (draft)' if a.draft else ''}: {head} → {base}")
+        print(f"opened PR {n}{' (draft)' if a.draft else ''}: {head} → {base}")
 
 
 def mark(rollup_state):
@@ -316,7 +316,7 @@ def mark(rollup_state):
 def cmd_list(a):
     want = None if a.state == "all" else a.state
     items = []
-    for n, d in sorted(load().items(), reverse=True):
+    for n, d in sorted(load().items()):
         r = d["pr"]
         if want and r["state"] != want:
             continue
