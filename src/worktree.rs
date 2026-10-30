@@ -1206,16 +1206,25 @@ impl Worktree {
         // part of them into the pack this commit uploads anyway (clean local files only).
         let settings = crate::amortize::Settings::from_config(&cfg);
         let own: Vec<&str> = self.stage.keys().map(String::as_str).collect();
-        let cands = crate::amortize::candidates(&settings, &base, &own);
-        let moving = if cands.is_empty() {
+        let moving = if !settings.enabled {
             vec![]
         } else {
-            let budget = settings.budget(crate::amortize::new_bytes(
-                inputs.iter().map(|i| i.data.len() as u64),
-            ));
-            let root = self.root.clone();
-            tokio::task::spawn_blocking(move || crate::amortize::gather(&root, &cands, budget))
+            let root = self.repo.root_of(self.head.base).await?;
+            let leaves = crate::amortize::Leaves::of(&self.repo.leaf_refs(root).await?.0);
+            let cands = crate::amortize::candidates(&settings, base.values(), &own, &leaves);
+            if cands.is_empty() {
+                vec![]
+            } else {
+                let budget = settings.budget(crate::amortize::new_bytes(
+                    inputs.iter().map(|i| i.data.len() as u64),
+                ));
+                let touched = crate::amortize::touched_leaves(&leaves, own.iter().copied());
+                let dir = self.root.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::amortize::gather(&dir, &cands, &leaves, budget, touched)
+                })
                 .await?
+            }
         };
         let (entries, relocs, uploads) = self.repo.prepare_files_moving(&inputs, &reuse, &moving);
         for e in entries {

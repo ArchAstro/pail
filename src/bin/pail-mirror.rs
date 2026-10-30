@@ -41,6 +41,23 @@ enum Cmd {
     Run(RunArgs),
     /// Re-prove an already mirrored pail branch against Git, from the store alone.
     Verify(VerifyArgs),
+    /// How many small packs the tip keeps its files in, at the newest commits (measuring).
+    Packs(PacksArgs),
+}
+
+#[derive(clap::Args)]
+struct PacksArgs {
+    /// pail store URL.
+    #[arg(long)]
+    store: String,
+    #[arg(long, default_value = "main")]
+    branch: String,
+    /// Commits to look back over, newest first.
+    #[arg(short = 'n', default_value_t = 500)]
+    n: usize,
+    /// Report every this many commits.
+    #[arg(long, default_value_t = 50)]
+    every: usize,
 }
 
 #[derive(clap::Args, Clone)]
@@ -107,6 +124,10 @@ struct RunArgs {
     /// a clean working copy would hold them.
     #[arg(long)]
     amortize: bool,
+    /// With --amortize: only every other commit (even `seq`) relocates, to compare the two
+    /// kinds of commit under the same network and the same store.
+    #[arg(long)]
+    alternate: bool,
 }
 
 #[derive(clap::Args)]
@@ -406,34 +427,43 @@ async fn import_client_flow(
             });
         }
     }
+    let t0 = Instant::now();
     let base_root = repo.root_of(Some(base)).await?;
     let entries = repo.entries(base_root).await?;
     let reuse: HashMap<Hash, pail::manifest::Loc> =
         entries.iter().map(|e| (e.hash, e.loc.clone())).collect();
+    let t_entries = t0.elapsed();
     let mut moving = vec![];
     if let Some(ids) = amortize {
-        let settings = pail::amortize::Settings::default();
-        let base_map: BTreeMap<String, Entry> = entries
-            .iter()
-            .map(|e| (e.path.clone(), e.clone()))
-            .collect();
+        let mut settings = pail::amortize::Settings::default();
+        if let Some(n) = std::env::var("PAIL_MIRROR_MINPACKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            settings.min_packs = n;
+        }
+        let leaves = pail::amortize::Leaves::of(&repo.leaf_refs(base_root).await?.0);
         let own: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
-        let cands = pail::amortize::candidates(&settings, &base_map, &own);
+        let cands = pail::amortize::candidates(&settings, entries.iter(), &own, &leaves);
         if !cands.is_empty() {
             let budget = settings.budget(pail::amortize::new_bytes(
                 inputs.iter().map(|i| i.data.len() as u64),
             ));
-            moving = pail::amortize::gather_with(&cands, budget, |e| {
+            let touched = pail::amortize::touched_leaves(&leaves, own.iter().copied());
+            moving = pail::amortize::gather_with(&cands, &leaves, budget, touched, |e| {
                 let data = git.cat(ids.get(&e.hash)?).ok()?;
                 (Hash::of(&data) == e.hash).then(|| Bytes::from(data))
             });
         }
     }
+    let t_plan = t0.elapsed();
     let (new_entries, relocs, uploads) = repo.prepare_files_moving(&inputs, &reuse, &moving);
+    let t_prep = t0.elapsed();
     for e in new_entries {
         delta.insert(e.path.clone(), Some(e));
     }
     let moved = relocs.len();
+    let tc = Instant::now();
     let out = repo
         .commit_opts(
             request(branch, Some(base), delta, sha, &raw),
@@ -444,6 +474,15 @@ async fn import_client_flow(
             },
         )
         .await?;
+    if std::env::var_os("PAIL_MIRROR_TIMING").is_some() {
+        eprintln!(
+            "  timing: entries {:?} plan {:?} prepare {:?} commit {:?} moved {moved}",
+            t_entries,
+            t_plan - t_entries,
+            t_prep - t_plan,
+            tc.elapsed()
+        );
+    }
     Ok((out.commit, changes.len(), out.attempts, moved))
 }
 
@@ -978,7 +1017,7 @@ async fn run(args: RunArgs) -> Result<()> {
                     }
                     import_batched(&repo, &git, &c.pail_branch, head, sha, &mut batch).await?
                 } else if args.client_flow {
-                    let ids_map = args.amortize.then_some(&ids.map);
+                    let ids_map = (args.amortize && (!args.alternate || seq % 2 == 0)).then_some(&ids.map);
                     let (h, n, a, moved) =
                         import_client_flow(&repo, &git, &c.pail_branch, head, sha, ids_map).await?;
                     eprintln!("  relocated {moved} files");
@@ -1154,6 +1193,46 @@ async fn mirrored_sha(repo: &Repo, head: Hash) -> Result<String> {
         .context("pail branch was not created by pail-mirror")
 }
 
+/// Per sampled commit, oldest first: packs the tip names, those holding under 1 MiB of it,
+/// and the bytes of all the packs (a full checkout reads about one request per pack).
+async fn packs(args: PacksArgs) -> Result<()> {
+    let repo = Repo::with_store(Store::open(&args.store)?, None);
+    let (head, _) = repo
+        .read_ref(&args.branch)
+        .await?
+        .context("no such branch")?;
+    let history = repo.log(head, args.n).await?;
+    println!("seq\tpacks\tsmall\tlive_small_bytes");
+    for (i, (h, pc)) in history.iter().enumerate().rev() {
+        if i % args.every != 0 && i != 0 {
+            continue;
+        }
+        let _ = h;
+        let mut live: HashMap<Hash, (HashSet<u64>, u64)> = HashMap::new();
+        for e in repo.entries(pc.root).await? {
+            if let pail::manifest::Loc::Pack { pack, off, len } = e.loc {
+                let p = live.entry(pack).or_default();
+                if p.0.insert(off) {
+                    p.1 += len;
+                }
+            }
+        }
+        let small: Vec<u64> = live
+            .values()
+            .map(|p| p.1)
+            .filter(|b| *b < pail::amortize::SMALL_PACK_BYTES)
+            .collect();
+        println!(
+            "{}\t{}\t{}\t{}",
+            history.len() - 1 - i,
+            live.len(),
+            small.len(),
+            small.iter().sum::<u64>()
+        );
+    }
+    Ok(())
+}
+
 async fn verify(args: VerifyArgs) -> Result<()> {
     let c = &args.common;
     let git = Git::open(&c.git_dir)?;
@@ -1228,6 +1307,7 @@ async fn main() {
     let res = match Cli::parse().cmd {
         Cmd::Run(a) => run(a).await,
         Cmd::Verify(a) => verify(a).await,
+        Cmd::Packs(a) => packs(a).await,
     };
     if let Err(e) = res {
         eprintln!("error: {e:#}");
