@@ -2588,6 +2588,166 @@ fn plugins_run_from_path() {
     assert!(!out.status.success());
 }
 
+/// Line comments and threads in `pail pr`: anchors are checked, a reply takes its parent's
+/// line, a push that changes the line marks the thread outdated, and an approval is of the
+/// commit it was given on.
+#[test]
+fn pr_line_comments_and_stale_approvals() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("python3 not found; skipping");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    let ext = Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions");
+    let path = format!(
+        "{}:{}",
+        ext.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = |dir: &Path, args: &[&str], author: &str| {
+        let out = cmd(dir, args)
+            .env("PATH", &path)
+            .env("PAIL_AUTHOR", author)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let ok = |dir: &Path, args: &[&str], author: &str| {
+        let (ok, o, e) = run(dir, args, author);
+        assert!(ok, "pail {args:?} failed:\n{o}{e}");
+        o
+    };
+    let alice = "Alice <a@x>";
+    let bob = "Bob <b@x>";
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "w"]);
+    let w = t.join("w");
+    write(&w.join("a.txt"), "a\n");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "base"]);
+    pail(&w, &["switch", "-c", "pr/feat"]);
+    write(&w.join("b.txt"), "one\ntwo\nthree\n");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "Add b"]);
+    ok(&w, &["pr", "create"], alice);
+    let first = pail(&w, &["rev-parse", "pr/feat"]).trim().to_string();
+
+    // Anchors the diff does not have are refused; nothing is written for them.
+    for (args, why) in [
+        (vec!["--path", "b.txt", "--line", "4"], "no line 4"),
+        (vec!["--path", "a.txt", "--line", "1"], "not changed"),
+        (
+            vec!["--path", "b.txt", "--line", "1", "--side", "old"],
+            "no line 1",
+        ),
+        (
+            vec!["--path", "b.txt", "--line", "1", "--commit", "0000"],
+            "not one of",
+        ),
+        (vec!["--reply-to", "0000000000001-Bob"], "no comment"),
+    ] {
+        let mut a = vec!["pr", "comment", "1", "-m", "x"];
+        a.extend(args);
+        let (good, _, err) = run(&w, &a, bob);
+        assert!(!good && err.contains(why), "{why}: {err}");
+    }
+    let files = pail(&t, &["--store", &store, "ls", "-r", "_meta:"]);
+    assert!(!files.contains("comments/"), "{files}");
+
+    ok(
+        &w,
+        &[
+            "pr", "comment", "1", "-m", "why one?", "--path", "b.txt", "--line", "1",
+        ],
+        bob,
+    );
+    ok(
+        &w,
+        &[
+            "pr", "comment", "1", "-m", "why two?", "--path", "b.txt", "--line", "2",
+        ],
+        bob,
+    );
+    let view: serde_json::Value =
+        serde_json::from_str(&ok(&w, &["pr", "view", "1", "--json"], alice)).unwrap();
+    let root = view["comments"][0]["file"].as_str().unwrap().to_string();
+    ok(
+        &w,
+        &["pr", "comment", "1", "-m", "because", "--reply-to", &root],
+        alice,
+    );
+    let view: serde_json::Value =
+        serde_json::from_str(&ok(&w, &["pr", "view", "1", "--json"], alice)).unwrap();
+    let reply = &view["comments"][2];
+    assert_eq!(reply["in_reply_to"], root.as_str());
+    assert_eq!(
+        (
+            reply["path"].clone(),
+            reply["line"].clone(),
+            reply["commit"].clone()
+        ),
+        ("b.txt".into(), 1.into(), first.as_str().into())
+    );
+    assert_eq!(reply["thread"], root.as_str());
+    assert!(
+        view["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["outdated"] == false)
+    );
+
+    // Bob approves the first commit; then a push changes line 1.
+    ok(&w, &["pr", "review", "1", "--approve"], bob);
+    write(&w.join("b.txt"), "ONE\ntwo\nthree\n");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "Shout"]);
+    let view: serde_json::Value =
+        serde_json::from_str(&ok(&w, &["pr", "view", "1", "--json"], alice)).unwrap();
+    let outdated: Vec<bool> = view["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["outdated"].as_bool().unwrap())
+        .collect();
+    assert_eq!(outdated, [true, false, true], "{view}");
+    let text = ok(&w, &["pr", "view", "1"], alice);
+    assert!(
+        text.contains("b.txt:1 (new)  (outdated)") && text.contains("b.txt:2 (new)"),
+        "{text}"
+    );
+    assert_eq!(view["reviews"][0]["stale"], true);
+
+    // The approval was of the first commit: it does not count for the new head.
+    let (good, _, err) = run(&w, &["pr", "merge", "1"], alice);
+    assert!(
+        !good && err.contains("0 of 1 approvals (1 on an older commit)"),
+        "{err}"
+    );
+    ok(&w, &["pr", "review", "1", "--approve"], bob);
+    ok(&w, &["pr", "merge", "1"], alice);
+    // Merged: no more line comments, replies still fine.
+    let (good, _, err) = run(
+        &w,
+        &[
+            "pr", "comment", "1", "-m", "x", "--path", "b.txt", "--line", "1",
+        ],
+        bob,
+    );
+    assert!(!good && err.contains("not one of"), "{err}");
+    ok(
+        &w,
+        &["pr", "comment", "1", "-m", "thanks", "--reply-to", &root],
+        bob,
+    );
+}
+
 /// `pail pr` end to end through plugin dispatch: create (title from the commit), draft,
 /// comment, review, edit, close/reopen and merge, with the records as documented.
 #[cfg(unix)]

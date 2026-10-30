@@ -1,12 +1,13 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
-import type { CommitSummary } from "../../shared/types";
+import type { CommitSummary, NewComment, PrComment } from "../../shared/types";
 import { CheckBadge, CheckStrip } from "./Checks";
 import { CommitList } from "./CommitList";
 import { DiffView } from "./DiffView";
 import { Markdown } from "./Markdown";
+import { InlineContext, groupThreads, type InlineCtx } from "./Threads";
 import { RefPicker } from "./RefPicker";
 
 const wrap = (ui: React.ReactNode) => render(<MemoryRouter>{ui}</MemoryRouter>);
@@ -83,6 +84,140 @@ describe("DiffView", () => {
   it("says so when there is nothing to show", () => {
     wrap(<DiffView patch="" repo="r" />);
     expect(screen.getByText("No file changes.")).toBeInTheDocument();
+  });
+});
+
+// ---- comments on diff lines --------------------------------------------------------------------
+
+const LINES = `diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,3 @@
+ one
+-two
++TWO
+ three
+`;
+const HEAD = "f".repeat(64);
+const cm = (id: string, o: Partial<PrComment> = {}): PrComment => ({ id, who: "bo", body: `body of ${id}`, at: 1700000000, thread: id, outdated: false, ...o });
+
+function inlineWith(comments: PrComment[], o: Partial<InlineCtx> = {}) {
+  const post = vi.fn<(c: NewComment) => Promise<void>>(async () => {});
+  const ctx: InlineCtx = { threads: groupThreads(comments), actions: true, anchorable: true, commit: HEAD, post, md: { repo: "r", ref: "main", dir: "" }, ...o };
+  return { post, ui: <InlineContext.Provider value={ctx}><DiffView patch={LINES} repo="r" /></InlineContext.Provider> };
+}
+
+describe("comments on diff lines", () => {
+  it("groups comments into threads by root, replies in id order", () => {
+    const ts = groupThreads([cm("3", { thread: "1", in_reply_to: "1" }), cm("1"), cm("2"), cm("4", { thread: "1", in_reply_to: "3" })]);
+    expect(ts.map((t) => [t.id, t.replies.map((r) => r.id)])).toEqual([["1", ["3", "4"]], ["2", []]]);
+  });
+
+  it("offers + on added, removed and context lines only with actions on, and sends the side, line and commit", async () => {
+    const user = userEvent.setup();
+    const { ui, post } = inlineWith([]);
+    wrap(ui);
+    expect(screen.getAllByRole("button", { name: /^Comment on/ }).map((b) => b.getAttribute("aria-label"))).toEqual(["Comment on line 1", "Comment on removed line 2", "Comment on line 2", "Comment on line 3"]);
+    await user.click(screen.getByRole("button", { name: "Comment on removed line 2" }));
+    const form = screen.getByRole("form", { name: "Comment" });
+    expect(screen.getByPlaceholderText("Comment on line 2 (Markdown)")).toBeInTheDocument();
+    await user.type(within(form).getByRole("textbox"), "gone?");
+    await user.click(within(form).getByRole("button", { name: "Comment" }));
+    expect(post).toHaveBeenCalledWith({ body: "gone?", path: "a.txt", line: 2, side: "old", commit: HEAD });
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Comment" })).toBeNull());
+
+    await user.click(screen.getByRole("button", { name: "Comment on line 2" }));
+    await user.type(screen.getByRole("textbox"), "ok");
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+    expect(post).toHaveBeenLastCalledWith({ body: "ok", path: "a.txt", line: 2, side: "new", commit: HEAD });
+  });
+
+  it("comments on the right side of a split row from its own side", async () => {
+    const user = userEvent.setup();
+    const { ui, post } = inlineWith([]);
+    wrap(ui);
+    await user.click(screen.getByRole("tab", { name: "Split" }));
+    await user.click(screen.getByRole("button", { name: "Comment on removed line 2" }));
+    await user.type(screen.getByRole("textbox"), "left");
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ side: "old", line: 2 }));
+    await user.click(screen.getByRole("button", { name: "Comment on line 3" }));
+    await user.type(screen.getByRole("textbox"), "right");
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+    expect(post).toHaveBeenLastCalledWith(expect.objectContaining({ side: "new", line: 3 }));
+    localStorage.setItem("pail-diff-mode", "unified");
+  });
+
+  it("shows no + without actions, on a PR that cannot take new line comments, or without a commit", () => {
+    for (const o of [{ actions: false }, { anchorable: false }, { commit: null }]) {
+      const { unmount } = wrap(inlineWith([], o).ui);
+      expect(screen.queryAllByRole("button", { name: /^Comment on/ })).toHaveLength(0);
+      unmount();
+    }
+    wrap(<DiffView patch={LINES} repo="r" />);
+    expect(screen.queryAllByRole("button", { name: /^Comment on/ })).toHaveLength(0);
+  });
+
+  it("renders a thread under its line, with the replies, and replies in its thread", async () => {
+    const user = userEvent.setup();
+    const root = cm("100", { path: "a.txt", line: 2, side: "new", commit: HEAD, body: "why TWO?" });
+    const reply = cm("101", { who: "chen", body: "shouting", path: "a.txt", line: 2, side: "new", commit: HEAD, thread: "100", in_reply_to: "100" });
+    const { ui, post } = inlineWith([root, reply]);
+    const { container } = wrap(ui);
+    const thread = container.querySelector('[data-thread="100"]') as HTMLElement;
+    expect(thread).not.toBeNull();
+    // Directly under the added line "TWO" (new 2), not under the removed one.
+    const row = [...container.querySelectorAll(".row")].find((r) => r.textContent?.includes("TWO"))!;
+    expect(row.nextElementSibling).toBe(thread.parentElement);
+    await waitFor(() => expect(within(thread).getByText("why TWO?")).toBeInTheDocument());
+    expect(within(thread).getByText("shouting")).toBeInTheDocument();
+    expect(within(thread).queryByText("Outdated")).toBeNull();
+    await user.click(within(thread).getByRole("button", { name: "Reply" }));
+    await user.type(within(thread).getByRole("textbox"), "fair");
+    await user.click(within(within(thread).getByRole("form", { name: "Reply" })).getByRole("button", { name: "Reply" }));
+    expect(post).toHaveBeenCalledWith({ body: "fair", in_reply_to: "100" });
+  });
+
+  it("matches the old side to removed lines and keeps outdated or off-diff threads in a group under the file header", async () => {
+    const user = userEvent.setup();
+    const old = cm("200", { path: "a.txt", line: 2, side: "old", commit: HEAD, body: "this went" });
+    const outdated = cm("201", { path: "a.txt", line: 3, side: "new", commit: "e".repeat(64), outdated: true, body: "stale point" });
+    const far = cm("202", { path: "a.txt", line: 40, side: "new", commit: HEAD, body: "far away" });
+    const other = cm("203", { path: "b.txt", line: 1, side: "new", commit: HEAD, body: "other file" });
+    const { ui } = inlineWith([old, outdated, far, other]);
+    const { container } = wrap(ui);
+    const removed = [...container.querySelectorAll(".row--del")][0];
+    await waitFor(() => expect(removed.nextElementSibling).toHaveTextContent("this went"));
+    expect(container.querySelector('[data-thread="201"]')).toBeInTheDocument();
+    const group = screen.getByText(/2 comment threads not shown on a line \(some outdated\)/);
+    expect(group.closest("details")).not.toHaveAttribute("open");
+    expect(container.querySelector(".inline [data-thread='201']")).toBeNull();
+    await user.click(group);
+    const t = container.querySelector("details [data-thread='201']") as HTMLElement;
+    expect(within(t).getByText("Outdated")).toBeInTheDocument();
+    expect(within(t).getByText("after, line 3")).toBeInTheDocument();
+    expect(container.querySelector("[data-thread='202']")).toHaveTextContent("far away");
+    expect(container.textContent).not.toContain("other file");
+  });
+
+  it("is read-only without actions: threads show, no Reply", async () => {
+    const { ui } = inlineWith([cm("300", { path: "a.txt", line: 1, side: "new", commit: HEAD, body: "only reading" })], { actions: false });
+    wrap(ui);
+    expect(await screen.findByText("only reading")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reply" })).toBeNull();
+  });
+
+  it("keeps the form and says why when the server refuses", async () => {
+    const user = userEvent.setup();
+    const { ui, post } = inlineWith([]);
+    const { ApiError } = await import("../api");
+    post.mockRejectedValueOnce(new ApiError(400, "a.txt has no line 1"));
+    wrap(ui);
+    await user.click(screen.getByRole("button", { name: "Comment on line 1" }));
+    await user.type(screen.getByRole("textbox"), "hmm");
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("a.txt has no line 1");
+    expect(screen.getByRole("textbox")).toHaveValue("hmm");
   });
 });
 

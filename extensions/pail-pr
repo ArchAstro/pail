@@ -333,14 +333,15 @@ def anchor_for(rec, path, line, side, commit):
     if side not in ("new", "old"):
         die("--side is new or old")
     fork, ids = pr_commits(rec, head)
-    ids = [i for i in ids if i.startswith(commit)] if commit else [head]
+    commit = commit or head
+    ids = [i for i in ids if i.startswith(commit)]
     if len(ids) != 1:
-        die(f"commit {commit} is not one of PR {rec['id']}'s commits")
+        die(f"commit {commit[:12]} is not one of PR {rec['id']}'s commits")
     commit = ids[0]
-    names = text(["diff", "--name-only", fork, commit]).split() if fork else ls(f"{commit}:")
-    if path not in names:
+    new, old = file_lines(commit, path), (file_lines(fork, path) if fork else None)
+    if new == old:
         die(f"{path} is not changed by PR {rec['id']} at {commit[:12]}")
-    lines = file_lines(commit if side == "new" else fork, path) if side == "new" or fork else None
+    lines = new if side == "new" else old
     if lines is None or not 1 <= line <= len(lines):
         die(f"{path} has no line {line} on the {side} side at {commit[:12]}")
     return {"path": path, "line": line, "side": side, "commit": commit}
@@ -349,9 +350,9 @@ def anchor_for(rec, path, line, side, commit):
 def mark_outdated(rec, comments):
     """Set c["outdated"] on every comment. A line comment is outdated when the head has moved
     since its commit and its line, on the new side, is not what it was there (changed, or
-    gone). The old side is the fork point's file, which a push does not change. A comment
+    gone); never once the PR is merging or merged. The old side is the fork point's file, which a push does not change. A comment
     whose commit left the PR (the branch was rewritten) is outdated too."""
-    head = rev_parse(rec["head"]) if rec["state"] != "merged" else None
+    head = rev_parse(rec["head"]) if rec["state"] not in ("merging", "merged") else None
     _, ids = pr_commits(rec, head)
     todo = []
     for c in comments:
@@ -535,8 +536,10 @@ def cmd_diff(a):
         args = ["show", head]
     else:
         args = ["log", "--reverse", "-p", f"{base}..{head}"]
-    if a.name_only:
-        args = ["diff", "--name-only", base, head] if base else ["show", "--name-only", "--pretty=format:", head]
+    if a.name_only:  # `pail diff` wants a working copy; the log does not
+        args = ["log", "--name-only", "--pretty=format:", f"{base}..{head}"] if base else ["show", "--name-only", "--pretty=format:", head]
+        sys.stdout.write("".join(f"{n}\n" for n in sorted({n for n in text(args).splitlines() if n})))
+        return
     sys.stdout.write(text(args))
 
 
@@ -707,9 +710,10 @@ def landed_tip(out, base):
 
 
 def cmd_close(a):
-    state = get_pr(a.n, full=False)["state"]
-    if state != "open":
-        die(f"PR {a.n} is {state}")
+    rec = get_pr(a.n, full=False)
+    busy(rec)
+    if rec["state"] != "open":
+        die(f"PR {a.n} is {rec['state']}")
     if a.message:
         cmd_comment(argparse.Namespace(n=a.n, message=a.message, path=None, line=None, side=None, commit=None, reply_to=None))
 

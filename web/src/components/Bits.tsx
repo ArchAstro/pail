@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import type { PrRecord } from "../../shared/types";
 import { Icon } from "./Icon";
 import { fullDate, timeAgo } from "../lib/format";
 
@@ -58,9 +59,9 @@ export function Sha({ id, to }: { id: string; to?: string }) {
   return to ? <Link to={to} className="sha-link">{inner}</Link> : inner;
 }
 
-export function PrState({ state, draft }: { state: "open" | "merged" | "closed"; draft?: boolean }) {
+export function PrState({ state, draft }: { state: PrRecord["state"]; draft?: boolean }) {
   const shown = state === "open" && draft ? "draft" : state;
-  return <span className={`pill pill--${shown}`}><Icon name={state === "merged" ? "merge" : "pr"} size={13} />{shown}</span>;
+  return <span className={`pill pill--${shown}`}><Icon name={state === "merged" || state === "merging" ? "merge" : "pr"} size={13} />{shown}</span>;
 }
 
 export function Tabs<T extends string>({ tabs, value, onChange, label }: { tabs: { id: T; label: string; count?: number }[]; value: T; onChange: (t: T) => void; label: string }) {

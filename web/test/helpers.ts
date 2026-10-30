@@ -86,3 +86,24 @@ export async function send(base: string, method: string, path: string, body?: un
   const res = await fetch(base + path, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
+
+/** `pail --store <store> <args>` as `who`; stdout. */
+export function pailIn(store: string, args: string[], who = "Tess Tester <tess@example.com>", input?: string): string {
+  return execFileSync(PAIL(), ["--store", store, ...args], { env: pailEnv(who), input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+}
+
+/** A file of `_meta` as JSON, straight from the store. */
+export const metaJson = (store: string, path: string) => JSON.parse(pailIn(store, ["cat", `_meta:${path}`]));
+
+/** Push one more commit to an existing branch, without a working copy. */
+export function pushTo(store: string, branch: string, files: Record<string, string>, message = "More work"): void {
+  const dir = mkdtempSync(join(tmpdir(), "pail-web-push-"));
+  const args = ["put", branch, "-m", message];
+  for (const [p, text] of Object.entries(files)) {
+    const src = join(dir, encodeURIComponent(p));
+    writeFileSync(src, text);
+    args.push("--file", `${p}=${src}`);
+  }
+  pailIn(store, args);
+  rmSync(dir, { recursive: true, force: true });
+}
