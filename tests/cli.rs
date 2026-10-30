@@ -1453,6 +1453,123 @@ fn concurrent_cli_writers_lose_nothing() {
     );
 }
 
+/// `put --expect PATH=ID` is a compare-and-swap on one path: it commits only if the path is as
+/// the caller read it (exit 4 otherwise), and a change to other paths in between does not
+/// matter.
+#[test]
+fn put_expect_is_a_cas() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    let put = |path: &str, body: &str, extra: &[&str]| {
+        let src = t.join("src.json");
+        write(&src, body);
+        let mut args = vec![
+            "--store".to_string(),
+            store.clone(),
+            "put".into(),
+            "_meta".into(),
+            "-m".into(),
+            "m".into(),
+            "--file".into(),
+            format!("{path}={}", src.display()),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        cmd(&t, &args).output().unwrap().status.code()
+    };
+    let id_of = |path: &str| {
+        let out = cmd(&t, &["--store", &store, "cat-file", "--batch-check"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        out.stdin
+            .as_ref()
+            .unwrap()
+            .write_all(format!("_meta:{path}\n").as_bytes())
+            .unwrap();
+        let o = out.wait_with_output().unwrap();
+        String::from_utf8_lossy(&o.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        put("prs/1.json", "v1", &["--expect", "prs/1.json=absent"]),
+        Some(0)
+    );
+    assert_eq!(
+        put("prs/1.json", "x", &["--expect", "prs/1.json=absent"]),
+        Some(4)
+    );
+    let v1 = id_of("prs/1.json");
+    // Another path changes: not a conflict.
+    assert_eq!(put("prs/2.json", "other", &["--if-absent"]), Some(0));
+    assert_eq!(
+        put(
+            "prs/1.json",
+            "v2",
+            &["--expect", &format!("prs/1.json={v1}")]
+        ),
+        Some(0)
+    );
+    // v1 is stale now.
+    assert_eq!(
+        put(
+            "prs/1.json",
+            "v3",
+            &["--expect", &format!("prs/1.json={v1}")]
+        ),
+        Some(4)
+    );
+    assert_eq!(
+        pail(&t, &["--store", &store, "cat", "_meta:prs/1.json"]),
+        "v2"
+    );
+    // An expectation about a path the put does not write is a usage error.
+    assert_eq!(
+        put("prs/1.json", "v4", &["--expect", "prs/9.json=absent"]),
+        Some(1)
+    );
+}
+
+/// `land --stack --expect-tip C` lands only if the branch is at C (exit 4 if it moved).
+#[test]
+fn land_expect_tip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = format!("file://{}", t.join("bucket").display());
+    pail(&t, &["init", &store]);
+    pail(&t, &["clone", &store, "w"]);
+    let w = t.join("w");
+    write(&w.join("a"), "1");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "base"]);
+    pail(&w, &["switch", "-c", "feat"]);
+    write(&w.join("a"), "2");
+    pail(&w, &["commit", "-am", "first"]);
+    let judged = pail(&w, &["rev-parse", "feat"]).trim().to_string();
+    write(&w.join("b"), "3");
+    pail(&w, &["add", "-A"]);
+    pail(&w, &["commit", "-m", "second"]);
+    let err = pail_fails(&w, &["land", "feat", "--stack", "--expect-tip", &judged]);
+    assert!(err.contains("not the expected"), "{err}");
+    let code = cmd(&w, &["land", "feat", "--stack", "--expect-tip", &judged])
+        .output()
+        .unwrap()
+        .status
+        .code();
+    assert_eq!(code, Some(4));
+    assert!(!pail(&w, &["log", "--format=%s", "main"]).contains("first"));
+    let tip = pail(&w, &["rev-parse", "feat"]).trim().to_string();
+    pail(&w, &["land", "feat", "--stack", "--expect-tip", &tip]);
+    assert!(pail(&w, &["log", "--format=%s", "main"]).contains("second"));
+}
+
 /// `pail put` commits to a branch without a working copy (creating it), `--if-absent` claims
 /// a path once (exit 4 after), and `pail events` reports each ref change once.
 #[test]

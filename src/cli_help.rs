@@ -149,7 +149,10 @@ Examples:
 
 --stack fast-forwards when it can and otherwise replays the stack on the new head; landing
 a branch stacked on another lands both. A --stack landing is idempotent: after a failure,
-run it again. Overlapping changes fail with exit 4.";
+run it again. Overlapping changes fail with exit 4.
+
+--expect-tip COMMIT (with --stack) lands only if the branch is at COMMIT, on every attempt,
+and exits 4 if it moved: land what you judged, not what the branch became since.";
 
 pub const REBASE: &str = "\
 Examples:
@@ -348,8 +351,13 @@ The write primitive for tools and extensions: an atomic commit straight to a bra
 if missing, with the same concurrency as `pail commit` (replay on disjoint paths, exit 4 on a
 conflict).
 
+--expect PATH=ID (a blob id, as `cat-file --batch` prints it) or PATH=absent makes the commit a
+compare-and-swap on that path: exit 4 unless PATH is as the caller read it, even if the branch
+moved meanwhile. --if-absent is --expect PATH=absent for every --file.
+
 Examples:
   pail put _meta -m \"Open PR 12\" --file prs/12.json=pr.json --if-absent   # claim id 12
+  pail put _meta -m \"Edit PR 12\" --file prs/12.json=pr.json --expect prs/12.json=9f2c...
   echo ok | pail put _meta -m \"check\" --file checks/9f2c/test.json=-
   pail put _meta -m \"close\" --delete prs/12/draft.json";
 
