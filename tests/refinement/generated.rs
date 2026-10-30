@@ -101,6 +101,16 @@ quint_ownership! {
 }
 
 quint_ownership! {
+    const BEGIN_SOFT = {
+        primitive: "scenarios.beginSoft",
+        refines: ["beginSoft"],
+        aliases: [],
+        observations: ["path:Rec.ancestors", "path:Rec.commit", "path:Rec.d", "path:Rec.dropped", "path:Rec.made", "path:Rec.ok", "path:Rec.successors", "path:Rec.tip", "path:Rec.tree", "path:a.made", "path:a.ok", "path:a.successors", "path:a.tip", "path:acc.ancestors", "path:acc.batch", "path:acc.chunks", "path:acc.commits", "path:acc.locs", "path:acc.made", "path:acc.ok", "path:acc.packs", "path:acc.pages", "path:acc.successors", "path:acc.tip", "path:acc.tree", "path:acc.young", "path:acc.young.chunks", "path:acc.young.commits", "path:acc.young.packs", "path:acc.young.pages", "path:after.bucket", "path:after.bucket.locks", "path:after.bucket.refs", "path:after.clients", "path:after.history", "path:after.now", "path:after.timing", "path:b.reflog", "path:b.refs", "path:built.dropped", "path:built.made", "path:built.ok", "path:built.successors", "path:built.tip", "path:cl.comb", "path:cl.comb.batch", "path:cl.comb.head", "path:cl.comb.head.commit", "path:cl.comb.head.version", "path:cl.comb.lineage", "path:cl.comb.listed", "path:cl.comb.recent", "path:cl.comb.then", "path:cl.comb.tip", "path:cl.known", "path:cur.commit", "path:cur.version", "path:e.ancestors", "path:e.commit", "path:e.intent", "path:e.tree", "path:e.wrote", "path:fold.d", "path:fold.locks", "path:fold.made", "path:fold.ok", "path:g__inlined1.d", "path:g__inlined1.ok", "path:get.attempt", "path:get.base", "path:get.body", "path:get.body.ancestors", "path:get.body.at", "path:get.body.base", "path:get.body.commit", "path:get.body.delta", "path:get.body.dropped", "path:get.body.epoch", "path:get.body.kind", "path:get.body.lineage", "path:get.body.lineage.epoch", "path:get.body.lineage.rewrite", "path:get.body.locs", "path:get.body.new", "path:get.body.old", "path:get.body.op", "path:get.body.prev", "path:get.body.recent", "path:get.body.reloc", "path:get.body.successors", "path:get.body.tree", "path:get.checked", "path:get.comb", "path:get.comb.listed", "path:get.comb.polledList", "path:get.comb.polledRef", "path:get.comb.recent", "path:get.delta", "path:get.done", "path:get.found", "path:get.foundAt", "path:get.inflight", "path:get.known", "path:get.known.has", "path:get.known.head", "path:get.known.head.commit", "path:get.known.lineage", "path:get.landed", "path:get.ld", "path:get.ld.calls", "path:get.ld.lineage", "path:get.ld.lineage.epoch", "path:get.ld.tip", "path:get.live", "path:get.located", "path:get.outcome", "path:get.phase", "path:get.refreshed", "path:get.reloc", "path:get.reuse", "path:get.running", "path:get.rw", "path:get.rw.id", "path:get.rw.made", "path:get.seen", "path:get.seen.commit", "path:get.seen.version", "path:get.seenLineage", "path:get.seenLineage.epoch", "path:get.seenLineage.rewrite", "path:get.seenRecent", "path:get.sent", "path:get.version", "path:ite.ancestors", "path:ite.dropped", "path:ite.made", "path:ite.ok", "path:ite.phase", "path:ite.successors", "path:ite.tip", "path:ite.tree", "path:k.head", "path:k.head.commit", "path:k.lineage", "path:k.recent", "path:ld.tip", "path:ld.version", "path:m.ancestors", "path:m.id", "path:m.tree", "path:r.batch", "path:r.new", "path:r.old", "path:r.successors", "path:r.tip", "path:rw.dropped", "path:rw.expected", "path:rw.id", "path:rw.new", "path:rw.op", "path:rw.plan", "path:rw.since", "path:rw.successors", "path:rw.tip", "path:rw.version", "path:state.bucket", "path:state.bucket.chunks", "path:state.bucket.commits", "path:state.bucket.intents", "path:state.bucket.locks", "path:state.bucket.packs", "path:state.bucket.pages", "path:state.bucket.reflog", "path:state.bucket.refs", "path:state.bucket.young", "path:state.bucket.young.chunks", "path:state.bucket.young.commits", "path:state.bucket.young.packs", "path:state.bucket.young.pages", "path:state.clients", "path:state.collector", "path:state.collector.doomedChunks", "path:state.collector.doomedCommits", "path:state.collector.doomedPacks", "path:state.collector.doomedPages", "path:state.collector.liveChunks", "path:state.collector.liveCommits", "path:state.collector.livePacks", "path:state.collector.livePages", "path:state.collector.phase", "path:state.collector.spared", "path:state.collector.spared.chunks", "path:state.collector.spared.commits", "path:state.collector.spared.packs", "path:state.collector.spared.pages", "path:state.history", "path:state.now", "path:state.timing", "path:stored.locks", "path:t.refreshed", "path:t.sent", "path:with.base", "path:with.bucket", "path:with.bucket.locks", "path:with.chunks", "path:with.clients", "path:with.collector", "path:with.collector.doomedChunks", "path:with.collector.doomedCommits", "path:with.collector.doomedPacks", "path:with.collector.doomedPages", "path:with.collector.phase", "path:with.comb", "path:with.comb.head", "path:with.comb.head.commit", "path:with.comb.polledList", "path:with.comb.polledRef", "path:with.comb.recent", "path:with.commits", "path:with.delta", "path:with.locks", "path:with.now", "path:with.packs", "path:with.pages", "path:with.phase", "path:with.timing", "path:with.young", "path:with.young.chunks", "path:with.young.commits", "path:with.young.packs", "path:with.young.pages", "path:x.ancestors"],
+        retrieve: ["name:state"],
+    };
+}
+
+quint_ownership! {
     const BEGIN_UNDO = {
         primitive: "scenarios.beginUndo",
         refines: ["beginUndo"],
@@ -513,6 +523,7 @@ pub const OWNERSHIP: OwnershipTable = OwnershipTable {
         BEGIN_REBASE,
         BEGIN_RESET,
         BEGIN_REWRITE,
+        BEGIN_SOFT,
         BEGIN_UNDO,
         CHECK_LEASES,
         CLEANUP,
@@ -573,6 +584,7 @@ pub const RETRIEVE: &[&str] = &[
     "name:BOB_1",
     "name:BOB_A",
     "name:BOB_B",
+    "name:BOB_B3",
     "name:BOB_CARRIED",
     "name:BOB_ON_ALICE",
     "name:BOB_ON_RW",
@@ -583,6 +595,8 @@ pub const RETRIEVE: &[&str] = &[
     "name:BatchRechecking",
     "name:Branched",
     "name:CAROL_1",
+    "name:CAROL_A2",
+    "name:CAROL_A3",
     "name:CAROL_B",
     "name:CAROL_ON_ROOT",
     "name:CAROL_PACK",
@@ -590,6 +604,7 @@ pub const RETRIEVE: &[&str] = &[
     "name:CLIENTS",
     "name:Conflicted",
     "name:DAVE_A",
+    "name:DAVE_A2",
     "name:DAVE_B",
     "name:DIRECT_ATTEMPTS",
     "name:Done",
@@ -619,11 +634,13 @@ pub const RETRIEVE: &[&str] = &[
     "name:NO_LINEAGE",
     "name:NO_RW",
     "name:NO_TIMING",
+    "name:OLD",
     "name:PATHS",
     "name:Polling",
     "name:Published",
     "name:RANK",
     "name:REFRESH",
+    "name:RELOC_A",
     "name:REPACKED",
     "name:ROOT",
     "name:ROOT_PAGE",
@@ -644,6 +661,8 @@ pub const RETRIEVE: &[&str] = &[
     "name:packsAreWritersOwn",
     "name:refOnlyMovesForward",
     "name:relocateKeepsContent",
+    "name:relocationsKeepContent",
+    "name:relocationsNeverConflict",
     "name:state",
     "operator:List",
     "operator:Map",
@@ -974,6 +993,9 @@ pub trait Implementation: Sized {
     /// Execute Quint action `beginRewrite` with its generated arguments.
     fn begin_rewrite(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 
+    /// Execute Quint action `beginSoft` with its generated arguments.
+    fn begin_soft(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
+
     /// Execute Quint action `beginUndo` with its generated arguments.
     fn begin_undo(&mut self, arguments: &[RuntimeValue]) -> Result<(), String>;
 
@@ -1242,6 +1264,18 @@ impl<I: Implementation> PrimitiveDriver for Driver<I> {
                     ));
                 }
                 self.implementation.begin_rewrite(&action.arguments)?;
+                Ok(vec![self.implementation.snapshot()])
+            }
+            "scenarios.beginSoft" => {
+                let [action] = actions else {
+                    return Err(format!(
+                        "beginSoft expects one Quint action; got {actions:?}"
+                    ));
+                };
+                if action.name != "beginSoft" {
+                    return Err(format!("beginSoft primitive cannot refine {}", action.name));
+                }
+                self.implementation.begin_soft(&action.arguments)?;
                 Ok(vec![self.implementation.snapshot()])
             }
             "scenarios.beginUndo" => {

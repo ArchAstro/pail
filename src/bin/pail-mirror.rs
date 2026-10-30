@@ -98,6 +98,15 @@ struct RunArgs {
     /// objects). 1 = a pack per commit.
     #[arg(long, default_value_t = 1)]
     pack_batch: usize,
+    /// Commit as `pail commit` does (the files and the commit go up in one wave, as
+    /// `Worktree::commit` sends them), for measuring the commit path.
+    #[arg(long)]
+    client_flow: bool,
+    /// With --client-flow: relocate a bounded part of the base's small packs into each
+    /// commit's pack (amortized compaction, `pail::amortize`), reading the bytes from Git as
+    /// a clean working copy would hold them.
+    #[arg(long)]
+    amortize: bool,
 }
 
 #[derive(clap::Args)]
@@ -368,6 +377,74 @@ async fn import_delta(
         .commit(request(branch, Some(base), delta, sha, &raw))
         .await?;
     Ok((out.commit, changes.len(), out.attempts))
+}
+
+/// Import one commit as `Worktree::commit` would send it (`--client-flow`): the new files and,
+/// when `amortize`, a bounded relocation of the base's small packs go in one pack uploaded
+/// with the commit. Git supplies the bytes a clean working copy would hold.
+async fn import_client_flow(
+    repo: &Repo,
+    git: &Git,
+    branch: &str,
+    base: Hash,
+    sha: &str,
+    amortize: Option<&HashMap<Hash, String>>,
+) -> Result<(Hash, usize, u32, usize)> {
+    let raw = git.commit_info(sha)?;
+    let parent = raw.parents.first().context("commit has no parent")?;
+    let changes = git.diff_tree(parent, sha)?;
+    let mut delta: Delta = BTreeMap::new();
+    let mut inputs: Vec<FileInput> = vec![];
+    for c in &changes {
+        if c.deleted {
+            delta.insert(c.path.clone(), None);
+        } else {
+            inputs.push(FileInput {
+                path: c.path.clone(),
+                kind: kind_for_mode(&c.new_mode)?,
+                data: Bytes::from(git.cat(&c.new_oid)?),
+            });
+        }
+    }
+    let base_root = repo.root_of(Some(base)).await?;
+    let entries = repo.entries(base_root).await?;
+    let reuse: HashMap<Hash, pail::manifest::Loc> =
+        entries.iter().map(|e| (e.hash, e.loc.clone())).collect();
+    let mut moving = vec![];
+    if let Some(ids) = amortize {
+        let settings = pail::amortize::Settings::default();
+        let base_map: BTreeMap<String, Entry> = entries
+            .iter()
+            .map(|e| (e.path.clone(), e.clone()))
+            .collect();
+        let own: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        let cands = pail::amortize::candidates(&settings, &base_map, &own);
+        if !cands.is_empty() {
+            let budget = settings.budget(pail::amortize::new_bytes(
+                inputs.iter().map(|i| i.data.len() as u64),
+            ));
+            moving = pail::amortize::gather_with(&cands, budget, |e| {
+                let data = git.cat(ids.get(&e.hash)?).ok()?;
+                (Hash::of(&data) == e.hash).then(|| Bytes::from(data))
+            });
+        }
+    }
+    let (new_entries, relocs, uploads) = repo.prepare_files_moving(&inputs, &reuse, &moving);
+    for e in new_entries {
+        delta.insert(e.path.clone(), Some(e));
+    }
+    let moved = relocs.len();
+    let out = repo
+        .commit_opts(
+            request(branch, Some(base), delta, sha, &raw),
+            CommitOptions {
+                uploads,
+                relocs,
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok((out.commit, changes.len(), out.attempts, moved))
 }
 
 /// The files of the next few commits, packed together (`--pack-batch`): a blob of a commit
@@ -900,6 +977,12 @@ async fn run(args: RunArgs) -> Result<()> {
                             .await?;
                     }
                     import_batched(&repo, &git, &c.pail_branch, head, sha, &mut batch).await?
+                } else if args.client_flow {
+                    let ids_map = args.amortize.then_some(&ids.map);
+                    let (h, n, a, moved) =
+                        import_client_flow(&repo, &git, &c.pail_branch, head, sha, ids_map).await?;
+                    eprintln!("  relocated {moved} files");
+                    (h, n, a)
                 } else {
                     import_delta(&repo, &git, &c.pail_branch, head, sha).await?
                 };
