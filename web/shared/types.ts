@@ -82,23 +82,44 @@ export interface PrRecord {
   head: string;
   base: string;
   author: string;
-  state: "open" | "merged" | "closed";
+  /** `merging`: claimed by a merge in progress; edit, close, ready and reopen refuse it. */
+  state: "open" | "merging" | "merged" | "closed";
   /** Not mergeable until marked ready. */
   draft?: boolean;
   created?: number;
   updated?: number;
   closed_at?: number;
   closed_by?: string;
+  /** Who is merging (slug of their name) and the head commit they judged. */
+  merging?: { by: string; commit: string };
   merged_commit?: string;
   merged_by?: string;
   merged_at?: number;
 }
 
-/** `who` is the name to show; `byAuthor` is true when the PR's author wrote it (it does not count). */
-export interface Review { who: string; verdict: "approve" | "changes"; comment: string; at?: number; byAuthor: boolean }
+/**
+ * `who` is the name to show; `byAuthor` is true when the PR's author wrote it (it does not count).
+ * `commit` is the head it was given on; `stale` is true once the head has moved on (it then
+ * counts for nothing).
+ */
+export interface Review { who: string; verdict: "approve" | "changes"; comment: string; at?: number; byAuthor: boolean; commit?: string | null; stale: boolean }
 
-/** `_meta:prs/<n>/comments/<ms>-<who>.json` */
-export interface PrComment { id: string; who: string; body: string; at?: number }
+export type Side = "new" | "old";
+
+/**
+ * `_meta:prs/<n>/comments/<ms>-<who>.json`. A line comment has `path`, `line` (1-based), `side`
+ * and `commit` (the PR head the line was read at); a reply has `in_reply_to` (a comment's `id`)
+ * and its parent's anchor. `thread` is the `id` of the comment that opened the thread;
+ * `outdated` is derived when served.
+ */
+export interface PrComment {
+  id: string; who: string; body: string; at?: number;
+  in_reply_to?: string; path?: string; line?: number; side?: Side; commit?: string;
+  thread: string; outdated: boolean;
+}
+
+/** What the comment route takes: a plain comment, a line comment (`path` and `line`), or a reply. */
+export interface NewComment { body: string; path?: string; line?: number; side?: Side; commit?: string; in_reply_to?: string }
 
 export interface PrSummary extends PrRecord { headCommit: string | null; checks?: CheckRollup; approvals: number; changesRequested: number; comments: number }
 

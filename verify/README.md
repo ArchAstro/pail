@@ -5,7 +5,8 @@ A [Quint](https://quint-lang.org) model of how `Repo::commit` publishes over a b
 collects it, the properties they must keep, and scenarios the real code is checked
 against request by request with
 [quint-refinements](https://github.com/ArchAstro/quint-refinements). Beside it: the store
-contract every backend follows, and the branch policy every enforcement point decides.
+contract every backend follows, the branch policy every enforcement point decides, and the
+pull request protocol of `pail pr` (`pr.qnt`, below).
 
 Layers, each importing those below. A feature is a set of pure steps (`xCan(s, ...)`:
 may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new protocol
@@ -39,6 +40,12 @@ tests/refinement.rs ── real commit, rewrite_ref, land_stack and gc, gated st
 policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
                                     ├─▶ tests/policy_refinement/generated.rs  (pail)
                                     └─▶ policy/pailpolicy_refinement_gen_test.go (gateway)
+
+pr.qnt ─── pr_sim.qnt ──quint run──▶ safety + history properties hold in every simulated interleaving
+   │
+pr_scenarios.qnt ──compile──▶ pr-refinements.json + tests/pr_refinement/generated.rs
+                                   │
+tests/pr_refinement.rs ── the real extensions/pail-pr, its put and land held by a shim ──▶ same records after every step
 ```
 
 ## Files
@@ -61,20 +68,26 @@ policy_scenarios.qnt ──compile──▶ policy/policy-refinements.json
 | `scenarios.qnt` | `@conformance` runs: interleavings the real writers and gc must follow |
 | `policy.qnt` | Branch policy: parsing `policy.json`, `decide`, `request_op` |
 | `policy_scenarios.qnt` | `@conformance` runs: documents to parse and requests to decide |
-| `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json` | Generated scenario artifacts (do not edit) |
+| `pr.qnt` | The `pail pr` protocol: records on `_meta`, clients that read, decide and write, the properties (`safety`) and the design switches (`CAS`, `CLAIM`, `GUARD`, `PER_COMMIT`) |
+| `pr_scenarios.qnt` | `@conformance` runs: the interleavings the plugin must follow |
+| `pr_sim.qnt` | `pr.qnt` under random interleavings, with a ghost for the history properties |
+| `mutate_pr.sh` | Flips each design switch in a scratch copy and expects `pr_sim.qnt` to find a violation |
+| `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json`, `pr-refinements.json` | Generated scenario artifacts (do not edit) |
 | `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
 | `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref`, `Repo::land_stack`, `Repo::successor` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
 | `../tests/store_refinement.rs` | Each `Store` backend against `store_spec.qnt` |
 | `../tests/policy_refinement.rs` | `Policy::parse`, `Policy::decide`, `policy::request_op` against `policy.qnt` |
+| `../tests/pr_refinement.rs` | The real `extensions/pail-pr` against `pr.qnt`: processes whose `put` and `land` a shim (`tests/pr_refinement/shim.py`) holds |
 
 ## Run
 
 ```sh
 cd verify && npm ci
 npm test            # scenarios pass in Quint
-npm run simulate    # random interleavings against `safety` (`step`, then writers only: `contendStep`)
+npm run simulate    # random interleavings against `safety` (`step`, then writers only: `contendStep`; then `pr_sim.qnt`)
+npm run mutate:pr   # each design switch of pr.qnt off: the simulation must find a violation
 npm run compile     # after editing any .qnt file
-cd .. && cargo test --release --test refinement --test store_refinement --test policy_refinement
+cd .. && cargo test --release --test refinement --test store_refinement --test policy_refinement --test pr_refinement
 # GCS runs in `cargo test` against the in-process emulator (src/gcs_emulator.rs); as a process:
 #   cargo run --release --bin pail-gcs-emulator 127.0.0.1:4443
 #   PAIL_TEST_STORES=gs://bucket/prefix PAIL_GCS_BASE_URL=http://127.0.0.1:4443 cargo test ...
@@ -82,7 +95,7 @@ cd .. && cargo test --release --test refinement --test store_refinement --test p
 PAIL_TEST_STORES="s3://bucket/prefix" AWS_ENDPOINT=... cargo test --release --test store_refinement
 ```
 
-CI runs all four (`npm run check` in place of `compile`, failing on stale generated files).
+CI runs all of it (`npm run check` in place of `compile`, failing on stale generated files).
 
 ## Properties (`pail.qnt`)
 
@@ -626,6 +639,119 @@ map, and a rewrite's copy of a commit keeps the original's locations as a matter
   the harness building `reuse` as the worktree does.
 - Simplifications: reuse is of a path other than the one written; rewrites, combined intents
   and landed stacks are not given reuse (their commits' packs are the model's, above).
+
+## Pull requests (`pr.qnt`)
+
+`pail pr` has no server: a pull request is a branch plus records on the `_meta` branch, and
+every client (the plugin, pail-web) reads, decides, then writes, while others do the same.
+`pr.qnt` models that: one PR, one head branch (commits 1..tip; the base is commit 0) and its
+base, four clients (`alice2` is `alice` again), and the writes:
+
+| Write | Real call |
+|---|---|
+| `WCreate` | `pail put _meta --file prs/<n>.json=.. --if-absent` (id `n`, then `n+1` on exit 4) |
+| `WSave` | `pail put _meta --file prs/1.json=.. --expect prs/1.json=<blob read>` (edit, ready, close, reopen, and a merge's claim, release and record) |
+| `WReview` | `put prs/1/reviews/<who>.json` (a reviewer's latest verdict, with the commit) |
+| `WComment` | `put prs/1/comments/<ms>-<who>.json --if-absent` (`ms+1` on exit 4) |
+| `WLand` | `pail land <head> --stack --onto <base> --expect-tip <commit>` |
+
+A client's `begin` is everything up to its first write (reads, decision); the write is held
+(`Wait`) until `release`, which lets it through or finds a conflict, after which it reads and
+decides again. `push` adds a commit to the head branch, `ci(k)` a passing check, `view` is
+`pail pr view --json` (which comments are outdated, whether mergeable). The model's `fileAt`
+says what each commit's files hold, which gives anchors their lines.
+
+Properties (`safety` in `pr.qnt`; `simSafety` adds the history ones of `pr_sim.qnt`):
+
+1. `landedMatchesRecord`: the base has commits only for a PR that claimed them, and a merged
+   record names the commit on the base. A closed or draft PR is never merged.
+2. `claimHasAHolder`: a `merging` record has a client still landing or recording it.
+3. `claimedWasReady`: what a PR claimed has its check and is not a draft.
+4. `commentsAreAnchored`: a line comment is on a line of its commit's diff (the commit was
+   the PR's, the path changed by it, the line one of that side's file); a reply's parent
+   exists and the reply is on the parent's line. Comments are create-only, so none is lost.
+5. `reviewsAreOfCommits`: a review is of one of the PR's commits.
+6. `mergedIsTerminal`: once merged, always (no stale edit, close or ready written over it).
+7. `editsAreKept`: the last acknowledged edit of title, body and draft is what the record holds.
+8. `landsWhatWasJudged`: the commit on the base is one a merge judged ready, counting only
+   approvals of that commit.
+
+Outdated, in words: a line comment is outdated iff the PR is not merging or merged, the head
+has moved since the comment's commit, and the line, on the new side, is not what it was there
+(changed or gone), or the comment's commit is no longer the PR's. Old-side lines never are
+(the base does not move). Checked by `view` in the scenarios.
+
+Design switches (`pr.qnt`), each the fix for a bug the model found in the first plugin; `npm
+run mutate:pr` turns each off in a scratch copy and the simulation finds a violation:
+
+| Switch off | What breaks |
+|---|---|
+| `CAS` | blind overwrite: an edit or ready read before a merge writes `open` back over `merged`; two edits lose one (`mergedIsTerminal`, `editsAreKept`) |
+| `CLAIM` | judge, land, then record: a close or draft between judging and landing still merges (`landedMatchesRecord`) |
+| `GUARD` | the land takes whatever the head is by then: a push in between lands unchecked commits (`landsWhatWasJudged`) |
+| `PER_COMMIT` | an approval survives later pushes (`landsWhatWasJudged`) |
+
+### What the harness does
+
+`tests/pr_refinement.rs` runs each scenario against the real plugin. Every client is a
+process of `extensions/pail-pr`, started through `tests/pr_refinement/run_pr.py` (which fixes
+`time.time`, so a comment's millisecond is the scenario's, and runs the plugin unchanged),
+with `PAIL_BIN` set to `shim.py`: it passes reads to the real `pail` and holds every `put`
+and `land` until released. So the interleavings happen at the plugin's real read/write
+boundary, and the plugin has no test hook.
+
+| Model | Real |
+|---|---|
+| action `begin(c, cmd)` | start the plugin with `cmd`'s arguments; wait until it is held at its first write, or exited |
+| action `release(c)` | let the held write through; wait likewise |
+| `Wait(w)` | the held call: its argv and the file it would store, read back as the model's write (`WSave.expect` is the record whose blob the call names) |
+| `Idle`, `res` | the process exited: status 0 `Acked`, else `Refused` |
+| action `push` | a commit in a working copy of the head branch |
+| action `ci(k)` | `put _meta checks/<commit>/test.json` |
+| action `view` | `pail pr view 1 --json`: the outdated comments, `ready` |
+| `prs`, `reviews`, `comments`, `checks` | the files on `_meta`, parsed; commits by hash |
+| `tip`, `landed` | the head branch's tip; the base's tip (a fast-forward land puts the head's commit there) |
+
+Scenarios: concurrent create, comments in one millisecond, a line comment with a reply and
+an outdating push, invalid anchors, edit vs merge (both orders), concurrent edits, an edit
+after a merge, close vs merge (both orders), a push before the land, a stale approval,
+reviews of a commit, draft and closed never merging with reopen, one merge at a time, and
+line comments once the commits are landed.
+
+### What it found
+
+The model of the protocol as the first plugin had it (blind `save()`, judge-land-record) fails
+`pr_sim.qnt` with the switches off, and the scenarios fail the first plugin at these
+interleavings:
+
+1. `editAfterMergeRun`: carol reads the open PR to edit it; bob merges it; carol writes her read
+   back, `state: open` over `merged`. Fix: `put --expect` on the blob read (new in `pail
+   put`); on exit 4 re-read and decide again, where an edit of a merged PR refuses.
+2. `concurrentEditsRun`: alice sets the title and bob the body from the same read; the second
+   write restores the first's field. Same fix.
+3. `closeAfterClaimRun` / `closeBeforeClaimRun`: a close racing the merge leaves a closed PR
+   whose commits landed, or a merged one that was closed. Fix: the merge claims the record
+   (`merging`, by CAS) before landing; edit, ready and close refuse a merging PR, and a claim
+   after a close judges the closed record again.
+4. `pushBeforeLandRun`: readiness judged commit 1, a push followed, `pail land` landed the
+   branch as it was by then. Fix: `pail land --stack --expect-tip <commit>` (new), on every
+   attempt; a refused land releases the claim.
+5. `staleApprovalRun`: an approval survived a push. Fix: a review records the commit it was
+   given on and counts only for that head.
+6. `landedRangeRun`: a line comment's default commit (the head) was not checked to be in the
+   PR's range, so a comment could anchor to commits already landed.
+
+The mutation check of the plugin itself is in the PR description: each of twenty reversions
+of a fix fails a scenario.
+
+### Not modelled
+
+Force pushes and rewrites of the head (an anchor's commit can leave the PR: such a comment
+is shown outdated, untested); a base that moves other than by the merge; several PRs per
+branch beyond id claiming; `--force`, `--takeover` (a merge that died after its claim);
+crashes between a claim and its land; reviews or checks withdrawn while a merge is between
+judging and claiming; policy files; pail-web (its server follows the same rules and is
+tested in `web/test`, not refined).
 
 ## Not modelled yet
 

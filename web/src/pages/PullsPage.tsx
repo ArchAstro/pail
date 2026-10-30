@@ -18,8 +18,10 @@ export default function PullsPage() {
   const prs = useGet<PrSummary[]>(repoApi(repo, "/prs"));
   if (prs.error) return <ErrorNote error={prs.error} retry={prs.reload} />;
   if (!prs.data) return <Loading />;
-  const count = (s: Filter) => (s === "all" ? prs.data!.length : prs.data!.filter((p) => p.state === s).length);
-  const list = prs.data.filter((p) => filter === "all" || p.state === filter);
+  // A PR being merged is still open for the list.
+  const in_ = (p: PrSummary, s: Filter) => s === "all" || p.state === s || (s === "open" && p.state === "merging");
+  const count = (s: Filter) => prs.data!.filter((p) => in_(p, s)).length;
+  const list = prs.data.filter((p) => in_(p, filter));
   return (
     <div>
       <header className="pagehead">
@@ -50,7 +52,7 @@ export default function PullsPage() {
                 </div>
               </div>
               <span className="rows__aside">
-                {p.state === "open" && <span className={p.changesRequested ? "del" : p.approvals ? "add" : "muted"} title="Approvals from reviewers other than the author">
+                {(p.state === "open" || p.state === "merging") && <span className={p.changesRequested ? "del" : p.approvals ? "add" : "muted"} title="Approvals from reviewers other than the author">
                   <Icon name={p.changesRequested ? "x" : "eye"} size={14} /> {p.changesRequested ? "changes requested" : `${p.approvals} approved`}
                 </span>}
               </span>

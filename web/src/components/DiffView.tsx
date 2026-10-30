@@ -1,10 +1,11 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { parsePatch, splitRows, type DiffLine, type FileDiff, type Hunk } from "../lib/diff";
 import { highlightLines, languageFor } from "../lib/highlight";
 import { blobPath } from "../lib/routes";
 import { Tabs } from "./Bits";
 import { Icon } from "./Icon";
+import { CommentForm, ThreadView, lineKey, useInline, type Thread } from "./Threads";
 
 type Mode = "unified" | "split";
 
@@ -54,6 +55,8 @@ const anchor = (p: string) => "diff-" + p.replace(/[^\w]+/g, "-");
 const FileBlock = memo(function FileBlock({ file, mode, repo, blobRef, startOpen }: { file: FileDiff; mode: Mode; repo: string; blobRef?: string; startOpen: boolean }) {
   const [open, setOpen] = useState(startOpen);
   const body = `body-${anchor(file.path)}`;
+  const inline = useInline();
+  const { byLine, elsewhere } = useMemo(() => placeThreads(file, inline?.threads ?? []), [file, inline?.threads]);
   return (
     <article className="file" id={anchor(file.path)}>
       <header className="file__head">
@@ -66,9 +69,15 @@ const FileBlock = memo(function FileBlock({ file, mode, repo, blobRef, startOpen
         {file.status === "renamed" && <span className="muted"> from {file.oldPath}</span>}
         <span className="file__stat"><span className="add">+{file.adds}</span> <span className="del">−{file.dels}</span></span>
       </header>
+      {inline && elsewhere.length > 0 && (
+        <details className="file__elsewhere">
+          <summary>{elsewhere.length} comment {elsewhere.length === 1 ? "thread" : "threads"} not shown on a line{elsewhere.some((t) => t.root.outdated) ? " (some outdated)" : ""}</summary>
+          {elsewhere.map((t) => <ThreadView key={t.id} t={t} ctx={inline} where={`${t.root.side === "old" ? "before" : "after"}, line ${t.root.line}`} />)}
+        </details>
+      )}
       {open && (
         <div id={body} className="file__body">
-          {file.binary ? <p className="muted pad">Binary file not shown.</p> : file.hunks.length === 0 ? <p className="muted pad">No textual changes{file.status === "added" ? " (empty file)" : ""}.</p> : file.hunks.map((h, i) => <HunkView key={i} hunk={h} path={file.path} mode={mode} />)}
+          {file.binary ? <p className="muted pad">Binary file not shown.</p> : file.hunks.length === 0 ? <p className="muted pad">No textual changes{file.status === "added" ? " (empty file)" : ""}.</p> : file.hunks.map((h, i) => <HunkView key={i} hunk={h} path={file.path} mode={mode} byLine={byLine} />)}
         </div>
       )}
       {!open && <button className="file__more" onClick={() => setOpen(true)}>Show {file.adds + file.dels} changed lines</button>}
@@ -99,8 +108,60 @@ function Code({ html, text }: { html?: string; text: string }) {
   return html !== undefined ? <span className="code" dangerouslySetInnerHTML={{ __html: html || " " }} /> : <span className="code">{text || " "}</span>;
 }
 
-function HunkView({ hunk, path, mode }: { hunk: Hunk; path: string; mode: Mode }) {
+/**
+ * The pull request's threads on this file: those on a line the diff shows (keyed by side and
+ * line) and the rest, which are outdated or on a line outside the hunks.
+ */
+function placeThreads(file: FileDiff, threads: Thread[]) {
+  const byLine = new Map<string, Thread[]>();
+  const elsewhere: Thread[] = [];
+  const shown = new Set<string>();
+  for (const h of file.hunks) for (const l of h.lines) {
+    if (l.kind !== "add" && l.old !== undefined) shown.add(lineKey("old", l.old));
+    if (l.kind !== "del" && l.new !== undefined) shown.add(lineKey("new", l.new));
+  }
+  for (const t of threads) {
+    if (t.root.path !== file.path || !t.root.side || !t.root.line) continue;
+    const k = lineKey(t.root.side, t.root.line);
+    if (t.root.outdated || !shown.has(k)) elsewhere.push(t);
+    else byLine.set(k, [...(byLine.get(k) ?? []), t]);
+  }
+  return { byLine, elsewhere };
+}
+
+/** The "+" that opens a comment form on a line, and what shows under it: threads, the form. */
+function useLineComments(path: string, byLine: Map<string, Thread[]>) {
+  const inline = useInline();
+  const [composing, setComposing] = useState<string | null>(null);
+  const canAdd = Boolean(inline?.actions && inline.anchorable && inline.commit);
+  const add = (side: "new" | "old", line?: number) =>
+    canAdd && line !== undefined ? (
+      <button className="row__add" aria-label={`Comment on ${side === "old" ? "removed " : ""}line ${line}`} onClick={() => setComposing(lineKey(side, line))}>+</button>
+    ) : null;
+  const under = (keys: string[]) => {
+    if (!inline) return null;
+    const threads = keys.flatMap((k) => byLine.get(k) ?? []);
+    const forms = keys.filter((k) => k === composing);
+    if (!threads.length && !forms.length) return null;
+    return (
+      <div className="inline">
+        {threads.map((t) => <ThreadView key={t.id} t={t} ctx={inline} />)}
+        {forms.map((k) => {
+          const [side, line] = k.split(":") as ["new" | "old", string];
+          return (
+            <CommentForm key={k} label="Comment" placeholder={`Comment on line ${line} (Markdown)`} autoFocus onCancel={() => setComposing(null)}
+              submit={async (body) => { await inline.post({ body, path, line: Number(line), side, commit: inline.commit! }); setComposing(null); }} />
+          );
+        })}
+      </div>
+    );
+  };
+  return { add, under };
+}
+
+function HunkView({ hunk, path, mode, byLine }: { hunk: Hunk; path: string; mode: Mode; byLine: Map<string, Thread[]> }) {
   const hl = useHunkHighlight(hunk, path);
+  const { add, under } = useLineComments(path, byLine);
   const index = useMemo(() => new Map(hunk.lines.map((l, i) => [l, i])), [hunk]);
   const at = (l?: DiffLine) => (l && hl ? hl[index.get(l)!] : undefined);
   const header = /@@[^@]*@@(.*)$/.exec(hunk.header)?.[1]?.trim();
@@ -110,10 +171,13 @@ function HunkView({ hunk, path, mode }: { hunk: Hunk; path: string; mode: Mode }
       <div className="hunk hunk--split">
         <div className="hunk__head">{hunk.header.split("@@")[1] ? `@@${hunk.header.split("@@")[1]}@@` : ""} {header}</div>
         {rows.map((r, i) => (
-          <div className="row row--split" key={i}>
-            <Side line={r.left} html={at(r.left)} num={r.left?.old} />
-            <Side line={r.right} html={at(r.right)} num={r.right?.new} />
-          </div>
+          <Fragment key={i}>
+            <div className="row row--split">
+              <Side line={r.left} html={at(r.left)} num={r.left?.old} add={add("old", r.left?.old)} />
+              <Side line={r.right} html={at(r.right)} num={r.right?.new} add={add("new", r.right?.new)} />
+            </div>
+            {under([...(r.left?.old !== undefined ? [lineKey("old", r.left.old)] : []), ...(r.right?.new !== undefined ? [lineKey("new", r.right.new)] : [])])}
+          </Fragment>
         ))}
       </div>
     );
@@ -122,21 +186,26 @@ function HunkView({ hunk, path, mode }: { hunk: Hunk; path: string; mode: Mode }
     <div className="hunk">
       <div className="hunk__head">{hunk.header.split("@@")[1] ? `@@${hunk.header.split("@@")[1]}@@` : ""} {header}</div>
       {hunk.lines.map((l, i) => (
-        <div className={`row row--${l.kind}`} key={i}>
-          <span className="ln" aria-hidden="true">{l.old ?? ""}</span>
-          <span className="ln" aria-hidden="true">{l.new ?? ""}</span>
-          <span className="sign" aria-label={l.kind === "add" ? "added" : l.kind === "del" ? "removed" : undefined}>{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span>
-          <Code html={at(l)} text={l.text} />
-        </div>
+        <Fragment key={i}>
+          <div className={`row row--${l.kind}`}>
+            {l.kind === "del" ? add("old", l.old) : add("new", l.new)}
+            <span className="ln" aria-hidden="true">{l.old ?? ""}</span>
+            <span className="ln" aria-hidden="true">{l.new ?? ""}</span>
+            <span className="sign" aria-label={l.kind === "add" ? "added" : l.kind === "del" ? "removed" : undefined}>{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span>
+            <Code html={at(l)} text={l.text} />
+          </div>
+          {under([...(l.kind !== "add" && l.old !== undefined ? [lineKey("old", l.old)] : []), ...(l.kind !== "del" && l.new !== undefined ? [lineKey("new", l.new)] : [])])}
+        </Fragment>
       ))}
     </div>
   );
 }
 
-function Side({ line, html, num }: { line?: DiffLine; html?: string; num?: number }) {
+function Side({ line, html, num, add }: { line?: DiffLine; html?: string; num?: number; add?: ReactNode }) {
   if (!line) return <div className="side side--empty"><span className="ln" /><span className="code" /></div>;
   return (
     <div className={`side side--${line.kind}`}>
+      {add}
       <span className="ln" aria-hidden="true">{num}</span>
       <Code html={html} text={line.text} />
     </div>

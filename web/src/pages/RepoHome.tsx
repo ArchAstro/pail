@@ -21,7 +21,7 @@ export default function RepoHome() {
   const readme = useGet<{ path: string; text: string } | null>(repoApi(repo, `/readme${q({ ref })}`));
   const log = useGet<LogPage>(repoApi(repo, `/log${q({ ref, limit: 8 })}`));
   const prs = useGet<PrSummary[]>(repoApi(repo, "/prs"));
-  const open = prs.data?.filter((p) => p.state === "open") ?? [];
+  const open = prs.data?.filter((p) => p.state === "open" || p.state === "merging") ?? [];
   const others = overview.branches.filter((b) => !b.isDefault).slice(0, 5);
 
   return (

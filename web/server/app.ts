@@ -143,7 +143,8 @@ export function createApp(cfg: Config, registry = new Registry(cfg)) {
 
   app.post("/api/repos/:repo/prs/:n/comments", wrap(async (req, res) => {
     const r = await repoOf(req);
-    res.status(201).json({ ok: true, comment: await r.comment(int(req.params.n, -1), req.body?.body) });
+    const b = req.body ?? {};
+    res.status(201).json({ ok: true, comment: await r.comment(int(req.params.n, -1), { body: b.body, path: b.path, line: b.line, side: b.side, commit: b.commit, in_reply_to: b.in_reply_to }) });
   }));
 
   app.post("/api/repos/:repo/prs/:n/close", wrap(async (req, res) => {
@@ -167,13 +168,13 @@ export function createApp(cfg: Config, registry = new Registry(cfg)) {
   app.post("/api/repos/:repo/prs/:n/review", wrap(async (req, res) => {
     const r = await repoOf(req);
     const verdict = req.body?.verdict === "changes" ? "changes" : "approve";
-    await r.review(int(req.params.n, -1), verdict, str(req.body?.comment));
+    await r.review(int(req.params.n, -1), verdict, str(req.body?.comment), req.body?.commit);
     res.json({ ok: true });
   }));
 
   app.post("/api/repos/:repo/prs/:n/merge", wrap(async (req, res) => {
     const r = await repoOf(req);
-    res.json({ ok: true, output: await r.merge(int(req.params.n, -1), req.body?.force === true) });
+    res.json({ ok: true, output: await r.merge(int(req.params.n, -1), req.body?.force === true, req.body?.takeover === true) });
   }));
 
   app.get("/api/repos/:repo/checks", wrap(async (req, res) => {

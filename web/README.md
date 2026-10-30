@@ -88,7 +88,7 @@ to localhost or put it behind your own proxy (`PAIL_WEB_HOST=0.0.0.0` exposes it
 | compare, PR diff | `log --name-only base..head`, then the blobs on both sides, diffed in Node |
 | policy, CI | `<base>:pail.pr.json`, `<commit>:pail.ci.json` |
 | live updates | `events` → Server-Sent Events |
-| actions | `put _meta --file prs/<n>.json=- [--if-absent]` (open, edit, close, reopen, draft), `…/comments/<ms>-<who>.json=- --if-absent`, `…/reviews/<who>.json=-`, `land <head> --stack --onto <base>` |
+| actions | `put _meta --file prs/<n>.json=- [--if-absent \| --expect prs/<n>.json=<blob id>]` (open; edit, close, reopen, draft and the merge claim are `--expect`), `…/comments/<ms>-<who>.json=- --if-absent` (line comments and replies carry `path`/`line`/`side`/`commit`, `in_reply_to`), `…/reviews/<who>.json=-` (with the `commit` reviewed), `land <head> --stack --onto <base> --expect-tip <commit>` |
 
 Two small CLI additions made this possible without parsing human text: `pail log --json` (pail ids and
 commit `meta`: `pail.maintenance`, `rewritten.from`, `landed.from`) and `pail branch --json`.
@@ -115,6 +115,10 @@ fetched twice, even across restarts. This matters on large repositories: see Per
 - **Pull requests** (`_meta:prs/<n>.json`): open, merged, closed filters and a draft state; description,
   reviews, comments, checks, commits, diff against the base, and the merge policy from
   `<base>:pail.pr.json` with what is missing. Everything the `pail pr` plugin writes shows here, live.
+  Comments thread: reply to any comment, and comment on a line of the **Changes** tab (**+** on the line;
+  old side for removed lines). A thread whose line changed in a later push is marked **Outdated** and moves
+  to a group under its file. An approval counts for the commit it was given on; a push makes it stale
+  ("approved an older commit") until it is given again. A PR being merged shows as `merging`.
 - **CI**: results per commit (`_meta:checks/<commit>/<check>.json`) with the log tail, declared checks
   (`pail.ci.json`), required versus optional, and status badges on commits, branches and PRs.
 - **Actions** (opt-in, `"actions": true`): on a branch, **Compare & open pull request** leads to a compare
@@ -122,13 +126,20 @@ fetched twice, even across restarts. This matters on large repositories: see Per
   comment, approve or request changes, edit the title and description, mark ready or back to draft, close
   and reopen, and merge with `pail land --stack`. Each is one `pail put` of the same record
   [`pail pr`](../docs/extending.md) writes (ids claimed with `--if-absent`, retried on a clash), so a PR
-  opened in the terminal is live here and the other way around.
+  opened in the terminal is live here and the other way around. Changes to a PR record are compare-and-swap
+  (`put --expect <blob id>`: read, decide, write only if unchanged, else read and decide again), so two
+  people editing never overwrite each other. A merge first claims the PR (state `merging`, which edit, close,
+  ready and reopen refuse), lands exactly the commit it judged (`land --expect-tip`), then records the
+  merge; if the head moved or the land fails the claim is released and nothing lands. `takeover` in the
+  merge request (or `pail pr merge --takeover`) finishes a merge whose server died mid-way.
 - **Keyboard**: `t` find a file, `/` search files, branches and PRs, `g c|b|p|k|h` go to commits, branches,
   pull requests, checks, home; `?` lists them. Light and dark themes (follows the system, toggle in the bar).
 
 ![Commit diff](docs/screenshots/commit-diff.png)
 
-Opening a pull request (with actions on), and a draft with a comment:
+A line comment with a reply, on the Changes tab; opening a pull request (with actions on), and a draft with a comment:
+
+![Inline comment thread](docs/screenshots/pull-request-changes.png)
 
 ![Compare and open a pull request](docs/screenshots/compare.png)
 ![A draft pull request](docs/screenshots/pull-request-draft.png)

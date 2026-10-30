@@ -179,13 +179,21 @@ const prs = [
 ];
 for (const pr of prs) meta(`prs/${pr.id}.json`, pr, `Open PR ${pr.id}: ${pr.title}`, { ifAbsent: true });
 
-const comment = (n, who, body, h) => meta(`prs/${n}/comments/${String((at(h)) * 1000).padStart(13, "0")}-${who}.json`, { who, body, at: at(h) }, `Comment on PR ${n}`, { ifAbsent: true });
+// A comment may carry an anchor (path, line, side, commit) or `in_reply_to`; returns its id.
+const comment = (n, who, body, h, extra = {}) => {
+  const id = `${String(at(h) * 1000).padStart(13, "0")}-${who}`;
+  meta(`prs/${n}/comments/${id}.json`, { who, body, at: at(h), ...extra }, `Comment on PR ${n}`, { ifAbsent: true });
+  return id;
+};
 comment(2, "bo", "Nice and small. Is `ttl / 3` a hard rule, or just what we call it in the docs?", 14);
 comment(2, "chen", "Just the docs for now. I will enforce it in the claim loop next, as a separate PR so this one stays reviewable.", 13);
-meta("prs/2/reviews/ada.json", { verdict: "approve", comment: "Looks right. Please wire it into the claim loop next.", at: at(12) }, "Review PR 2: approve");
-meta("prs/2/reviews/bo.json", { verdict: "changes", comment: "The heartbeat interval is documented but not enforced anywhere.", at: at(18) }, "Review PR 2: changes");
-meta("prs/3/reviews/ada.json", { verdict: "approve", comment: "", at: at(5) }, "Review PR 3: approve");
-meta("prs/1/reviews/ada.json", { verdict: "approve", comment: "Squash it.", at: at(390) }, "Review PR 1: approve");
+// A line comment on the new side of the head, with a reply in its thread.
+const anchor = comment(2, "bo", "Should this saturate? A very large `ttl` would overflow `Instant`.", 11, { path: "src/lease.rs", line: 15, side: "new", commit: heads.lease });
+comment(2, "chen", "Good catch. `Instant::checked_add` and fall back to the old expiry; I will add it with the claim-loop PR.", 10, { in_reply_to: anchor, path: "src/lease.rs", line: 15, side: "new", commit: heads.lease });
+meta("prs/2/reviews/ada.json", { verdict: "approve", comment: "Looks right. Please wire it into the claim loop next.", at: at(12), who: "ada", commit: heads.lease }, "Review PR 2: approve");
+meta("prs/2/reviews/bo.json", { verdict: "changes", comment: "The heartbeat interval is documented but not enforced anywhere.", at: at(18), who: "bo", commit: heads.lease }, "Review PR 2: changes");
+meta("prs/3/reviews/ada.json", { verdict: "approve", comment: "", at: at(5), who: "ada", commit: heads.docs }, "Review PR 3: approve");
+meta("prs/1/reviews/ada.json", { verdict: "approve", comment: "Squash it.", at: at(390), who: "ada", commit: retryLanded }, "Review PR 1: approve");
 
 const check = (commit, name, state, extra) => meta(`checks/${commit}/${name}.json`, { state, branch: "ci", runner: "ci-1", at: at(1), ...extra }, `ci: ${name} ${state} on ${commit.slice(0, 12)}`);
 const buildLog = "   Compiling tidepool v0.1.0\n    Finished dev [unoptimized + debuginfo] target(s) in 3.41s\n";
