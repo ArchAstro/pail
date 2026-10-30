@@ -50,20 +50,25 @@ module rewrite {
     ok: bool,
     tip: CommitId,
     tree: Tree,
+    locs: str -> PackId,
     ancestors: Set[CommitId],
     successors: CommitId -> CommitId,
     dropped: Set[CommitId],
     made: Set[Carried],
   }
 
-  /// A commit carried onto the new history, known before it is stored.
-  type Carried = { id: CommitId, tree: Tree, ancestors: Set[CommitId] }
+  /// A commit carried onto the new history, known before it is stored. Its page puts each
+  /// big file where the original's did for the paths it changes (the entries of a change
+  /// list carry their locations), and where the new parent's did for the rest: a copy
+  /// stores no pack.
+  type Carried = { id: CommitId, tree: Tree, ancestors: Set[CommitId], locs: str -> PackId }
 
   /// The plan so far on `base`, with `dropped` dropped.
   pure def builtOn(b: Bucket, base: CommitId, dropped: Set[CommitId]): Built = {
     ok: true,
     tip: base,
     tree: treeOf(b, base),
+    locs: body(b.commits, base).locs,
     ancestors: ancestorsOf(b, base),
     successors: Map(),
     dropped: dropped,
@@ -76,49 +81,70 @@ module rewrite {
   pure def pick(b: Bucket, c: str, x: CommitId, rewords: bool, a: Built): Built =
     if (not(a.ok)) a
     else if (not(rewords) and parentOf(b, x) == a.tip)
-      { ...a, tip: x, tree: treeOf(b, x), ancestors: ancestorsOf(b, x) }
+      { ...a, tip: x, tree: treeOf(b, x), locs: body(b.commits, x).locs, ancestors: ancestorsOf(b, x) }
     else Set(parentOf(b, x)).fold(a, (n0, p) =>
       Set(deltaOf(b, x, p)).fold(a, (n1, d) =>
         if (conflicts(d, treeOf(b, p), a.tree)) { ...a, ok: false }
         else if (overlay(a.tree, d) == a.tree) { ...a, dropped: a.dropped.union(Set(x)) }
-        else Set(remade(c, x, a.tip)).fold(a, (n2, id) => {
-          ...a,
-          tip: id,
-          tree: overlay(a.tree, d),
-          ancestors: a.ancestors.union(Set(a.tip)),
-          successors: a.successors.put(x, id),
-          made: a.made.union(Set({ id: id, tree: overlay(a.tree, d), ancestors: a.ancestors.union(Set(a.tip)) })),
-        })
+        else Set(remade(c, x, a.tip)).fold(a, (n2, id) =>
+          Set(copyLocs(b, overlay(a.tree, d), d, x, a.locs)).fold(a, (n3, locs) => {
+            ...a,
+            tip: id,
+            tree: overlay(a.tree, d),
+            locs: locs,
+            ancestors: a.ancestors.union(Set(a.tip)),
+            successors: a.successors.put(x, id),
+            made: a.made.union(Set({ id: id, tree: overlay(a.tree, d), ancestors: a.ancestors.union(Set(a.tip)), locs: locs })),
+          })
+        )
       )
     )
 
   /// The group so far with `x`'s change from its parent added, if it applies over the tree
   /// so far with the group's changes before it (`Repo::check_applies` with an overlay).
-  pure def meldStep(b: Bucket, tree: Tree, x: CommitId, g: { ok: bool, d: Delta }): { ok: bool, d: Delta } =
+  type Group = { ok: bool, d: Delta, src: str -> CommitId }
+
+  /// `src` names, for each path of the group's change, the member whose change wrote it
+  /// last (the later member's entry replaces the earlier one's, location and all).
+  pure def meldStep(b: Bucket, tree: Tree, x: CommitId, g: Group): Group =
     Set(parentOf(b, x)).fold(g, (n0, p) =>
       Set(deltaOf(b, x, p)).fold(g, (n1, d) =>
         if (not(g.ok) or conflicts(d, treeOf(b, p), overlay(tree, g.d))) { ...g, ok: false }
-        else { ...g, d: d.keys().fold(g.d, (m, q) => m.put(q, d.get(q))) }
+        else {
+          ...g,
+          d: d.keys().fold(g.d, (m, q) => m.put(q, d.get(q))),
+          src: d.keys().fold(g.src, (m, q) => m.put(q, x)),
+        }
       )
+    )
+
+  /// Where a group's commit puts the big files of `tree`: each path the group writes where
+  /// the member that wrote it last had it, the rest where the new parent does.
+  pure def groupLocs(b: Bucket, tree: Tree, g: Group, inherited: str -> PackId): str -> PackId =
+    PATHS.filter(p => isBig(tree.get(p))).mapBy(p =>
+      if (g.d.keys().contains(p)) locOf(b, g.src.get(p), p) else inherited.get(p)
     )
 
   /// Meld `member` into `lead` onto the plan so far (a squash or fixup group): each one's
   /// change, lead first, must apply; the group is one new commit, both one's successor, or
   /// dropped whole if together they change nothing.
   pure def meld(b: Bucket, c: str, lead: CommitId, member: CommitId, a: Built): Built = {
-    val g = meldStep(b, a.tree, member, meldStep(b, a.tree, lead, { ok: true, d: Map() }))
+    val g = meldStep(b, a.tree, member, meldStep(b, a.tree, lead, { ok: true, d: Map(), src: Map() }))
     val group = Set(lead, member)
     if (not(a.ok)) a
     else if (not(g.ok)) { ...a, ok: false }
     else if (overlay(a.tree, g.d) == a.tree) { ...a, dropped: a.dropped.union(group) }
-    else Set(meldedId(c, lead, member, a.tip)).fold(a, (n, id) => {
-      ...a,
-      tip: id,
-      tree: overlay(a.tree, g.d),
-      ancestors: a.ancestors.union(Set(a.tip)),
-      successors: group.fold(a.successors, (m, x) => m.put(x, id)),
-      made: a.made.union(Set({ id: id, tree: overlay(a.tree, g.d), ancestors: a.ancestors.union(Set(a.tip)) })),
-    })
+    else Set(meldedId(c, lead, member, a.tip)).fold(a, (n, id) =>
+      Set(groupLocs(b, overlay(a.tree, g.d), g, a.locs)).fold(a, (n2, locs) => {
+        ...a,
+        tip: id,
+        tree: overlay(a.tree, g.d),
+        locs: locs,
+        ancestors: a.ancestors.union(Set(a.tip)),
+        successors: group.fold(a.successors, (m, x) => m.put(x, id)),
+        made: a.made.union(Set({ id: id, tree: overlay(a.tree, g.d), ancestors: a.ancestors.union(Set(a.tip)), locs: locs })),
+      })
+    )
   }
 
   /// `plan` carried out by `c` on the history at `t` (its tip `t`, parent `p`, grandparent
@@ -231,6 +257,7 @@ module rewrite {
   type Carrying = {
     tip: CommitId,
     tree: Tree,
+    locs: str -> PackId,
     ancestors: Set[CommitId],
     successors: CommitId -> CommitId,
     made: Set[Carried],
@@ -245,14 +272,17 @@ module rewrite {
         Set(deltaOf(b, x, p)).fold(acc, (n1, d) =>
           if (not(acc.ok)) acc
           else if (conflicts(d, treeOf(b, p), acc.tree)) { ...acc, ok: false }
-          else Set(remade(c, x, acc.tip)).fold(acc, (n2, id) => {
-            tip: id,
-            tree: overlay(acc.tree, d),
-            ancestors: acc.ancestors.union(Set(acc.tip)),
-            successors: acc.successors.put(x, id),
-            made: acc.made.union(Set({ id: id, tree: overlay(acc.tree, d), ancestors: acc.ancestors.union(Set(acc.tip)) })),
-            ok: true,
-          })
+          else Set(remade(c, x, acc.tip)).fold(acc, (n2, id) =>
+            Set(copyLocs(b, overlay(acc.tree, d), d, x, acc.locs)).fold(acc, (n3, locs) => {
+              tip: id,
+              tree: overlay(acc.tree, d),
+              locs: locs,
+              ancestors: acc.ancestors.union(Set(acc.tip)),
+              successors: acc.successors.put(x, id),
+              made: acc.made.union(Set({ id: id, tree: overlay(acc.tree, d), ancestors: acc.ancestors.union(Set(acc.tip)), locs: locs })),
+              ok: true,
+            })
+          )
         )
       )
     )
@@ -265,6 +295,7 @@ module rewrite {
     val start = {
       tip: rw.new,
       tree: treeOf(b, rw.new),
+      locs: body(b.commits, rw.new).locs,
       ancestors: ancestorsOf(b, rw.new),
       successors: rw.successors,
       made: Set(),

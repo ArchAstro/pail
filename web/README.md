@@ -27,7 +27,13 @@ PAIL_WEB_REPOS="app=gs://acme-vcs/app,infra=s3://acme-vcs/infra" npm start
 npm run dev         # API with reload, plus Vite with hot reload on :5173
 ```
 
-Docker: `docker build -t pail-web -f web/Dockerfile web`.
+Docker (from the repository root; the image builds pail from this checkout, so the CLI matches the UI):
+
+```sh
+docker build -t pail-web -f web/Dockerfile .
+docker run -p 4747:4747 -e PAIL_WEB_REPOS="app=gs://bucket/app" \
+  -v ~/.config/gcloud:/home/node/.config/gcloud:ro pail-web     # GCS credentials; use AWS_* env for S3
+```
 
 ## Configuration
 
@@ -57,7 +63,7 @@ environment overrides. Defaults < file < environment < flags (`--config`, `--sto
 | `discover[].store` | a bucket prefix or directory: each child that is a pail repository is listed (needs `gcloud` or `aws` on `PATH` for `gs://` and `s3://`; `file://` needs nothing) |
 | `actions` | `true` enables the write side: open, edit, comment on, review, close, reopen and merge pull requests (off by default; the UI is read-only) |
 | `author` | identity for actions, `Name <email>` (else `PAIL_AUTHOR`) |
-| `pail` | the binary (default `pail`; also `PAIL_BIN`) |
+| `pail` | the binary (default: `pail` on `PATH`, else this checkout's `target/release/pail`; also `PAIL_BIN`). The server exits at startup if it cannot run it |
 | `cacheDir`, `localCache` | where bare clones live and whether to use them (see Caching) |
 | `cacheMb`, `pollMs` | in-memory cache size (128) and `pail events` poll interval (2000) |
 

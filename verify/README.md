@@ -23,7 +23,7 @@ world.qnt     the shared state: bucket, writers, the collector, ghosts
 publish.qnt   Repo::commit steps (lease, read, upload, swap, recheck; crash, expiry)
 combine.qnt   commit_combining steps (intent, poll, gather + store the batch, swap, cleanup)
 rewrite.qnt   rewrite_ref steps for rebase, undo, reset (read, lease, store, read + carry + record, swap, recheck)
-land.qnt      land_stack steps (make the stack; lease, read + fork point + copy, swap, recheck)
+land.qnt      land_stack steps (make the stack: branch, commit; lease, read + fork point + copy, swap, recheck)
 gc.qnt        gc steps (exclusive lease, drain, mark, list, check, delete commits, pages, packs, chunks, release)
 clock.qnt     time: the tick, the refreshers that keep leases alive
    ▲
@@ -118,7 +118,8 @@ CI runs all of it (`npm run check` in place of `compile`, failing on stale gener
    back.
 9. `locatedOnBranch`, `locateKeepsChanges`: see the successor walks section.
 10. `knownHeadsAreTrue`: see the known heads section.
-11. `packsAreStored`, `relocateKeepsContent`, `gcSparesNamedPacks`: see the packs section.
+11. `packsAreStored`, `relocateKeepsContent`, `gcSparesNamedPacks`, `packsAreWritersOwn`: see the
+    packs section.
 12. `chunksAreStored`, `chunkedFilesReadBack`, `gcSparesNamedChunks`: see the chunks section.
 
 `npm run simulate` checks them over random interleavings of four clients and gc,
@@ -208,7 +209,9 @@ scenarios through a generated adapter, so none keeps a hand-written copy of the 
 | action `beginRewrite(c)` / `beginRebase(c, plan)` | `c`'s `GET refs/main`; it then runs `rebase::build` on the plan unleased (as `pail rebase` builds), reporting what it built |
 | action `beginUndo(c)` | `c`'s `GET refs/main` (then the record its lineage names, not held); `RewriteRequest::undo` |
 | action `beginReset(c)` | `force_ref`'s `GET refs/main`, to the tip's parent |
-| action `stack(c, delta)` | `c`'s stack, made whole past every gate: `write_commit` on the branch's tip, `create_branch c` (each under a lease) |
+| action `beginBranch(c)` | `create_branch(c, tip)` spawned: it leases first, and checks its lease when the lease listing returns |
+| action `createBranch(c, d)` | the `PUT refs/c` that check let go (`d` as for a swap); a stale lease never reaches it |
+| action `stack(c, delta)` | `c`'s commit on its branch, past every gate: `commit_opts` with `branch = c` (a branch only it writes) |
 | action `beginLand(c)` | `land_stack(c, main)` spawned; it leases first |
 | action `ldRead(c)` | its `GET refs/main` (the stack's ref and records are read past the gate), then the copy's upload |
 | action `ldSwap(c, d)` / `ldRecheck(c)` | its conditional `PUT refs/main`; the ref read after one it did not win |
@@ -428,8 +431,15 @@ lineage; after a swap it did not win, recheck (`landed_since`) or try again.
   `landTwiceRun` (landing again finds the copy).
 - Five mutants each fail a scenario: the recheck comparing tips, the fork point ignoring
   rewrites, no conflict check, no fast-forward, copies ignored.
-- Simplifications: a stack is one commit, made whole (its own lease and requests are not
-  steps), and is not moved after; a client lands at most its own stack; `land --stack`'s
+- Branch creation: `staleBranchCreateRefusesRun` (the lease put at tick 0 is listed at tick 4:
+  `Lease::check` refuses, nothing is written, the lease goes), `branchCreateAtTheEdgeRun`,
+  `createBranchLostReplyRun`.
+- A stack is made as `pail switch -c` and `pail commit` make it: `create_branch` at the branch's
+  tip (its own lease, checked before the ref write: `beginBranch`, `lease`, `checkLeases`,
+  `createBranch`), then one commit on it (`stack`).
+- Simplifications: a stack is one commit, whose commit step is taken whole (its own lease and
+  requests are not steps; no one else writes the branch), and is not moved after; a client
+  lands at most its own stack; `land --stack`'s
   CLI (pre-publish hook, reporting) is not modelled.
 
 ## Successor walks (`locate.qnt`)
@@ -540,14 +550,29 @@ path with the content it has, and the new page names a new pack.
   placing every file in its own pack, the real `commit_opts` not storing the writer's
   uploads, and not checking that the paths a replayed delta writes are disjoint
   (`check_disjoint`).
-- Simplifications: packs are modelled in every protocol the same way (a combined intent, a
-  rewrite's copy and a landed stack get a pack of their own named by the new commit, where
-  the real code points the copy at the original's pack), but refined against the real code
-  only in direct commits and gc; `simulate` samples the rest. A pack's name is its
-  writer's, not its content hash (the harness adds a decoy blob so two writers' packs of
-  one content differ). Content already stored (`reuse`) is modelled for direct commits
-  only (below). A repack's retry (recompute from the new tip) is a new
-  `commit` call, played by another client in the model.
+- Copies and combined commits (refined): a rewrite's copy (a reword, a plan's pick or
+  squash group, a commit carried past a rewrite) and a landed stack's copy are written
+  from the original's change list, whose entries carry their locations. So the copy's page
+  puts each path the change writes where the original's page has it, the rest where the new
+  parent's does, and the copy stores no pack and no chunk (`storedCopy`, `copyLocs`). A group
+  takes each path from the member that wrote it last (`groupLocs`). A path only relocated
+  (same content, another pack) is no change, so a copy drops the relocation. A combined
+  intent's commit points at the pack its writer uploaded with its first attempt
+  (`packOf` maps `alice+` to `alice`), as the real combiner does. `packsAreWritersOwn`: every
+  pack in the bucket is a client's own.
+- Scenarios: `rebaseReorderKeepsPacksRun` (and gc keeps both packs), `rebaseSquashKeepsPacksRun`,
+  `rebaseSquashLaterPackWinsRun`, `carryKeepsPacksRun`, `landCopyKeepsPacksRun`.
+- Mutants of the model, each killed in Quint by an assertion (`carryKeepsPacksRun`,
+  `landCopyKeepsPacksRun`): the previous model, a copy given a pack of its own (a land copy
+  by `uploaded`, a carried commit in a pack named by itself). It was wrong against the real
+  code, which the refinement scenarios now check.
+- Simplifications: a pack's name is its writer's, not its content hash (the harness reads it off a
+  decoy blob it adds, so two writers' packs of one content differ). Content already stored
+  (`reuse`) is modelled for direct and combined commits (below). A repack's retry (recompute from
+  the new tip) is a new `commit` call, played by another client in the model. A stack's
+  files are not reused from its base. A combining round re-creates the writer's pack in the
+  model (a no-op where it is stored, as in the real code; the real one never needs it, since
+  intents older than `INTENT_MAX_AGE` are ignored and gc's grace is far longer).
 
 ## Chunks (`bucket.qnt`, `gc.qnt`)
 
@@ -615,15 +640,18 @@ deletes the unmarked, old ones, in the same loop as every other prefix (`GcSweep
 hash (`reuse`): a staged file whose content the base has at another path (a move, a copy, a
 revert) is not stored again, and its entry gets that path's location, a pack range or a
 chunk list. Nothing else reuses: `write_files` (the repack, `pail-mirror`) passes an empty
-map, and a rewrite's copy of a commit keeps the original's locations as a matter of course.
+map, and a rewrite's copy of a commit keeps the original's locations as a matter of course
+(see packs). A combining writer's intent carries its delta's entries, locations included,
+so a reused file keeps its reused location through combining.
 
 - Model: a client that begins on a base the branch (or a record) reaches fixes `Client.reuse`
   before any lease (`reuseOf`): each big or huge path its delta changes to content another
   path of the base holds, to the pack the base's page names for that path (a huge file's
   chunks are named by content, so the value is only a marker). Its upload then stores no
   pack for that path, no chunks for it, and its page names the base's pack. A relocation (a
-  path written to the content it has) never reuses. Combining, rewrites and landing give
-  their commits packs of their own and store their chunks, as before.
+  path written to the content it has) never reuses. `Intent.reuse` is the client's: a round's
+  commit for the intent names the reused pack for those paths and its writer's pack for the
+  rest (`Entry.reuse`). Rewrites and landing copy the original's entries (packs section).
 - Why only a reachable base: a working copy's base is what it read from the branch, which
   gc marks (the ref's history, and every record's tips), so its packs and chunks stay. A
   stored but unreachable base (a writer's abandoned commit) could in principle be young while
@@ -635,10 +663,52 @@ map, and a rewrite's copy of a commit keeps the original's locations as a matter
   `reuseNamesTheBasePackRun` (a copy of a big file names the base's pack and stores none),
   `reuseSurvivesAReplayRun` (the writer's replay on a newer head keeps the base's pack for
   the path it reused and the head's for the rest).
+  `reuseThroughCombiningRun` (alice's copy of a big file loses twice and combines: her round's
+  commit names carol's pack, and she stored none).
 - Refined against the real `commit_opts` with the real `Repo::prepare_files(inputs, reuse)`,
-  the harness building `reuse` as the worktree does.
-- Simplifications: reuse is of a path other than the one written; rewrites, combined intents
-  and landed stacks are not given reuse (their commits' packs are the model's, above).
+  the harness building `reuse` as the worktree does, in direct and combined commits.
+- Mutant of the model, killed in Quint by `reuseThroughCombiningRun`: the intent not carrying the
+  client's reuse (the round's commit in the writer's pack, which it never stored).
+- Simplifications: reuse is of a path other than the one written; only commits a working copy
+  makes reuse (a stack's commit, rewrites and landing do not: the latter copy entries).
+
+## Amortized compaction: soft relocations (`soft_scenarios.qnt`, `publish.qnt`, `bucket.qnt`)
+
+A commit may carry, besides its delta, a bounded list of old files of its base to move into
+the pack it uploads anyway (`CommitOptions::relocs`; the client re-encodes clean local copies,
+so no request is added). A relocation is *soft*: it is the same content at another place,
+so it never decides whether the commit lands.
+
+```text
+  user commit  = delta (hard: a changed path conflicts)  +  relocs (soft)
+  on a head past the base, a reloc is kept iff the head still has the path as the base did:
+      same content AND same pack  (so a path the head changed, or relocated elsewhere, is dropped)
+      and the delta does not write it
+  kept relocs: the page points at the writer's pack.  dropped: nothing, silently.
+  the writer's pack holds everything it planned, kept or not (storage is not reclaimed)
+```
+
+- Model: `Client.reloc` and `Intent.reloc` (path to the content it has), `beginSoft`,
+  `keptSoft` (the rule above, used by a direct commit's upload and by each commit of a
+  combining round, against the batch so far), `softBudget`. A combined commit's `Entry.wrote`
+  is the big files its page puts in the writer's pack.
+- Properties: `relocationsKeepContent` (a commit a writer or its combined intent makes changes
+  only paths its own delta writes: a relocation never changes content, kept or dropped),
+  `relocationsNeverConflict` (a client told it conflicted has a path of its own delta that
+  the branch changed), `relocationsAreBudgeted` (at most as many big files as the delta's own;
+  the real planner also has a floor, which two paths could not show).
+- Scenarios (`soft_scenarios.qnt`, run by `npm test`): `softKeptRun`,
+  `softDroppedWhenHeadChangedRun` (the user's commit lands with its own change, the
+  relocation of a path another commit changed is dropped), `softDroppedWhenHeadRelocatedRun`
+  (a repack of the path landed first), `softDroppedInCombineRun` (the same through an intent).
+- Mutants of the model, each killed: relocations hard (`softDroppedWhenHeadChangedRun`,
+  `softDroppedInCombineRun`), dropping the user's change when a relocation is dropped (three
+  scenarios), keeping a relocation whatever the head did (three scenarios, and `simulate`
+  breaks `relocationsKeepContent`), ignoring the budget (`simulate` breaks
+  `relocationsAreBudgeted`). Checking only the loc (not the content) is equivalent: a
+  changed path is always another pack.
+- Not yet refined against the real code: these scenarios run in Quint only; the harness
+  reports `reloc` as empty (the code lands separately).
 
 ## Pull requests (`pr.qnt`)
 
@@ -755,7 +825,11 @@ tested in `web/test`, not refined).
 
 ## Not modelled yet
 
-1. Packs are refined for direct commits and gc only.
+Nothing on the list. What is still abstracted is named in each section's simplifications:
+one branch for writers, four clients, two paths, one rewrite per client, a stack of one
+commit, the pack-file layout (ranges, `INLINE_MAX` and `PACK_MAX` splitting), real chunk
+boundaries, time as ticks with the stated bounds, and soft relocations (the code does not have
+them yet: `soft_scenarios.qnt` runs in Quint only).
 
 ## Lease timing (`clock.qnt`)
 
@@ -819,7 +893,7 @@ is not in the bound: a lease counts from before its put.
   holder), `swapAtTheEdgeOfTheMarginRun` (age `MAX_AGE` passes), `refreshCountsFromItsSendRun`,
   `leaseCountsFromItsPutRun`, `gcLeaseCountsFromItsWriteRun`, `lateRefreshDoesNotReviveRun`,
   `staleGcRefusesToDeleteRun`, `staleGcRefusesToDeletePackRun` and `staleGcRefusesToDeleteChunkRun` (pack and chunk deletes are guarded like commit and page deletes).
-- Mutants of `src/lease.rs`, `src/gc.rs` and `src/repo.rs`: fourteen, each undone after the run. Thirteen fail a scenario: gc without its check
+- Mutants of `src/lease.rs`, `src/gc.rs` and `src/repo.rs`: fourteen, each undone after the run. All fail a scenario: gc without its check
   (`staleGcRefusesToDeleteRun`), a lease counting from after its put (`leaseCountsFromItsPutRun`)
   or from after its listing (`expiredLeaseIsIgnoredRun`), a refresh counting from its reply
   (`refreshCountsFromItsSendRun`), a late refresh reviving (`lateRefreshDoesNotReviveRun`),
@@ -828,11 +902,11 @@ is not in the bound: a lease counts from before its put.
   lease expiring at `TTL` rather than after it, or never (`expiredLeaseIsIgnoredRun`, both), a
   refresher every `TTL / 2` (`expiredLeaseIsIgnoredRun`), and no check before `advance_ref`'s
   swap or `rewrite_ref`'s (`staleWriterRefusesSwapRun`, `staleRewriterRefusesRun`). The
-  fourteenth survives: no check before `create_branch`'s ref write, a step the model takes
-  whole
-- Simplifications: the stack's own leases (`write_commit`, `create_branch`, with the
-  check before `create_branch`'s ref write) are taken and released inside one step, so
-  they take no time; a gc that waits longer than `MAX_AGE` for writers' leases to go has
+  fourteenth, no check before `create_branch`'s ref write, fails
+  `staleBranchCreateRefusesRun` (the check is when the lease listing returns, and the ref
+  write is a request of its own)
+- Simplifications: the stack's commit step takes its lease and releases it inside one step, so
+  it takes no time (`create_branch`'s lease is stepped); a gc that waits longer than `MAX_AGE` for writers' leases to go has
   an unrefreshed lease from the start, so it finds itself stale at its first delete (it
   gives up and is run again); `Lease::shared`/`exclusive`'s `wait` and backoff use real
   time; a holder that dies stops its refresher with it (`crash`), and a stalled one

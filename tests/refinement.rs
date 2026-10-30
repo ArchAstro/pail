@@ -35,8 +35,8 @@ use pail::manifest::{Kind, Loc, Page, decode_page};
 use pail::objects::{Lineage, RefValue, Rewrite};
 use pail::pack::{CHUNK_MAX, chunk_spans, decode_blob};
 use pail::repo::{
-    CommitFields, CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead,
-    MovedError, Repo, RewriteRequest, Upload,
+    CommitOptions, CommitRequest, ConflictError, Delta, FileInput, KnownHead, MovedError, Repo,
+    RewriteRequest, Upload,
 };
 use pail::store::Store;
 use quint_refinements::{NormalizedRuntimeEvidence, RuntimeValue};
@@ -131,7 +131,7 @@ fn pail_refines_the_model() {
     }
     assert_eq!(
         results.len(),
-        72,
+        81,
         "every scenario in verify/scenarios.qnt ran"
     );
 }
@@ -146,6 +146,9 @@ enum Request {
     ReadRef,
     PutCommit,
     Swap,
+    /// A stack's branch being created (`create_branch`): the ref write of a branch the
+    /// scenario's client names after itself.
+    CreateBranch,
     /// The first write of the combining path: the writer gave up swapping directly.
     PutIntent,
     /// A rewrite's record.
@@ -308,6 +311,8 @@ impl Gate {
     fn write_request(key: &str) -> Option<Request> {
         if key == format!("refs/{BRANCH}") {
             Some(Request::Swap)
+        } else if key.starts_with("refs/") {
+            Some(Request::CreateBranch)
         } else if key.starts_with("commits/") {
             Some(Request::PutCommit)
         } else if key.starts_with("intents/") {
@@ -685,9 +690,6 @@ type Tree = BTreeMap<String, String>;
 /// A page as `bucket.qnt` keys it: the tree, and the pack each big file is in.
 type PageKey = (Tree, BTreeMap<String, Id>);
 
-/// The model's clients, whose own commits use the pack the client prepared (`packOf`).
-const CLIENTS: [&str; 4] = ["alice", "bob", "carol", "dave"];
-
 /// The path of the decoy file each pack holds (see `Harness::files`), left out of every
 /// delta.
 const DECOY: &str = "\u{1}decoy";
@@ -785,16 +787,15 @@ fn unpad(data: &[u8]) -> String {
     text.split('\n').next().unwrap_or_default().to_owned()
 }
 
-/// The pack a commit named `id` stores (`packOf`).
-fn pack_of(id: &Id) -> Id {
-    match id.last() {
-        Some(last) if CLIENTS.contains(&last.as_str()) => vec![last.clone()],
-        _ => id.clone(),
-    }
+/// A commit object, read past every gate.
+fn rt_commit(h: &Harness, hash: &Hash) -> Result<std::sync::Arc<pail::objects::Commit>, String> {
+    h.rt()
+        .block_on(h.observer.commit_obj(hash))
+        .map_err(|e| e.to_string())
 }
 
-/// The contents a pack holds (its footer indexes the blobs; the decoy is no content).
-fn pack_contents(pack: &[u8]) -> Result<BTreeSet<String>, String> {
+/// Every blob a pack holds, as the model's content (its footer indexes them).
+fn pack_blobs(pack: &[u8]) -> Result<Vec<String>, String> {
     let bad = |e: anyhow::Error| e.to_string();
     let end = pack
         .len()
@@ -802,7 +803,7 @@ fn pack_contents(pack: &[u8]) -> Result<BTreeSet<String>, String> {
         .ok_or("a pack shorter than its trailer")?;
     let footer = u32::from_le_bytes(pack[end..end + 4].try_into().unwrap()) as usize;
     let mut r = Reader::new(&pack[end - footer..end]);
-    let mut out = BTreeSet::new();
+    let mut out = Vec::new();
     for _ in 0..r.varint().map_err(bad)? {
         r.hash().map_err(bad)?;
         let (off, len, raw) = (
@@ -811,12 +812,28 @@ fn pack_contents(pack: &[u8]) -> Result<BTreeSet<String>, String> {
             r.varint().map_err(bad)?,
         );
         let blob = decode_blob(&pack[off..off + len], raw).map_err(bad)?;
-        let content = unpad(&blob);
-        if !content.starts_with("decoy:") {
-            out.insert(content);
-        }
+        out.push(unpad(&blob));
     }
     Ok(out)
+}
+
+/// The contents a pack holds (the decoy is no content).
+fn pack_contents(pack: &[u8]) -> Result<BTreeSet<String>, String> {
+    Ok(pack_blobs(pack)?
+        .into_iter()
+        .filter(|c| !c.starts_with("decoy:"))
+        .collect())
+}
+
+/// The writer of a pack: the one whose decoy blob it holds (`Harness::files`). A pack is
+/// named by its writer (`packOf`), whichever commits come to name it: a rewrite's copy or a
+/// landed stack's copy names its original's pack, and a combined intent's commit its
+/// writer's.
+fn pack_writer(pack: &[u8]) -> Result<Id, String> {
+    pack_blobs(pack)?
+        .into_iter()
+        .find_map(|c| c.strip_prefix("decoy:").map(|w| vec![w.to_owned()]))
+        .ok_or_else(|| "a pack without its writer's decoy".to_owned())
 }
 
 fn id_value(id: &Id) -> RuntimeValue {
@@ -1008,6 +1025,8 @@ struct Writer {
     /// The paths its delta writes with content its base has elsewhere: `Client.reuse`.
     reuse: BTreeMap<String, Id>,
     delta: Tree,
+    /// The soft relocations it carries (`CommitOptions::relocs`), by path and content.
+    reloc: Tree,
     progress: Progress,
     /// Its last swap went unanswered, so its next ref read is a recheck.
     rechecking: bool,
@@ -1019,6 +1038,9 @@ struct Writer {
     seen_lineage: Lineage,
     /// Set once it begins a rewrite instead of a commit.
     rw: Option<Rewriter>,
+    /// Creating its stack's branch (`create_branch`); set once it has begun, with `base` the
+    /// commit the branch is made at.
+    branching: bool,
     /// Set once it has made a stack; `ld` once it lands it.
     stacked: bool,
     ld: Option<Lander>,
@@ -1412,6 +1434,7 @@ impl Harness {
                 if matches!(
                     request,
                     Request::Swap
+                        | Request::CreateBranch
                         | Request::DeleteCommit
                         | Request::DeletePage
                         | Request::DeletePack
@@ -1699,6 +1722,7 @@ impl Harness {
                 self.collector.doomed_chunks.remove(key);
             }
             Request::Swap
+            | Request::CreateBranch
             | Request::GetIntent
             | Request::DeleteIntent
             | Request::PutLease
@@ -2345,42 +2369,17 @@ impl Harness {
         Ok(locs)
     }
 
-    /// A pack's model name: the commit that first names it (its page has the pack, its
-    /// parent's does not) stores it (`packOf`).
+    /// A pack's model name: its writer's (`packOf`), read off the decoy blob it holds.
     fn pack_name(&self, pack: &Hash) -> Result<Id, String> {
         if let Some(n) = self.pack_names.lock().unwrap().get(pack) {
             return Ok(n.clone());
         }
-        let mut commits: Vec<(Hash, Id)> =
-            self.names.iter().map(|(h, id)| (*h, id.clone())).collect();
-        commits.sort_by_key(|(_, id)| id.len());
-        for (h, id) in commits {
-            // A commit gc deleted names nothing new: its packs were named before.
-            let Ok(c) = self.rt().block_on(self.observer.commit_obj(&h)) else {
-                continue;
-            };
-            let mine = self.locs_of(&c.root)?;
-            let parents: BTreeSet<Hash> = match c.parent {
-                Some(p) => match self.rt().block_on(self.observer.commit_obj(&p)) {
-                    Ok(p) => self.locs_of(&p.root)?.into_values().collect(),
-                    Err(_) => BTreeSet::new(),
-                },
-                None => BTreeSet::new(),
-            };
-            for pk in mine.into_values().filter(|pk| !parents.contains(pk)) {
-                self.pack_names
-                    .lock()
-                    .unwrap()
-                    .entry(pk)
-                    .or_insert_with(|| pack_of(&id));
-            }
-        }
-        self.pack_names
-            .lock()
-            .unwrap()
-            .get(pack)
-            .cloned()
-            .ok_or_else(|| format!("pack {} is named by no commit", pack.short()))
+        let (data, _) = self
+            .object(&format!("packs/{}.pack", pack.hex()))?
+            .ok_or_else(|| format!("pack {} is gone before it was named", pack.short()))?;
+        let name = pack_writer(&data)?;
+        self.pack_names.lock().unwrap().insert(*pack, name.clone());
+        Ok(name)
     }
 
     /// A chunk object's model name, from the hash in its key (`chunks/<hash>`).
@@ -2718,15 +2717,26 @@ impl Harness {
         let Page::Leaf(entries) = decode_page(&page).map_err(|e| e.to_string())? else {
             return Err(format!("{writer}'s intent carries no entry list"));
         };
+        // A chunked file is named by its hash, as in `tree`.
+        let (chunked, plain): (Vec<_>, Vec<_>) = entries
+            .iter()
+            .cloned()
+            .partition(|e| matches!(e.loc, Loc::Chunks(_)));
         let data = self
             .rt()
-            .block_on(self.observer.read_files(&entries))
+            .block_on(self.observer.read_files(&plain))
             .map_err(|e| e.to_string())?;
-        let delta: Tree = entries
+        let mut delta: Tree = plain
             .iter()
             .zip(data)
-            .map(|(e, d)| (e.path.clone(), String::from_utf8_lossy(&d).into_owned()))
+            .map(|(e, d)| (e.path.clone(), unpad(&d)))
             .collect();
+        for e in chunked {
+            let content = huge_names()
+                .get(&e.hash)
+                .ok_or_else(|| format!("{} is a chunked file the model does not know", e.path))?;
+            delta.insert(e.path, (*content).to_owned());
+        }
         let base = i.base.ok_or(format!("{writer}'s intent has no base"))?;
         let at = self
             .writers
@@ -2737,6 +2747,19 @@ impl Harness {
         Ok(record([
             ("base", id_value(&self.name(&base)?)),
             ("delta", tree_value(&delta)),
+            ("reloc", tree_value(&Tree::new())),
+            (
+                "reuse",
+                RuntimeValue::Map(
+                    self.writers
+                        .get(writer)
+                        .map(|w| &w.reuse)
+                        .into_iter()
+                        .flatten()
+                        .map(|(p, id)| (RuntimeValue::Text(p.clone()), id_value(id)))
+                        .collect(),
+                ),
+            ),
             ("at", RuntimeValue::Int(at)),
         ]))
     }
@@ -2822,11 +2845,42 @@ impl Harness {
                 .last()
                 .map(|a| a.trim_end_matches('+').to_owned())
                 .unwrap_or_default();
+            let writer = intent.clone();
+            // The big files its page puts in a pack its parent's page does not: what the
+            // commit points at its writer's pack.
+            let c = rt_commit(self, h)?;
+            let mine = self.locs_of(&c.root)?;
+            let before = match c.parent {
+                Some(p) => self.locs_of(&rt_commit(self, &p)?.root)?,
+                None => BTreeMap::new(),
+            };
+            // (A reused path's location may be the one its parent's page has already.)
+            let reuse = self
+                .writers
+                .get(&writer)
+                .map(|w| w.reuse.clone())
+                .unwrap_or_default();
+            let wrote = mine
+                .iter()
+                .filter(|(path, pack)| {
+                    before.get(*path) != Some(*pack) || reuse.contains_key(*path)
+                })
+                .map(|(path, _)| RuntimeValue::Text(path.clone()));
             entries.push(record([
                 ("intent", RuntimeValue::Text(intent)),
                 ("commit", id_value(&id)),
                 ("tree", field(&commit, "tree")?.clone()),
                 ("ancestors", ancestors),
+                ("wrote", set(wrote)),
+                (
+                    "reuse",
+                    RuntimeValue::Map(
+                        reuse
+                            .iter()
+                            .map(|(p, id)| (RuntimeValue::Text(p.clone()), id_value(id)))
+                            .collect(),
+                    ),
+                ),
             ]));
         }
         // Withdrawing: landed (its intent in `recent`), or else conflicted.
@@ -2902,9 +2956,17 @@ impl Harness {
         let root: Id = vec!["root".to_owned()];
         let p = &w.progress;
         let phase = match (&p.outcome, w.combining, w.base.is_some()) {
-            (_, _, false) if w.stacked => "Stacked",
             (_, _, false) => "Idle",
+            (Some("Branched"), _, _) if w.stacked => "Stacked",
+            (Some("Branched"), _, _) => "Branched",
             (Some(_), _, _) => "Done",
+            (None, _, true) if w.branching => match p.held.first().map(|(r, _, _)| *r) {
+                Some(Request::PutLease) => "Leasing",
+                Some(Request::ListLeases) => "CheckingLeases",
+                Some(Request::CreateBranch) => "Branching",
+                other => return Err(format!("{name} is between branch requests ({other:?})")),
+            },
+            (None, _, true) if w.stacked && w.ld.is_none() => "Stacked",
             (None, _, true) if w.rw.is_some() => match p.held.first().map(|(r, _, _)| *r) {
                 Some(Request::PutLease) => "Leasing",
                 Some(Request::ListLeases) => "CheckingLeases",
@@ -2936,7 +2998,10 @@ impl Harness {
                 return Err(format!("{name} is between requests ({held:?})"));
             }
         };
-        let outcome = p.outcome.unwrap_or("Pending");
+        let outcome = match p.outcome {
+            Some("Branched") | None => "Pending",
+            Some(o) => o,
+        };
         let base = w.base.clone().unwrap_or_else(|| root.clone());
         let seen_recent = w
             .seen
@@ -2946,6 +3011,7 @@ impl Harness {
         Ok(record([
             ("base", id_value(&base)),
             ("delta", tree_value(&w.delta)),
+            ("reloc", tree_value(&w.reloc)),
             ("phase", RuntimeValue::Text(phase.to_owned())),
             ("seen", self.ref_seen_value(&w.seen, &base)),
             ("seenRecent", self.recent_value(&seen_recent)),
@@ -2961,6 +3027,10 @@ impl Harness {
                 id_value(w.found.as_ref().map_or(&root, |(id, _)| id)),
             ),
             ("known", self.known_value(w.known.as_ref())?),
+            (
+                "branching",
+                RuntimeValue::Bool(w.branching && p.outcome.is_none()),
+            ),
             (
                 "reuse",
                 RuntimeValue::Map(
@@ -3498,45 +3568,73 @@ impl generated::Implementation for Harness {
         self.release(&c, Request::ReadRef, None, Delivery::Answered)
     }
 
-    /// Make `c`'s stack whole, past every gate: its commit on the branch's tip, then the
-    /// branch `c` naming it.
+    /// `create_branch` for `c`'s stack, at the commit the branch has now (`pail switch -c`):
+    /// it leases, checks its lease and writes `refs/<c>`.
+    fn begin_branch(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let name = Harness::actor_arg(arguments)?;
+        let (tip, _) = Harness::read_ref(self)?;
+        let base = self.name(&tip)?;
+        let repo = self.client(&name);
+        let events = self.sender.clone();
+        let actor = name.clone();
+        self.rt().spawn(async move {
+            let outcome = match repo.create_branch(&actor, tip).await {
+                Ok(_) => "Branched",
+                Err(_) => "Unknown",
+            };
+            let _ = events.send(Event::Finished { actor, outcome });
+        });
+        let w = self.writer(&name)?;
+        w.base = Some(base);
+        w.branching = true;
+        self.settle(&name)
+    }
+
+    /// The write of `refs/<c>`, released.
+    fn create_branch(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
+        let c = Harness::actor_arg(arguments)?;
+        let how = Delivery::of(arguments.get(1).ok_or("createBranch takes a Delivery")?)?;
+        self.release(&c, Request::CreateBranch, None, how)
+    }
+
+    /// `c`'s commit on its branch, past every gate: an ordinary `commit` of a branch only it
+    /// writes, uploading the pack of any big file.
     fn stack(&mut self, arguments: &[RuntimeValue]) -> Result<(), String> {
         let [c, delta] = arguments else {
             return Err(format!("stack takes 2 arguments: {arguments:?}"));
         };
         let name = text(c)?.to_owned();
         let delta = tree_of(delta)?;
-        let (tip, _) = Harness::read_ref(self)?;
+        let base = self
+            .writer(&name)?
+            .base
+            .clone()
+            .ok_or(format!("{name} has no branch"))?;
+        let base_hash = *self
+            .hashes
+            .get(&base)
+            .ok_or_else(|| format!("no commit {base:?}"))?;
         let (files, uploads, _) = self.files(&delta, &name, None)?;
-        if !uploads.is_empty() {
-            return Err("a stack's files must be small enough to inline".into());
-        }
-        let req = self.request(&name, Some(tip), files);
-        let fields = CommitFields {
-            author: req.author,
-            author_date: req.author_date,
-            committer: req.committer,
-            committer_date: req.committer_date,
-            message: req.message,
-            meta: req.meta,
-        };
+        let mut req = self.request(&name, Some(base_hash), files);
+        req.branch = name.clone();
         let repo = Repo::with_store(self.gate_with(&name, true), None);
         let h = self
             .rt()
-            .block_on(async {
-                let h = repo
-                    .write_commit(Some(tip), &req.delta, &fields)
-                    .await?
-                    .commit;
-                repo.create_branch(&name, h).await?;
-                anyhow::Ok(h)
-            })
-            .map_err(|e| e.to_string())?;
-        let mut id = self.name(&tip)?;
+            .block_on(repo.commit_opts(
+                req,
+                CommitOptions {
+                    uploads,
+                    ..CommitOptions::default()
+                },
+            ))
+            .map_err(|e| e.to_string())?
+            .commit;
+        let mut id = base;
         id.push(name.clone());
         self.names.insert(h, id.clone());
         self.hashes.insert(id, h);
-        self.writer(&name)?.stacked = true;
+        let w = self.writer(&name)?;
+        (w.branching, w.stacked) = (false, true);
         Ok(())
     }
 
@@ -3561,7 +3659,6 @@ impl generated::Implementation for Harness {
             let _ = events.send(Event::Finished { actor, outcome });
         });
         let w = self.writer(&name)?;
-        w.base = Some(vec!["root".to_owned()]);
         w.rechecking = false;
         w.progress = Progress::default();
         let calls = w.ld.as_ref().map_or(0, |ld| ld.calls) + 1;

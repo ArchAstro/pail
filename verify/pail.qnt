@@ -27,6 +27,11 @@ module pail {
     state' = beginNext(state, c, base, delta),
   }
 
+  action beginSoft(c: str, base: CommitId, delta: Delta, soft: Delta): bool = all {
+    beginSoftCan(state, c, base, delta, soft),
+    state' = beginSoftNext(state, c, base, delta, soft),
+  }
+
   action beginKnown(c: str, from: str, delta: Delta): bool = all {
     beginKnownCan(state, c, from),
     state' = beginKnownNext(state, c, from, delta),
@@ -129,6 +134,13 @@ module pail {
   }
 
   // ---------- landing a stack ----------
+
+  action beginBranch(c: str): bool = all { beginBranchCan(state, c), state' = beginBranchNext(state, c) }
+
+  action createBranch(c: str, d: Delivery): bool = all {
+    createBranchCan(state, c),
+    state' = createBranchNext(state, c, d),
+  }
 
   action stack(c: str, delta: Delta): bool = all { stackCan(state, c), state' = stackNext(state, c, delta) }
 
@@ -233,6 +245,7 @@ module pail {
     nondet c = CLIENTS.oneOf()
     nondet base = liveKeys(state.bucket.commits).oneOf()
     nondet delta = DELTAS.union(relocations(base)).oneOf()
+    nondet soft = relocations(base).union(Set(Map())).oneOf()
     nondet d = Set(Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
@@ -242,6 +255,7 @@ module pail {
     nondet slow = 1.to(SLOW).oneOf()
     any {
       begin(c, base, delta),
+      beginSoft(c, base, delta, soft),
       nondet from = CLIENTS.oneOf()
       beginKnown(c, from, delta),
       lease(c),
@@ -270,6 +284,8 @@ module pail {
       rwRead(c),
       rwSwap(c, d),
       rwRecheck(c),
+      beginBranch(c),
+      createBranch(c, d),
       stack(c, delta),
       beginLand(c),
       ldRead(c),
@@ -309,6 +325,7 @@ module pail {
     nondet c = CLIENTS.oneOf()
     nondet base = liveKeys(state.bucket.commits).oneOf()
     nondet delta = DELTAS.union(relocations(base)).oneOf()
+    nondet soft = relocations(base).union(Set(Map())).oneOf()
     nondet d = Set(Answered, Answered, Lost, Dropped).oneOf()
     nondet at = Set(1, 2, 3).oneOf()
     nondet plan = PLANS.oneOf()
@@ -318,6 +335,7 @@ module pail {
     nondet slow = 1.to(4 * SLOW).oneOf()
     any {
       begin(c, base, delta),
+      beginSoft(c, base, delta, soft),
       nondet from = CLIENTS.oneOf()
       beginKnown(c, from, delta),
       lease(c),
@@ -344,6 +362,8 @@ module pail {
       rwRead(c),
       rwSwap(c, d),
       rwRecheck(c),
+      beginBranch(c),
+      createBranch(c, d),
       stack(c, delta),
       beginLand(c),
       ldRead(c),
@@ -366,11 +386,46 @@ module pail {
   val packsAreStored: bool =
     packsStored(state.bucket, refsReach(state.bucket).union(reflogReaches(state.bucket)))
 
+  /// Only a writer's upload stores a pack: every pack in the bucket is a client's own (a
+  /// rewrite's copy, a landed stack's copy and a combined intent's commit point at the packs
+  /// their originals or writers stored).
+  val packsAreWritersOwn: bool =
+    state.bucket.packs.keys().forall(k => length(k) == 1 and CLIENTS.contains(k[0]))
+
   /// Every big file reads back its content through its page's pack, a relocated file
   /// too: moving a file between packs (a commit writing a path to the content it has)
   /// changes no content.
   val relocateKeepsContent: bool =
     packsHold(state.bucket, refsReach(state.bucket).union(reflogReaches(state.bucket)))
+
+  /// A commit a writer (or its combined intent) makes changes only what its delta writes:
+  /// its soft relocations, kept or dropped, never change a path's content.
+  val relocationsKeepContent: bool =
+    CLIENTS.filter(w => client(state, w).phase != Stacked and client(state, w).ld.calls == 0 and client(state, w).rw == NO_RW).forall(w =>
+      liveKeys(state.bucket.commits)
+        .filter(id => length(id) > 1 and (id[length(id) - 1] == w or id[length(id) - 1] == INTENT_NAME.get(w)))
+        .forall(id =>
+          PATHS.forall(p =>
+            treeOf(state.bucket, id).get(p) != treeOf(state.bucket, newest(ancestorsOf(state.bucket, id))).get(p)
+              implies client(state, w).delta.keys().contains(p)
+          )
+        )
+    )
+
+  /// A client told it conflicted has a path of its own delta that the branch changed: its
+  /// soft relocations never conflict.
+  val relocationsNeverConflict: bool =
+    CLIENTS.forall(c =>
+      (client(state, c).outcome == Conflicted and client(state, c).rw == NO_RW and client(state, c).ld.calls == 0)
+        implies state.history.indices().exists(i =>
+          isLive(state.bucket.commits, state.history[i])
+            and overlaps(client(state, c).delta, treeOf(state.bucket, client(state, c).base), treeOf(state.bucket, state.history[i]))
+        )
+    )
+
+  /// Every client's relocations are within the budget, and are of the base's big files.
+  val relocationsAreBudgeted: bool =
+    CLIENTS.forall(c => client(state, c).reloc.keys().size() <= softBudget(client(state, c).delta))
 
   /// gc sweeping packs has doomed none that a commit a ref reaches names.
   val gcSparesNamedPacks: bool =
@@ -532,7 +587,7 @@ module pail {
   /// Whether `c` can still move a ref: in flight (past its first read), with a swap on its
   /// way or a lease fresh enough to pass the check before one.
   def canSwap(c: str): bool =
-    not(Set(Idle, Stacked, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
+    not(Set(Idle, Branched, Stacked, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
       and (swapping(client(state, c)) or fresh(state, c))
 
   /// While gc is about to delete (its lease checked), no writer that can move a ref is in
@@ -544,7 +599,11 @@ module pail {
     gcRunsAlone,
     branchIsComplete,
     packsAreStored,
+    packsAreWritersOwn,
     relocateKeepsContent,
+    relocationsKeepContent,
+    relocationsNeverConflict,
+    relocationsAreBudgeted,
     gcSparesNamedPacks,
     chunksAreStored,
     chunkedFilesReadBack,

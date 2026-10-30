@@ -35,6 +35,37 @@ module publish {
       reuse: reuseOf(s.bucket, base, delta),
     })
 
+  /// The planner's budget (`amortize::budget`, alpha = 1): no more big files relocated than
+  /// the delta's own, so relocated bytes keep pace with new ones. (The real floor, a few
+  /// hundred KiB for a commit that adds little, is not modelled: with two paths a floor of a
+  /// file would admit every relocation, and the budget could not be seen.)
+  pure def softBudget(d: Delta): int = d.keys().filter(p => isBig(d.get(p))).size()
+
+  pure def softOk(s: State, base: CommitId, delta: Delta, soft: Delta): bool = and {
+    soft.keys().size() <= softBudget(delta),
+    soft.keys().forall(p => and {
+      not(delta.keys().contains(p)),
+      isBig(treeOf(s.bucket, base).get(p)),
+      soft.get(p) == treeOf(s.bucket, base).get(p),
+    }),
+  }
+
+  /// `commit` with soft relocations alongside its delta (a commit that relocates files of
+  /// its base into the pack it uploads anyway).
+  pure def beginSoftCan(s: State, c: str, base: CommitId, delta: Delta, soft: Delta): bool =
+    beginCan(s, c, base) and softOk(s, base, delta, soft)
+
+  pure def beginSoftNext(s: State, c: str, base: CommitId, delta: Delta, soft: Delta): State =
+    withClient(s, c, {
+      ...IDLE,
+      base: base,
+      delta: delta,
+      reloc: soft,
+      phase: Leasing,
+      seen: { commit: base, version: 0 },
+      reuse: reuseOf(s.bucket, base, delta),
+    })
+
   /// `commit` called with the head `from`'s last publish left (`KnownHead`): on that
   /// head, as read, so its first attempt need not read the ref.
   pure def beginKnownCan(s: State, c: str, from: str): bool = and {
@@ -75,6 +106,11 @@ module publish {
   pure def checkLeasesNext(s: State, c: str): State =
     if (leasedByOthers(s.bucket, c, Set(Exclusive), s.now))
       withClient({ ...s, bucket: unleased(s.bucket, c) }, c, { ...client(s, c), phase: Leasing })
+    // `create_branch` checks its lease before the write, which is its next request.
+    else if (client(s, c).branching)
+      Set(holding(withClient(s, c, { ...client(s, c), phase: Branching }), c)).fold(s, (n, after) =>
+        guarded(after, c, finished(after, c, { ...client(after, c), phase: Done, outcome: Unknown, branching: false }))
+      )
     else
       holding(
         withClient(s, c, { ...client(s, c), phase:
@@ -111,11 +147,13 @@ module publish {
   pure def uploadNext(s: State, c: str): State = {
     val after = {
       ...s,
-      bucket: uploaded(
+      bucket: uploadedSoft(
         s.bucket,
         made(c, client(s, c)),
+        client(s, c).base,
         client(s, c).seen.commit,
         client(s, c).delta,
+        client(s, c).reloc,
         client(s, c).reuse,
       ),
       clients: s.clients.set(c, {
@@ -193,7 +231,7 @@ module publish {
 
   /// The process dies mid-call: it makes no more requests, its refresher stops, and it
   /// leaves its lease behind, which others ignore once it is older than `TTL`.
-  pure def crashCan(s: State, c: str): bool = not(Set(Idle, Stacked, Done).contains(client(s, c).phase))
+  pure def crashCan(s: State, c: str): bool = not(Set(Idle, Branched, Stacked, Done).contains(client(s, c).phase))
 
   pure def crashNext(s: State, c: str): State =
     notHolding(withClient(s, c, { ...client(s, c), phase: Done, outcome: Unknown }), c)

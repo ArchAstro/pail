@@ -1,24 +1,31 @@
-# pail-web: the UI and its API, plus the pail binary it shells out to.
-#   docker build -t pail-web -f web/Dockerfile web
-#   docker run -p 4747:4747 -e PAIL_WEB_HOST=0.0.0.0 -v $PWD/pail-web.config.json:/app/pail-web.config.json pail-web
-FROM node:22-slim AS build
+# pail-web: the UI and its API, plus the pail binary it shells out to, built from this checkout
+# so the CLI always has the flags the UI uses. Build from the repository root:
+#   docker build -t pail-web -f web/Dockerfile .
+#   docker run -p 4747:4747 -v $PWD/pail-web.config.json:/app/pail-web.config.json pail-web
+FROM rust:1-slim-bookworm AS pail
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --locked --bin pail
+
+FROM node:22-slim AS web
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY web/package.json web/package-lock.json ./
 RUN npm ci
-COPY . .
+COPY web ./
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-slim
-# The pail CLI: install from the release script (or COPY a binary you built).
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && curl -fsSL https://pail.build/install.sh | sh \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-ENV PATH="/root/.local/bin:/usr/local/bin:${PATH}" \
-    NODE_ENV=production PAIL_WEB_HOST=0.0.0.0 PAIL_WEB_PORT=4747
+COPY --from=pail /src/target/release/pail /usr/local/bin/pail
+ENV NODE_ENV=production PAIL_WEB_HOST=0.0.0.0 PAIL_WEB_PORT=4747
 WORKDIR /app
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./
+COPY --from=web /app/dist ./dist
+COPY --from=web /app/node_modules ./node_modules
+COPY --from=web /app/package.json ./
 EXPOSE 4747
 USER node
 CMD ["node", "dist/server/index.js"]

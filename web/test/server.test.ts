@@ -9,7 +9,7 @@ describe("config", () => {
     const cfg = loadConfig([], { PAIL_WEB_REPOS: "app=gs://b/app, s3://bucket/team/api" } as any, "/nonexistent");
     expect(cfg.repos.map((r) => [r.name, r.store])).toEqual([["app", "gs://b/app"], ["api", "s3://bucket/team/api"]]);
     expect(cfg.actions).toBe(false);
-    expect(cfg.pail).toBe("pail");
+    expect(cfg.pail).toMatch(/(^|\/)pail$/);
   });
   it("lets the environment override the file's port and actions", () => {
     const cfg = loadConfig([], { PAIL_WEB_REPOS: "a=file:///x", PAIL_WEB_PORT: "9000", PAIL_WEB_ACTIONS: "1" } as any, "/nonexistent");
