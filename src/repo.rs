@@ -245,6 +245,16 @@ pub struct MovedError {
     pub now: Hash,
 }
 
+/// Raised when a branch is not at the commit the caller meant to act on (`land --expect-tip`):
+/// it moved after the caller judged that commit.
+#[derive(Debug, thiserror::Error)]
+#[error("{branch} is at {}, not the expected {}", now.short(), expected.short())]
+pub struct TipError {
+    pub branch: String,
+    pub expected: Hash,
+    pub now: Hash,
+}
+
 /// A commit's fields for its rewritten copy: authorship and message kept, the rewriter as
 /// committer, and `rewritten.from` naming the commits it replaces (several when melded).
 /// Git ids no longer describe it, so mirrored `git.*` metadata is dropped.
@@ -1733,8 +1743,25 @@ impl Repo {
         date: &str,
         check: Option<PublishCheck<'_>>,
     ) -> Result<LandOutcome> {
-        self.with_lease(self.land_stack_with_leased(branch, onto, committer, date, check))
+        self.land_stack_expecting(branch, onto, committer, date, check, None)
             .await
+    }
+
+    /// [`Repo::land_stack_with`], landing only if `branch` is at `expect_tip` (on every
+    /// attempt): [`TipError`] if it moved, so what lands is the commit the caller judged.
+    pub async fn land_stack_expecting(
+        &self,
+        branch: &str,
+        onto: &str,
+        committer: &str,
+        date: &str,
+        check: Option<PublishCheck<'_>>,
+        expect_tip: Option<Hash>,
+    ) -> Result<LandOutcome> {
+        self.with_lease(
+            self.land_stack_with_leased(branch, onto, committer, date, check, expect_tip),
+        )
+        .await
     }
 
     async fn land_stack_with_leased(
@@ -1744,6 +1771,7 @@ impl Repo {
         committer: &str,
         date: &str,
         check: Option<PublishCheck<'_>>,
+        expect_tip: Option<Hash>,
     ) -> Result<LandOutcome> {
         validate_branch(onto)?;
         let mut checked = false;
@@ -1755,6 +1783,14 @@ impl Repo {
                 .read_ref(branch)
                 .await?
                 .with_context(|| format!("no branch {branch}"))?;
+            if let Some(expected) = expect_tip.filter(|e| *e != tip) {
+                return Err(TipError {
+                    branch: branch.to_string(),
+                    expected,
+                    now: tip,
+                }
+                .into());
+            }
             let (onto_ref, version) = self
                 .read_ref_value(onto)
                 .await?
