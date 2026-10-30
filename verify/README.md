@@ -6,7 +6,8 @@ collects it, the properties they must keep, and scenarios the real code is check
 against request by request with
 [quint-refinements](https://github.com/ArchAstro/quint-refinements). Beside it: the store
 contract every backend follows, the branch policy every enforcement point decides, and the
-pull request protocol of `pail pr` (`pr.qnt`, below).
+pull request protocol of `pail pr` (`pr.qnt`, below) and, designed but not yet built, the
+workflow system pail Actions (`actions.qnt`, below).
 
 Layers, each importing those below. A feature is a set of pure steps (`xCan(s, ...)`:
 may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new protocol
@@ -46,6 +47,10 @@ pr.qnt ─── pr_sim.qnt ──quint run──▶ safety + history properties
 pr_scenarios.qnt ──compile──▶ pr-refinements.json + tests/pr_refinement/generated.rs
                                    │
 tests/pr_refinement.rs ── the real extensions/pail-pr, its put and land held by a shim ──▶ same records after every step
+
+actions.qnt ─── actions_sim.qnt ──quint run──▶ safety + history properties hold in every simulated interleaving
+   │
+actions_scenarios.qnt ──quint test──▶ the runs a refinement harness will follow (no code to refine yet)
 ```
 
 ## Files
@@ -72,6 +77,10 @@ tests/pr_refinement.rs ── the real extensions/pail-pr, its put and land held
 | `pr_scenarios.qnt` | `@conformance` runs: the interleavings the plugin must follow |
 | `pr_sim.qnt` | `pr.qnt` under random interleavings, with a ghost for the history properties |
 | `mutate_pr.sh` | Flips each design switch in a scratch copy and expects `pr_sim.qnt` to find a violation |
+| `actions.qnt` | pail Actions (not built yet): orchestrator replicas, runners, leases, results, the properties (`safety`) and the design switches |
+| `actions_scenarios.qnt` | `@conformance` runs: the interleavings the orchestrator and runner must follow (run by `quint test`; not yet compiled into a harness) |
+| `actions_sim.qnt` | `actions.qnt` under random interleavings, with a ghost for the history properties |
+| `mutate_actions.sh` | Flips each design switch in a scratch copy and expects `actions_sim.qnt` to find a violation |
 | `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json`, `pr-refinements.json` | Generated scenario artifacts (do not edit) |
 | `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
 | `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref`, `Repo::land_stack`, `Repo::successor` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
@@ -84,8 +93,9 @@ tests/pr_refinement.rs ── the real extensions/pail-pr, its put and land held
 ```sh
 cd verify && npm ci
 npm test            # scenarios pass in Quint
-npm run simulate    # random interleavings against `safety` (`step`, then writers only: `contendStep`; then `pr_sim.qnt`)
+npm run simulate    # random interleavings against `safety` (`step`, then writers only: `contendStep`; then `pr_sim.qnt`, `actions_sim.qnt`)
 npm run mutate:pr   # each design switch of pr.qnt off: the simulation must find a violation
+npm run witness:actions && npm run mutate:actions   # the cases actions.qnt reaches; each of its switches off is caught
 npm run compile     # after editing any .qnt file
 cd .. && cargo test --release --test refinement --test store_refinement --test policy_refinement --test pr_refinement
 # GCS runs in `cargo test` against the in-process emulator (src/gcs_emulator.rs); as a process:
@@ -825,6 +835,90 @@ branch beyond id claiming; `--force`, `--takeover` (a merge that died after its 
 crashes between a claim and its land; reviews or checks withdrawn while a merge is between
 judging and claiming; policy files; pail-web (its server follows the same rules and is
 tested in `web/test`, not refined).
+
+## Actions (designed, not yet built) (`actions.qnt`)
+
+pail Actions is a workflow system over a bucket: orchestrator replicas own run and job state
+on the `_actions` and `_checks` branches (Tier 1: commits, `put --expect`, `--if-absent`), and
+runners touch only plain objects under `<repo>.actions/` (Tier 2: queue, leases, progress,
+results, cancel markers). The orchestrator is the one bridge from the second to the first.
+There is no implementation yet: the model comes first, and the orchestrator and runner are
+built and refined against it. `actions.qnt` models one workflow (jobs `build`, `test`,
+`deploy`; the last two need `build`, `deploy` waits for an environment approval), runs from
+three event keys (two pushes in one concurrency group with cancel-in-progress, one cron
+slot), two orchestrator replicas, three runners, two attempts and a small clock (`TTL`).
+
+A replica's tick is `read`, then `write`: it observes both tiers, decides one intent and holds
+the commit at its write, which lands or finds a conflict; so every write is from a stale
+read. Runners claim a lease (`claimRead`, then `claimWrite`: create, or take over an expired
+one by generation match), refresh it, report a step started, write a create-only result, see a
+cancel marker, or crash. Approvers create approval files.
+
+| Intent | Commit |
+|---|---|
+| `ITrigger` | a run from an event key, cron slot: `runs/<id>` (`--if-absent`), `claims/<key>` (`--if-absent`), its jobs, `concurrency/<group>` (CAS), cancelling the group's previous run |
+| `IPromote` | a pending job whose `needs` succeeded is queued, or waits for its environment's approval; one whose need failed is skipped |
+| `IStart` | a queued job whose lease a runner holds is in_progress under (holder, seq) |
+| `IAccept` | a runner's result becomes the job's conclusion, if fenced |
+| `ISweep` | a lease expired with no result: the job is requeued if no step started, else fails "runner lost" (a cancelled run's job is cancelled) |
+| `IFinish`, `IRerun` | the run concludes; a new attempt copies the successes, restarts the rest and takes its group back |
+| `ICheck` | the `_checks` projection of a completed job |
+
+Properties (`safety` in `actions.qnt`; `simSafety` adds the history ones of `actions_sim.qnt`):
+
+1. `atMostOneAccepted` (sim): at most one runner's result is ever accepted per (run, attempt,
+   job); `acceptedWasHolder`: the result a job concluded by is the holder's and seq's it
+   started under.
+2. `noStranded`: a job is never in_progress with a lapsed lease unless the orchestrator can
+   accept its result or sweep it (the state form of "no job stays in_progress forever").
+3. `finality` and `attemptsAreFrozen` (sim): `completed`, its conclusion and who concluded it
+   never change; a rerun is a new attempt and the old one keeps its conclusion.
+4. `ordering`: a job is queued, waiting, started or concluded by a runner only when every
+   need succeeded, and is skipped only when one did not.
+5. `checksEarned`: a `_checks` success names a job that an accepted result (or a copy of one)
+   concluded success, of a run at that sha.
+6. `oneActivePerGroup`: at most one run of a group is active and not cancelled; with
+   `cancelledIsIdle`: a cancelled run has nothing left to start.
+7. `gatesHold`: an environment job is queued only with an approval from someone other than
+   the run's actor.
+8. `oneRunPerKey`, `oneCreationPerKey` (sim): an event key or cron slot has one run, and one
+   commit ever created it, across replicas.
+
+and `leaseExclusive`: no two runners hold one job under one seq.
+
+Design switches (`actions.qnt`), each `true` the fix; `npm run mutate:actions` turns each off in
+a scratch copy and the simulation finds a violation:
+
+| Switch off | What breaks |
+|---|---|
+| `CAS` | a stale replica overwrites a record with its read: a finished job restarted or concluded twice (`finality`, `atMostOneAccepted`) |
+| `IF_ABSENT` | two replicas claim one run id, or one key, and overwrite each other (`oneRunPerKey`, `oneCreationPerKey`) |
+| `GUARD_READS` | a commit expects only the records it writes: a sweep requeues a job of a run cancelled since it read, a rerun keeping its group does not see the group taken (`cancelledIsIdle`, `oneActivePerGroup`) |
+| `LEASE_CREATE_ONLY` | a blind lease put: two runners hold one job under one seq (`leaseExclusive`) |
+| `FENCE` | any result of an in_progress job is accepted: a stalled runner's late result concludes the job its successor holds (`acceptedWasHolder`) |
+| `FENCE_ON_JOB` | intake also compares the live lease's seq (the plan's "lease seq matches"): a lease taken over after the job started strands the job (`noStranded`) |
+| `RESULT_PER_LEASE` | one create-only result path per job: a late result of a lost runner blocks the next holder's, and the sweep sees a result (`noStranded`) |
+| `SWEEP` | a runner that dies leaves its job in_progress for good (`noStranded`) |
+| `NEEDS_CHECK` | a job is queued before its need concluded (`ordering`) |
+| `APPROVAL_EXCLUDES_ACTOR` | the actor approves their own deploy (`gatesHold`) |
+| `CANCEL_IN_PROGRESS` | a push does not cancel the run it supersedes (`oneActivePerGroup`) |
+| `RERUN_NEW_ATTEMPT` | a rerun resets the attempt's jobs in place (`finality`, `attemptsAreFrozen`) |
+| `CHECK_FROM_JOB` | `_checks` is written from the runners' raw results: a late success becomes a check on a failed job (`checksEarned`) |
+
+Witnesses (`npm run witness:actions`): a lost runner's job is requeued and runs again, a run is
+cancelled, a run is rerun, an environment job is queued on an approval, a job is skipped.
+`actions_scenarios.qnt` has 16 runs, for the plan's UC1, UC2, UC3, UC4, UC6, UC7 and UC8
+(and UC9's projection), written as single actions so that they compile with
+`quint-refinements` (checked by hand: the artifact is large, so none is committed). The
+refinement harness comes with the orchestrator (T1.7) and the runner (T2.5); until then the
+scenarios run in Quint only (`npm test`).
+
+Not modelled: matrices and expressions, logs, progress beyond "a step started", artifacts and
+caches, secrets, retention, `workflow_dispatch` requests (a second kind of create-only
+trigger), several workflows, the orchestrator's leader lease (every write is guarded, so
+correctness does not depend on it), batching of several intents in one commit (a commit here
+is one intent), clock skew between replicas and runners, and runner restarts (a crash is
+for good).
 
 ## Not modelled yet
 
