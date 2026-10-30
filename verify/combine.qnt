@@ -35,7 +35,7 @@ module combine {
 
   pure def intendNext(s: State, c: str, at: int): State = {
     ...s,
-    bucket: intentPut(s.bucket, c, { base: client(s, c).base, delta: client(s, c).delta, reloc: client(s, c).reloc, at: at }),
+    bucket: intentPut(s.bucket, c, { base: client(s, c).base, delta: client(s, c).delta, reloc: client(s, c).reloc, reuse: client(s, c).reuse, at: at }),
     clients: s.clients.set(c, { ...client(s, c), phase: Polling, comb: NO_COMB }),
   }
 
@@ -123,7 +123,9 @@ module combine {
             tip: id,
             tree: tree,
             locs: PATHS.filter(p => isBig(tree.get(p))).mapBy(p =>
-              if (body(b.intents, w).delta.keys().union(kept).contains(p)) packOf(id) else acc.locs.get(p)),
+              if (body(b.intents, w).reuse.keys().contains(p)) body(b.intents, w).reuse.get(p)
+              else if (body(b.intents, w).delta.keys().union(kept).contains(p)) packOf(id)
+              else acc.locs.get(p)),
             ancestors: acc.ancestors.union(Set(acc.tip)),
             batch: acc.batch.union(Set({
               intent: w,
@@ -131,6 +133,7 @@ module combine {
               tree: tree,
               ancestors: acc.ancestors.union(Set(acc.tip)),
               wrote: body(b.intents, w).delta.keys().union(kept).filter(p => isBig(tree.get(p))),
+              reuse: body(b.intents, w).reuse,
             })),
           })
         )

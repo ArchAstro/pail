@@ -48,8 +48,9 @@ module bucket {
   /// where its page puts each big file: the pack that holds it.
   type Commit = { tree: Tree, ancestors: Set[CommitId], locs: str -> PackId }
 
-  /// A commit about to be stored: its name, tree and ancestors.
-  type Made = { id: CommitId, tree: Tree, ancestors: Set[CommitId] }
+  /// A commit about to be stored: its name, tree, ancestors and where its page puts each
+  /// big file.
+  type Made = { id: CommitId, tree: Tree, ancestors: Set[CommitId], locs: str -> PackId }
 
   /// The intents a ref has landed, each to the commit that carries it. (pail's keeps the
   /// last `RECENT_MAX`; never reached here.)
@@ -84,7 +85,7 @@ module bucket {
   /// A combining writer's change (`intents/<branch>/<id>.json`), keyed here by its writer
   /// (a writer makes one per commit). Ids sort by creation time, `at`; clocks differ
   /// between machines, so `at` is any time, ties broken by `RANK`.
-  type Intent = { base: CommitId, delta: Delta, reloc: Delta, at: int }
+  type Intent = { base: CommitId, delta: Delta, reloc: Delta, reuse: str -> PackId, at: int }
 
   /// A commit a combining round builds for an intent: its tree and ancestors, known before
   /// it is stored.
@@ -93,9 +94,12 @@ module bucket {
     commit: CommitId,
     tree: Tree,
     ancestors: Set[CommitId],
-    // The big files whose page entry the commit points at its writer's pack (the intent's
-    // delta, and the soft relocations that still applied).
+    // The big files whose page entry the commit sets (the intent's delta, and the soft
+    // relocations that still applied): in its writer's pack, or, for those the intent
+    // reuses, in the pack the entry already named.
     wrote: Set[str],
+    // The intent's reused paths (`Intent.reuse`): its entries carry those locations.
+    reuse: str -> PackId,
   }
 
   /// A lease's kind: writers hold shared leases together; gc holds an exclusive one alone.
@@ -265,14 +269,29 @@ module bucket {
   pure def newest(ancestors: Set[CommitId]): CommitId =
     ancestors.fold([], (best, x) => if (length(x) > length(best)) x else best)
 
-  /// Commit `id` with its page, created as `uploaded` does, writing the paths that differ
-  /// from its parent's. The parent is stored already.
-  pure def stored(b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId]): Bucket =
-    storedWith(
-      b, id, tree, ancestors,
-      if (ancestors == Set()) PATHS
-      else PATHS.filter(p => tree.get(p) != treeOf(b, newest(ancestors)).get(p)),
-      Map(),
+  /// Commit `id` with its page, whose big files are where `locs` say, stored with nothing
+  /// else: the commit is a copy (a rewrite's, a landed stack's) of changes whose entries
+  /// carry their locations, so it points at the packs and chunks its originals stored
+  /// and writes none (`write_commit` of a delta read off a commit's change list). Creates
+  /// are no-ops where the object is there already.
+  pure def storedCopy(b: Bucket, id: CommitId, tree: Tree, ancestors: Set[CommitId], locs: str -> PackId): Bucket =
+    Set({ tree: tree, locs: locs }).fold(b, (n, page) => {
+      ...b,
+      pages: created(b.pages, page, true),
+      commits: created(b.commits, id, { tree: tree, ancestors: ancestors, locs: locs }),
+      young: {
+        ...b.young,
+        pages: if (createApplies(b.pages, page)) b.young.pages.union(Set(page)) else b.young.pages,
+        commits: if (createApplies(b.commits, id)) b.young.commits.union(Set(id)) else b.young.commits,
+      },
+    })
+
+  /// Where a copy of the change `d` (the paths commit `from` changed from its parent) puts
+  /// the big files of `tree`: each path it writes where `from`'s page has it, the rest where
+  /// the copy's parent does (`inherited`).
+  pure def copyLocs(b: Bucket, tree: Tree, d: Delta, from: CommitId, inherited: str -> PackId): str -> PackId =
+    PATHS.filter(p => isBig(tree.get(p))).mapBy(p =>
+      if (d.keys().contains(p)) locOf(b, from, p) else inherited.get(p)
     )
 
   /// Commit `id` with its page, whose big files at `wrote` go in its pack (stored with
@@ -375,10 +394,11 @@ module bucket {
     )
 
   /// The batch's commits with `n` ancestors: each in its writer's pack, uploaded already
-  /// with the writer's first attempt (a reused file is not modelled through combining).
+  /// with the writer's first attempt, except the paths its intent reuses, which carry the
+  /// location the intent's entry has.
   pure def storedBatchLevel(b: Bucket, batch: Set[Entry], n: int): Bucket =
     batch.filter(e => e.ancestors.size() == n).fold(b, (acc, e) =>
-      storedWith(acc, e.commit, e.tree, e.ancestors, e.wrote, Map())
+      storedWith(acc, e.commit, e.tree, e.ancestors, e.wrote, e.reuse)
     )
 
   /// Commits stored together (at most four: a writer each), each after its parent (a
@@ -396,7 +416,7 @@ module bucket {
 
   /// The commits of `items` with `n` ancestors, stored.
   pure def storedLevel(b: Bucket, items: Set[Made], n: int): Bucket =
-    items.filter(m => m.ancestors.size() == n).fold(b, (acc, m) => stored(acc, m.id, m.tree, m.ancestors))
+    items.filter(m => m.ancestors.size() == n).fold(b, (acc, m) => storedCopy(acc, m.id, m.tree, m.ancestors, m.locs))
 
   /// Whether a swap of the ref expecting `version` applies.
   pure def refSwapApplies(b: Bucket, version: int): bool = casApplies(b.refs, BRANCH, version)

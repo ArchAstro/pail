@@ -1,11 +1,13 @@
 // -*- mode: Bluespec; -*-
 /// Landing a stack (`pail land --stack`, `Repo::land_stack`) on the branch, racing the
 /// writers and rewriters there. A client first makes its stack: a branch of its own (named
-/// after it) holding one commit on what the branch had then. Each step is one store
+/// after it) at what the branch has then, and one commit on it. Each step is one store
 /// request (or one wave):
 ///
 /// ```text
-///   Idle ─stack (its branch and commit, whole)─▶ Stacked ─beginLand─▶ Leasing ─▶ CheckingLeases
+///   Idle ─beginBranch─▶ Leasing ─▶ CheckingLeases ─▶ Branching ─createBranch─▶ Branched
+///                                    └─(lease stale at its check)─▶ Done (Unknown)
+///   Branched ─stack (its commit, whole)─▶ Stacked ─beginLand─▶ Leasing ─▶ CheckingLeases
 ///   Done (a land returned) ─beginLand─▶ Leasing    (again: idempotent)
 ///   CheckingLeases ─▶ LdReading
 ///   LdReading ─ldRead─▶ Done (Published)       (the branch has its commit, or a copy of it)
@@ -26,24 +28,61 @@ module land {
   import world.* from "./world"
   import rewrite.* from "./rewrite"
 
-  /// Make `c`'s stack: its commit of `delta` on the branch's tip, stored under a lease
-  /// taken and released (`write_commit`), and the branch `c` naming it, under another
-  /// (`create_branch`).
-  /// Nothing else writes either. It waits while gc holds its lease.
-  pure def stackCan(s: State, c: str): bool = and {
+  /// Make `c`'s stack, as `pail switch -c` and `pail commit` do: first its branch, named
+  /// after it, at the commit the branch has now (`create_branch`, under a lease of its own
+  /// that it checks before the write); then its commit of `delta` on that, which moves the
+  /// branch (an uncontended `commit` on a branch only `c` writes, taken whole).
+  pure def beginBranchCan(s: State, c: str): bool = and {
     client(s, c).phase == Idle,
     not(s.bucket.refs.keys().contains(c)),
+  }
+
+  pure def beginBranchNext(s: State, c: str): State =
+    withClient(s, c, {
+      ...IDLE,
+      phase: Leasing,
+      branching: true,
+      base: tip(s.bucket).commit,
+      seen: { commit: tip(s.bucket).commit, version: 0 },
+    })
+
+  /// The write of `refs/<c>`, which `Lease::check` let go (`checkLeases` is where it is
+  /// asked: the lease listing is the last request before it). A write that does not reach
+  /// the store, or whose answer is lost, fails the call; the branch exists in the second
+  /// case. Either way the lease is released.
+  pure def createBranchCan(s: State, c: str): bool = client(s, c).phase == Branching
+
+  pure def createBranchNext(s: State, c: str, d: Delivery): State = {
+    val cl = client(s, c)
+    val b =
+      if (received(d))
+        { ...s.bucket, refs: created(s.bucket.refs, c, { commit: cl.base, recent: Map(), lineage: NO_LINEAGE }) }
+      else s.bucket
+    {
+      ...s,
+      bucket: unleased(b, c),
+      timing: s.timing.set(c, NO_TIMING),
+      clients: s.clients.set(c,
+        if (answered(d)) { ...cl, phase: Branched, branching: false }
+        else { ...cl, phase: Done, outcome: Unknown, branching: false }
+      ),
+    }
+  }
+
+  /// Commit `c`'s `delta` on its branch (stored under a lease taken and released, with the
+  /// branch moved to it). Nothing else writes either. It waits while gc holds its lease.
+  pure def stackCan(s: State, c: str): bool = and {
+    client(s, c).phase == Branched,
     not(leasedByOthers(s.bucket, c, Set(Exclusive), s.now)),
   }
 
   pure def stackNext(s: State, c: str, delta: Delta): State = {
-    val on = tip(s.bucket).commit
+    val on = client(s, c).base
     val id = on.append(c)
     val stored = unleased(uploaded(leased(s.bucket, c, Shared, s.now), id, on, delta, Map()), c)
-    val b = unleased(leased(stored, c, Shared, s.now), c)
     {
       ...s,
-      bucket: { ...b, refs: created(b.refs, c, { commit: id, recent: Map(), lineage: NO_LINEAGE }) },
+      bucket: { ...stored, refs: swapped(stored.refs, c, versionOf(stored.refs, c), { commit: id, recent: Map(), lineage: NO_LINEAGE }) },
       clients: s.clients.set(c, { ...client(s, c), phase: Stacked }),
     }
   }
@@ -100,9 +139,15 @@ module land {
       if (d.keys().exists(p => treeOf(s.bucket, base).get(p) != treeOf(s.bucket, cur.commit).get(p)))
         finished(s, c, { ...client(s, c), phase: Done, outcome: Conflicted, ld: seen })
       else Set(remade(c, t, cur.commit)).fold(s, (n2, id) => {
+        val tree = overlay(treeOf(s.bucket, cur.commit), d)
         val after = {
           ...s,
-          bucket: uploaded(s.bucket, id, cur.commit, d, Map()),
+          // The copy's entries are the stack commit's: it points at the packs that commit
+          // does, and stores none.
+          bucket: storedCopy(
+            s.bucket, id, tree, historyAt(s.bucket, cur.commit),
+            copyLocs(s.bucket, tree, d, t, body(s.bucket.commits, cur.commit).locs),
+          ),
           clients: s.clients.set(c, { ...client(s, c), phase: LdSwapping, ld: { ...seen, tip: id } }),
         }
         guarded(after, c, ldSwapNext(after, c, Dropped))

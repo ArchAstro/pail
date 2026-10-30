@@ -13,7 +13,7 @@ module world {
   /// combining (`Intending` .. `Withdrawing`, `Repo::commit_combining`). A client
   /// rewriting the branch instead (`rewrite.qnt`) leases as a writer does, then goes
   /// `RwStoring` .. `RwRechecking`; one landing a stack (`land.qnt`) first makes it
-  /// (`Stacked`), then leases and goes `LdReading` .. `LdRechecking`.
+  /// (`Branching`, `Branched`, `Stacked`), then leases and goes `LdReading` .. `LdRechecking`.
   type Phase =
     | Idle
     | Leasing
@@ -33,6 +33,8 @@ module world {
     | RwReading
     | RwSwapping
     | RwRechecking
+    | Branching
+    | Branched
     | Stacked
     | LdReading
     | LdSwapping
@@ -117,6 +119,9 @@ module world {
     foundAt: Lineage,
     // The head its last publish left it (`Known`), if any.
     known: Known,
+    // Creating its stack's branch (`create_branch`, under its own lease): from the first
+    // lease request until the ref is written or refused.
+    branching: bool,
     // The big or huge paths its delta writes with content its base already has elsewhere:
     // each to the pack its base's page names for it (the pack is reused, nothing stored).
     // Fixed when it begins, before any lease (`Worktree::commit` prepares the files).
@@ -264,6 +269,7 @@ module world {
     found: ROOT,
     foundAt: NO_LINEAGE,
     known: NO_KNOWN,
+    branching: false,
     reuse: Map(),
   }
 
@@ -349,7 +355,7 @@ module world {
 
   /// A client waiting at a ref swap, which a passed check let go ahead.
   pure def swapping(cl: Client): bool =
-    Set(Swapping, BatchSwapping, RwSwapping, LdSwapping).contains(cl.phase)
+    Set(Swapping, BatchSwapping, RwSwapping, LdSwapping, Branching).contains(cl.phase)
 
   /// gc about to delete an object a passed check let it delete.
   pure def deleting(col: Collector): bool =
