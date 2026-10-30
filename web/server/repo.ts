@@ -4,7 +4,7 @@ import type { RepoConfig } from "./config.js";
 import { PailError, type PailRunner } from "./pail.js";
 import type {
   BlobView, BranchInfo, CheckResult, CheckRollup, CheckState, CommitSummary, LogPage, Policy,
-  Compare, NewPr, PrComment, PrDetail, PrDiff, PrRecord, PrSummary, Review, TreeEntry, TreeListing,
+  Compare, NewComment, NewPr, PrComment, PrDetail, PrDiff, PrRecord, PrSummary, Review, Side, TreeEntry, TreeListing,
 } from "../shared/types.js";
 
 export const META = "_meta";
@@ -36,7 +36,11 @@ export class HttpError extends Error {
   }
 }
 
-interface RawReview { key: string; who: string; verdict: "approve" | "changes"; comment: string; at?: number }
+interface RawReview { key: string; who: string; verdict: "approve" | "changes"; comment: string; at?: number; commit?: string | null }
+type RawComment = Omit<PrComment, "thread" | "outdated">;
+
+const COMMENT_ID = /^\d{13}-[A-Za-z0-9._-]+$/;
+const MAX_TRIES = 50;
 
 interface RawCommit {
   id: string; parent: string | null; author: string; author_date: string; committer: string;
@@ -86,6 +90,26 @@ export function parseBatch(buf: Buffer, names: string[]): Map<string, Buffer | n
     }
     const size = Number(m[1]);
     out.set(name, buf.subarray(pos, pos + size));
+    pos += size + 1;
+  }
+  return out;
+}
+
+/** Like parseBatch, with the blob id the header carries: Map(name -> {id, data} | null). */
+export function parseBatchIds(buf: Buffer, names: string[]): Map<string, { id: string; data: Buffer } | null> {
+  const out = new Map<string, { id: string; data: Buffer } | null>();
+  let pos = 0;
+  for (const name of names) {
+    const nl = buf.indexOf(10, pos);
+    if (nl < 0) break;
+    const m = /^(\S+) \S+ (\d+)$/.exec(buf.subarray(pos, nl).toString());
+    pos = nl + 1;
+    if (!m) {
+      out.set(name, null);
+      continue;
+    }
+    const size = Number(m[2]);
+    out.set(name, { id: m[1], data: buf.subarray(pos, pos + size) });
     pos += size + 1;
   }
   return out;
@@ -419,7 +443,7 @@ export class Repo {
     return { approvals: pol?.approvals ?? 1, required_checks: pol?.required_checks ?? ci.required };
   }
 
-  private async prIndex(tip: string): Promise<{ records: PrRecord[]; reviews: Map<number, RawReview[]>; comments: Map<number, PrComment[]> }> {
+  private async prIndex(tip: string): Promise<{ records: PrRecord[]; reviews: Map<number, RawReview[]>; comments: Map<number, RawComment[]> }> {
     return this.cache.get(this.k("prindex", tip), async () => {
       const paths = await this.lsRecursive(tip, "prs");
       const prFiles = paths.filter((p) => /^\d+\.json$/.test(p));
@@ -436,16 +460,21 @@ export class Repo {
         try {
           const r = JSON.parse(got.get(`prs/${f}`)!.toString());
           const key = file.slice(0, -5);
-          reviews.set(Number(n), [...(reviews.get(Number(n)) ?? []), { key, who: typeof r.who === "string" && r.who ? r.who : key, verdict: r.verdict, comment: r.comment ?? "", at: r.at }]);
+          reviews.set(Number(n), [...(reviews.get(Number(n)) ?? []), { key, who: typeof r.who === "string" && r.who ? r.who : key, verdict: r.verdict, comment: r.comment ?? "", at: r.at, commit: typeof r.commit === "string" ? r.commit : null }]);
         } catch { /* skip */ }
       }
-      const comments = new Map<number, PrComment[]>();
+      const comments = new Map<number, RawComment[]>();
       for (const f of comFiles) {
         const [n, , file] = f.split("/");
         try {
           const c = JSON.parse(got.get(`prs/${f}`)!.toString());
           if (typeof c.body !== "string") continue;
-          comments.set(Number(n), [...(comments.get(Number(n)) ?? []), { id: file.slice(0, -5), who: typeof c.who === "string" && c.who ? c.who : file.slice(0, -5).replace(/^\d+-/, ""), body: c.body, at: c.at }]);
+          const id = file.slice(0, -5);
+          const rec: RawComment = { id, who: typeof c.who === "string" && c.who ? c.who : id.replace(/^\d+-/, ""), body: c.body, at: c.at };
+          if (typeof c.in_reply_to === "string") rec.in_reply_to = c.in_reply_to;
+          if (typeof c.commit === "string") rec.commit = c.commit;
+          if (typeof c.path === "string" && Number.isInteger(c.line) && (c.side === "new" || c.side === "old")) Object.assign(rec, { path: c.path, line: c.line, side: c.side });
+          comments.set(Number(n), [...(comments.get(Number(n)) ?? []), rec]);
         } catch { /* skip */ }
       }
       records.sort((a, b) => b.id - a.id);
@@ -466,7 +495,7 @@ export class Repo {
           ...pr,
           headCommit,
           checks: pr.state === "open" && headCommit ? await this.rollup(headCommit) : undefined,
-          approvals: revs.filter((r) => r.verdict === "approve").length,
+          approvals: revs.filter((r) => r.verdict === "approve" && r.commit && r.commit === headCommit).length,
           changesRequested: revs.filter((r) => r.verdict === "changes").length,
           comments: comments.get(pr.id)?.length ?? 0,
         };
@@ -474,17 +503,18 @@ export class Repo {
     );
   }
 
-  async pr(n: number): Promise<PrDetail> {
+  /** `rec`: judge this record (one just read for a change) rather than the indexed one. */
+  async pr(n: number, rec?: PrRecord): Promise<PrDetail> {
     const tip = await this.metaTip();
     const idx = tip ? await this.prIndex(tip) : null;
-    const pr = idx?.records.find((p) => p.id === n);
+    const pr = rec ?? idx?.records.find((p) => p.id === n);
     if (!pr) throw new HttpError(404, `no pull request #${n}`);
     const refs = await this.refs();
     const headCommit = refs.branches.find((b) => b.name === pr.head)?.commit ?? null;
     const baseCommit = refs.branches.find((b) => b.name === pr.base)?.commit ?? null;
     const policy = await this.policy(pr.base);
     let commits: CommitSummary[] = [];
-    if (headCommit && baseCommit && pr.state === "open") {
+    if (headCommit && baseCommit && pr.state !== "merged") {
       commits = (await this.log({ ref: headCommit, range: `${baseCommit}..${headCommit}`, limit: 200 })).commits;
     } else if (pr.merged_commit) {
       commits = [await this.commit(pr.merged_commit).catch(() => null as any)].filter(Boolean);
@@ -493,16 +523,59 @@ export class Repo {
     }
     const checkCommit = headCommit ?? pr.merged_commit ?? null;
     const checks = checkCommit ? await this.checks(checkCommit, policy.required_checks) : [];
-    const reviews: Review[] = (idx?.reviews.get(n) ?? []).sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map(({ key, ...r }) => ({ ...r, byAuthor: key === slug(pr.author) }));
-    const approvals = reviews.filter((r) => r.verdict === "approve" && !r.byAuthor).length;
+    const reviews: Review[] = (idx?.reviews.get(n) ?? []).sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map(({ key, ...r }) => ({ ...r, byAuthor: key === slug(pr.author), stale: Boolean(headCommit && r.commit !== headCommit) }));
+    // An approval is of the commit it was given on: a push makes it stale. No commit, no count.
+    const approved = reviews.filter((r) => r.verdict === "approve" && !r.byAuthor);
+    const approvals = approved.filter((r) => r.commit && r.commit === headCommit).length;
     const problems: string[] = [];
+    if (pr.state === "merging") problems.push(`pull request is being merged by ${pr.merging?.by ?? "?"}`);
+    else if (pr.state !== "open") problems.push(`pull request is ${pr.state}`);
+    if (pr.draft) problems.push("pull request is a draft");
+    if (!headCommit && pr.state === "open") problems.push(`branch ${pr.head} no longer exists`);
     const failing = policy.required_checks.filter((c) => checks.find((x) => x.name === c)?.state !== "success");
     if (failing.length) problems.push(`required checks not passing: ${failing.join(", ")}`);
-    if (approvals < policy.approvals) problems.push(`${approvals} of ${policy.approvals} approvals`);
-    if (pr.state !== "open") problems.push(`pull request is ${pr.state}`);
-    else if (pr.draft) problems.push("pull request is a draft");
-    if (!headCommit && pr.state === "open") problems.push(`branch ${pr.head} no longer exists`);
-    return { pr, headCommit, baseCommit, reviews, comments: idx?.comments.get(n) ?? [], commits, checks, policy, readiness: { ready: !problems.length, problems }, actions: this.actionsOn };
+    if (approvals < policy.approvals) problems.push(`${approvals} of ${policy.approvals} approvals${approved.length > approvals ? ` (${approved.length - approvals} on an older commit)` : ""}`);
+    const comments = await this.markComments(pr, pr.state === "merged" || pr.state === "merging" ? null : headCommit, commits.map((c) => c.id), idx?.comments.get(n) ?? []);
+    return { pr, headCommit, baseCommit, reviews, comments, commits, checks, policy, readiness: { ready: !problems.length, problems }, actions: this.actionsOn };
+  }
+
+  /**
+   * Adds `thread` and `outdated` to a PR's comments. A line comment is outdated when the head has
+   * moved since its commit and its line, on the new side, is not what it was there (changed, or
+   * gone), or when its commit left the PR; never once the PR is merging or merged. The old side is the fork point's file, which a push
+   * does not change.
+   */
+  private async markComments(pr: PrRecord, head: string | null, ids: string[], raw: RawComment[]): Promise<PrComment[]> {
+    const byId = new Map(raw.map((c) => [c.id, c]));
+    const threadOf = (c: RawComment) => {
+      const seen = new Set<string>();
+      while (c.in_reply_to && byId.has(c.in_reply_to) && !seen.has(c.id)) { seen.add(c.id); c = byId.get(c.in_reply_to)!; }
+      return c.id;
+    };
+    const out: PrComment[] = raw.map((c) => ({ ...c, thread: threadOf(c), outdated: false }));
+    const live = new Set(ids);
+    const todo: PrComment[] = [];
+    for (const c of out) {
+      if (!c.commit || !head || c.commit === head || c.side !== "new") continue;
+      if (!live.has(c.commit)) c.outdated = true;
+      else todo.push(c);
+    }
+    if (todo.length) {
+      const lineAt = new Map<string, string[] | null>();
+      const revs = new Set([head!, ...todo.map((c) => c.commit!)]);
+      await Promise.all([...revs].map(async (rev) => {
+        const paths = [...new Set(todo.flatMap((c) => (rev === head || rev === c.commit ? [c.path!] : [])))];
+        const got = await this.readMany(rev, paths);
+        for (const p of paths) lineAt.set(`${rev}\0${p}`, got.get(p) ? splitLines(got.get(p)!) : null);
+      }));
+      for (const c of todo) {
+        const i = c.line! - 1;
+        const now = lineAt.get(`${head}\0${c.path}`);
+        const then = lineAt.get(`${c.commit}\0${c.path}`);
+        c.outdated = (now?.[i] ?? null) !== (then?.[i] ?? null);
+      }
+    }
+    return out;
   }
 
   async prDiff(n: number): Promise<PrDiff> {
@@ -548,12 +621,17 @@ export class Repo {
     return (a ? a.split("<")[0].trim() : process.env.USER ?? "web") || "web";
   }
 
-  private async put(message: string, files: [string, string][], ifAbsent = false) {
+  /**
+   * Commit one file to `_meta`. `ifAbsent`: it must not exist yet; `expect`: it must still be the
+   * blob the caller read (`--expect`). Either failing is a PailError with code 4.
+   */
+  private async put(message: string, files: [string, string][], opts: { ifAbsent?: boolean; expect?: string } = {}) {
     const args = ["put", META, "-m", message];
     // One stdin stream can feed only one `-` file, so write each from its own read of stdin.
     if (files.length !== 1) throw new Error("one file per put");
     args.push("--file", `${files[0][0]}=-`);
-    if (ifAbsent) args.push("--if-absent");
+    if (opts.ifAbsent) args.push("--if-absent");
+    if (opts.expect) args.push("--expect", `${files[0][0]}=${opts.expect}`);
     try {
       await this.run(args, files[0][1]);
     } finally {
@@ -561,14 +639,59 @@ export class Repo {
     }
   }
 
-  /** A fresh read of one open-or-not record, for a change to it (not the 3-second-old ref). */
+  /** Files of `_meta` as they are now (not the cached tip), with their blob ids. */
+  private async readFresh(paths: string[]): Promise<Map<string, { id: string; data: Buffer } | null>> {
+    const names = paths.map((p) => `${META}:${p}`);
+    const got = parseBatchIds(await this.run(["cat-file", "--batch"], names.join("\n") + "\n"), names);
+    return new Map(paths.map((p, i) => [p, got.get(names[i]) ?? null]));
+  }
+
+  /** PR n's record as it is now, and the blob id to write it against. */
+  private async readRecord(n: number): Promise<{ rec: PrRecord; id: string }> {
+    const f = (await this.readFresh([`prs/${n}.json`])).get(`prs/${n}.json`);
+    let rec: PrRecord | null = null;
+    try { rec = f ? JSON.parse(f.data.toString()) : null; } catch { /* unreadable */ }
+    if (!f || !rec) throw new HttpError(404, `no pull request #${n}`);
+    return { rec, id: f.id };
+  }
+
+  /**
+   * Change PR n's record: `decide` gets the record as it is now and returns the next one, null to
+   * leave it, or throws (an HttpError says why not). The write is against the blob that was read,
+   * so it never overwrites a record it did not see; when the record changed meanwhile, read and
+   * decide again.
+   */
+  private async update(n: number, message: string, decide: (rec: PrRecord) => PrRecord | null | Promise<PrRecord | null>): Promise<PrRecord> {
+    for (let tries = 0; tries < MAX_TRIES; tries++) {
+      const { rec, id } = await this.readRecord(n);
+      const next = await decide({ ...rec });
+      if (!next) return rec;
+      next.updated = now();
+      try {
+        await this.put(message, [[`prs/${n}.json`, JSON.stringify(next, null, 1)]], { expect: id });
+        return next;
+      } catch (e) {
+        if (!(e instanceof PailError && e.code === 4)) throw e; // 4: the record changed since we read it
+      }
+    }
+    throw new HttpError(503, `pull request #${n} keeps changing; try again`);
+  }
+
+  /** A fresh read of one record's detail (not the 3-second-old ref). */
   private async fresh(n: number): Promise<PrDetail> {
     this.invalidateRefs();
     return this.pr(n);
   }
 
-  private async saveRecord(rec: PrRecord, message: string) {
-    await this.put(message, [[`prs/${rec.id}.json`, JSON.stringify({ ...rec, updated: now() }, null, 1)]]);
+  /** Only a merge changes a PR that is being merged. */
+  private static busy(rec: PrRecord) {
+    if (rec.state === "merging") throw new HttpError(409, `PR ${rec.id} is being merged by ${rec.merging?.by ?? "?"}`);
+  }
+
+  /** A branch's tip now, or null. */
+  private async tipNow(branch: string): Promise<string | null> {
+    this.invalidateRefs();
+    return (await this.refs()).branches.find((b) => b.name === branch)?.commit ?? null;
   }
 
   /** Open a pull request: the same record `pail pr create` writes, its id claimed with --if-absent. */
@@ -586,11 +709,11 @@ export class Repo {
     this.invalidateRefs();
     const tip = await this.metaTip();
     let n = Math.max(0, ...(tip ? (await this.prIndex(tip)).records.map((p) => p.id) : [])) + 1;
-    for (let tries = 0; tries < 50; tries++, n++) {
+    for (let tries = 0; tries < MAX_TRIES; tries++, n++) {
       const t = now();
       const rec: PrRecord = { id: n, title, body, head, base, author: this.who(), state: "open", draft, created: t, updated: t };
       try {
-        await this.put(`Open PR ${n}: ${title}`, [[`prs/${n}.json`, JSON.stringify(rec, null, 1)]], true);
+        await this.put(`Open PR ${n}: ${title}`, [[`prs/${n}.json`, JSON.stringify(rec, null, 1)]], { ifAbsent: true });
         return rec;
       } catch (e) {
         if (!(e instanceof PailError && e.code === 4)) throw e; // 4: someone claimed this id first
@@ -599,26 +722,95 @@ export class Repo {
     throw new HttpError(503, "could not claim a pull request id");
   }
 
-  async review(n: number, verdict: "approve" | "changes", comment: string) {
-    this.requireActions();
-    await this.pr(n);
-    const who = this.who();
-    const rec = { verdict, comment: checkText("comment", comment, MAX_BODY, false), at: now(), who };
-    await this.put(`Review PR ${n}: ${verdict}`, [[`prs/${n}/reviews/${slug(who)}.json`, JSON.stringify(rec)]]);
+  /** The PR's commits (oldest first) and the fork point (the oldest one's parent), as `base..head` says now. */
+  private async prCommits(rec: PrRecord, head: string | null): Promise<{ fork: string | null; ids: string[] }> {
+    const base = rec.state === "merged" || !head ? null : await this.tipNow(rec.base);
+    if (!base || !head) return { fork: null, ids: [] };
+    const commits = (await this.log({ ref: head, range: `${base}..${head}`, limit: 200 })).commits;
+    return { fork: commits.length ? commits[commits.length - 1].parent : null, ids: commits.map((c) => c.id).reverse() };
   }
 
-  async comment(n: number, body: string): Promise<PrComment> {
+  /** `commit` (a full id or a prefix of one) as one of the PR's commits, or 400. */
+  private pickCommit(n: number, ids: string[], commit: string): string {
+    const hit = /^[0-9a-f]{4,64}$/.test(commit) ? ids.filter((i) => i.startsWith(commit)) : [];
+    if (hit.length !== 1) throw new HttpError(400, `commit ${commit.slice(0, 64)} is not one of PR ${n}'s commits`);
+    return hit[0];
+  }
+
+  async review(n: number, verdict: "approve" | "changes", comment: string, commit?: unknown) {
     this.requireActions();
-    await this.pr(n);
-    const text = checkText("comment", body, MAX_BODY, false, true);
+    const rec = (await this.fresh(n)).pr;
     const who = this.who();
+    const text = checkText("comment", comment, MAX_BODY, false);
+    const head = await this.tipNow(rec.head);
+    let at: string | null = head;
+    if (commit !== undefined && commit !== null && commit !== "") {
+      if (typeof commit !== "string") throw new HttpError(400, "commit must be text");
+      at = this.pickCommit(n, (await this.prCommits(rec, head)).ids, commit); // the head the reviewer read, when a push may have come since
+    }
+    const r = { verdict, comment: text, at: now(), who, commit: at };
+    await this.put(`Review PR ${n}: ${verdict}`, [[`prs/${n}/reviews/${slug(who)}.json`, JSON.stringify(r)]]);
+  }
+
+  /** The anchor of a line comment, or 400: the commit (default: the head) must be one of the PR's, the path changed by the PR at that commit, and the line a line of that side's file. */
+  private async anchorFor(rec: PrRecord, input: NewComment): Promise<{ path: string; line: number; side: Side; commit: string }> {
+    const { path, line } = input;
+    const side = input.side ?? "new";
+    if (typeof path !== "string" || !path || line === undefined || line === null) throw new HttpError(400, "a line comment needs a path and a line");
+    if (!Number.isInteger(line)) throw new HttpError(400, "line must be a whole number");
+    if (side !== "new" && side !== "old") throw new HttpError(400, "side is new or old");
+    if (input.commit !== undefined && typeof input.commit !== "string") throw new HttpError(400, "commit must be text");
+    const head = await this.tipNow(rec.head);
+    if (!head) throw new HttpError(400, `branch ${rec.head} no longer exists`);
+    const { fork, ids } = await this.prCommits(rec, head);
+    const commit = input.commit ? this.pickCommit(rec.id, ids, input.commit) : this.pickCommit(rec.id, ids, head);
+    // Changed by the PR: the file differs between the fork point and the commit (`pail diff` needs a working copy).
+    const [after, before] = await Promise.all([this.readMany(commit, [path]), fork ? this.readMany(fork, [path]) : new Map<string, Buffer | null>()]);
+    const [neu, old] = [after.get(path) ?? null, before.get(path) ?? null];
+    if (!(neu || old) || (neu && old && neu.equals(old))) throw new HttpError(400, `${path} is not changed by PR ${rec.id} at ${commit.slice(0, 12)}`);
+    const file = side === "new" ? neu : old;
+    if (!file || !(line >= 1 && line <= splitLines(file).length)) throw new HttpError(400, `${path} has no line ${line} on the ${side} side at ${commit.slice(0, 12)}`);
+    return { path, line, side, commit };
+  }
+
+  async comment(n: number, input: Partial<NewComment>): Promise<PrComment> {
+    this.requireActions();
+    const rec = (await this.fresh(n)).pr;
+    const body = checkText("comment", input.body, MAX_BODY, false, true);
+    const who = this.who();
+    let anchor: Partial<Pick<PrComment, "path" | "line" | "side" | "commit" | "in_reply_to">> = {};
+    let thread: string | undefined;
+    if (input.in_reply_to !== undefined && input.in_reply_to !== null) {
+      // A reply is in its parent's thread and on its parent's line.
+      if (input.path !== undefined || input.line !== undefined || input.side !== undefined || input.commit !== undefined) throw new HttpError(400, "a reply takes its parent's line: drop path, line, side and commit");
+      const pid = input.in_reply_to;
+      if (typeof pid !== "string" || !COMMENT_ID.test(pid)) throw new HttpError(400, `bad comment id ${JSON.stringify(pid).slice(0, 80)}`);
+      const file = `prs/${n}/comments/${pid}.json`;
+      const got = (await this.readFresh([file])).get(file);
+      let parent: Record<string, unknown> | null = null;
+      try { parent = got ? JSON.parse(got.data.toString()) : null; } catch { /* unreadable */ }
+      if (!parent) throw new HttpError(404, `PR ${n} has no comment ${pid}`);
+      for (const k of ["path", "line", "side", "commit"] as const) if (k in parent) (anchor as Record<string, unknown>)[k] = parent[k];
+      anchor.in_reply_to = pid;
+      // The thread is its first comment's: follow the parents up, as far as they exist.
+      thread = pid;
+      for (let up = parent, hops = 0; typeof up.in_reply_to === "string" && hops < MAX_TRIES; hops++) {
+        const f = `prs/${n}/comments/${up.in_reply_to}.json`;
+        const g = (await this.readFresh([f])).get(f);
+        if (!g) break;
+        thread = up.in_reply_to;
+        try { up = JSON.parse(g.data.toString()); } catch { break; }
+      }
+    } else if (input.path !== undefined || input.line !== undefined || input.side !== undefined || input.commit !== undefined) {
+      anchor = await this.anchorFor(rec, input as NewComment);
+    }
     let ms = Date.now();
-    for (let tries = 0; tries < 50; tries++, ms++) {
+    for (let tries = 0; tries < MAX_TRIES; tries++, ms++) {
       const id = `${String(ms).padStart(13, "0")}-${slug(who)}`;
-      const rec = { who, body: text, at: now() };
+      const row = { who, body, at: now(), ...anchor };
       try {
-        await this.put(`Comment on PR ${n}`, [[`prs/${n}/comments/${id}.json`, JSON.stringify(rec)]], true);
-        return { id, ...rec };
+        await this.put(`Comment on PR ${n}`, [[`prs/${n}/comments/${id}.json`, JSON.stringify(row)]], { ifAbsent: true });
+        return { id, ...row, thread: thread ?? id, outdated: false } as PrComment;
       } catch (e) {
         if (!(e instanceof PailError && e.code === 4)) throw e;
       }
@@ -628,49 +820,110 @@ export class Repo {
 
   async edit(n: number, input: { title?: unknown; body?: unknown }) {
     this.requireActions();
-    const { pr } = await this.fresh(n);
     if (input.title === undefined && input.body === undefined) throw new HttpError(400, "nothing to change");
-    const rec = { ...pr };
-    if (input.title !== undefined) rec.title = checkText("title", input.title, MAX_TITLE, true, true);
-    if (input.body !== undefined) rec.body = checkText("body", input.body, MAX_BODY, false);
-    await this.saveRecord(rec, `Edit PR ${n}`);
+    const title = input.title === undefined ? undefined : checkText("title", input.title, MAX_TITLE, true, true);
+    const body = input.body === undefined ? undefined : checkText("body", input.body, MAX_BODY, false);
+    await this.update(n, `Edit PR ${n}`, (rec) => {
+      Repo.busy(rec);
+      if (rec.state === "merged") throw new HttpError(409, `PR ${n} is merged`);
+      if (title !== undefined) rec.title = title;
+      if (body !== undefined) rec.body = body;
+      return rec;
+    });
   }
 
   async setDraft(n: number, draft: boolean) {
     this.requireActions();
-    const { pr } = await this.fresh(n);
-    if (pr.state !== "open") throw new HttpError(409, `pull request is ${pr.state}`);
-    await this.saveRecord({ ...pr, draft }, `PR ${n} ${draft ? "back to draft" : "ready for review"}`);
+    await this.update(n, `PR ${n} ${draft ? "back to draft" : "ready for review"}`, (rec) => {
+      Repo.busy(rec);
+      if (rec.state !== "open") throw new HttpError(409, `PR ${n} is ${rec.state}`);
+      rec.draft = draft;
+      return rec;
+    });
   }
 
   async close(n: number) {
     this.requireActions();
-    const { pr } = await this.fresh(n);
-    if (pr.state !== "open") throw new HttpError(409, `pull request is ${pr.state}`);
-    await this.saveRecord({ ...pr, state: "closed", closed_at: now(), closed_by: this.who() }, `Close PR ${n}`);
+    await this.update(n, `Close PR ${n}`, (rec) => {
+      Repo.busy(rec);
+      if (rec.state !== "open") throw new HttpError(409, `PR ${n} is ${rec.state}`);
+      return { ...rec, state: "closed", closed_at: now(), closed_by: this.who() };
+    });
   }
 
   async reopen(n: number) {
     this.requireActions();
-    const d = await this.fresh(n);
-    if (d.pr.state !== "closed") throw new HttpError(409, `pull request is ${d.pr.state}; only a closed one can be reopened`);
-    if (!d.headCommit) throw new HttpError(409, `branch ${d.pr.head} no longer exists`);
-    const { closed_at: _a, closed_by: _b, ...rec } = d.pr;
-    await this.saveRecord({ ...rec, state: "open" }, `Reopen PR ${n}`);
+    await this.update(n, `Reopen PR ${n}`, async (rec) => {
+      Repo.busy(rec);
+      if (rec.state !== "closed") throw new HttpError(409, `PR ${n} is ${rec.state}; only a closed PR can be reopened`);
+      if (!(await this.tipNow(rec.head))) throw new HttpError(409, `branch ${rec.head} no longer exists`);
+      const { closed_at: _a, closed_by: _b, ...open } = rec;
+      return { ...open, state: "open" };
+    });
   }
 
-  async merge(n: number, force: boolean) {
+  /**
+   * Merge: judge the PR, claim it (state `merging`, which edit, close, ready and reopen refuse),
+   * land exactly the commit that was judged, then record the merge. Any failure before the land
+   * releases the claim. `takeover` merges a PR whose earlier merge died after claiming it.
+   */
+  async merge(n: number, force: boolean, takeover = false) {
     this.requireActions();
-    const d = await this.fresh(n);
-    if (d.pr.state !== "open") throw new HttpError(409, `pull request is ${d.pr.state}`);
-    if (d.pr.draft) throw new HttpError(409, "pull request is a draft: mark it ready for review first");
-    if (!d.headCommit) throw new HttpError(409, `branch ${d.pr.head} no longer exists`);
-    if (!d.readiness.ready && !force) throw new HttpError(409, `cannot merge: ${d.readiness.problems.join("; ")}`);
-    const out = (await this.run(["land", d.pr.head, "--stack", "--onto", d.pr.base])).toString();
+    const me = slug(this.who());
+    let rec!: PrRecord;
+    let judged = "";
+    for (let tries = 0; ; tries++) {
+      if (tries >= MAX_TRIES) throw new HttpError(503, `pull request #${n} keeps changing; try again`);
+      this.invalidateRefs();
+      const read = await this.readRecord(n);
+      const d = await this.pr(n, read.rec);
+      let problems = d.readiness.problems;
+      if (read.rec.state === "merging" && takeover) problems = problems.filter((p) => !p.startsWith("pull request is being merged"));
+      // Policy can be overridden; a closed, merged, draft or merging PR or a missing branch cannot.
+      const hard = problems.filter((p) => p.startsWith("pull request is ") || p.includes("no longer exists"));
+      if (hard.length) throw new HttpError(409, `cannot merge: ${hard.join("; ")}`);
+      if (problems.length && !force) throw new HttpError(409, `cannot merge: ${problems.join("; ")}`);
+      rec = { ...read.rec, state: "merging", merging: { by: me, commit: d.headCommit! }, updated: now() };
+      judged = d.headCommit!;
+      try {
+        await this.put(`Merge PR ${n}: claim`, [[`prs/${n}.json`, JSON.stringify(rec, null, 1)]], { expect: read.id });
+        break;
+      } catch (e) {
+        if (!(e instanceof PailError && e.code === 4)) throw e;
+      }
+    }
+    let out: string;
+    try {
+      out = (await this.run(["land", rec.head, "--stack", "--onto", rec.base, "--expect-tip", judged])).toString();
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      const released = await this.update(n, `Merge PR ${n}: released`, (r) => {
+        if (r.state !== "merging" || r.merging?.by !== me) return null;
+        const { merging: _m, ...open } = r;
+        return { ...open, state: "open" };
+      }).then(() => true, () => false);
+      throw new HttpError(409, `cannot merge: ${why} (nothing landed${released ? "" : "; the PR is still marked merging, release it with pail pr merge --takeover"})`);
+    }
     this.invalidateRefs();
-    const tip = (await this.refs()).branches.find((b) => b.name === d.pr.base)?.commit;
-    await this.saveRecord({ ...d.pr, state: "merged", merged_commit: tip, merged_by: this.who(), merged_at: now() }, `Merge PR ${n}`);
+    const tip = await this.landedTip(out, rec.base);
+    await this.update(n, `Merge PR ${n}`, (r) => {
+      if (r.state === "merged") return null;
+      if (r.state !== "merging" || r.merging?.by !== me) throw new HttpError(409, `PR ${n} was changed while merging; its commits are on ${rec.base}`);
+      const { merging: _m, ...rest } = r;
+      return { ...rest, state: "merged", merged_commit: tip, merged_by: this.who(), merged_at: now() };
+    });
     return out.trim();
+  }
+
+  /** The full id of the tip `land` printed (it prints twelve digits); the base's tip if it printed none. */
+  private async landedTip(out: string, base: string): Promise<string | undefined> {
+    const m = /@ ([0-9a-f]{12})/.exec(out);
+    if (m) {
+      const log = await this.lines<RawCommit>(["log", "--json", "-n", "50", base]).catch(() => []);
+      const hit = log.find((c) => c.id.startsWith(m[1]));
+      if (hit) return hit.id;
+    }
+    return (await this.tipNow(base)) ?? undefined;
   }
 }
 

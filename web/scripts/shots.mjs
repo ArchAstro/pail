@@ -34,7 +34,7 @@ shot("file-view", `/${repo}/blob/main/src/claim.rs`);
 shot("commit-diff", `/${repo}/commit/${squash}`);
 shot("commits", `/${repo}/commits/main`);
 shot("pull-request", `/${repo}/pull/2`);
-shot("pull-request-changes", `/${repo}/pull/2?tab=changes`);
+shot("pull-request-changes", `/${repo}/pull/2?tab=changes`, { full: true }); // the line thread sits below the first screen
 shot("checks", `/${repo}/checks`);
 // With actions on (`PAIL_WEB_ACTIONS=1`): the compare page, and a draft PR with a comment. This
 // opens the PR on the demo repository if there is none for the branch yet.

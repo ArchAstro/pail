@@ -78,12 +78,16 @@ only call the `pail` CLI and follow the conventions above.
 - **`extensions/pail-pr`** (`pail pr`): `create` (alias `open`), `list`, `view` (`show`),
   `diff`, `checkout`, `review`, `comment`, `merge`, `close`, `reopen`, `edit`, `ready`,
   `watch`; `--json` on `create`, `list`, `view`, `merge`, `watch`. Merge checks the base
-  branch's policy (approvals from someone other than the author, required checks passing on
-  the PR's head commit), refuses drafts and closed PRs (even with `--force`), then lands the
-  PR with `pail land --stack`. `pail-web` (with `actions: true`) writes the same records, so
-  a PR made in either shows up live in the other. Edits (`edit`, `close`, `ready`) rewrite
-  `prs/<n>.json` whole: the last writer wins, which is fine for a title but means two people
-  editing at the same instant should look again.
+  branch's policy (approvals of the head commit from someone other than the author, required
+  checks passing on it), refuses drafts and closed PRs (even
+  with `--force`), then claims the PR (state `merging`, which `edit`, `close`, `ready` and
+  `reopen` refuse) and lands exactly the commit it judged (`pail land --stack --expect-tip`).
+  `comment` takes `--path/--line/--side/--commit` for a line of the diff and `--reply-to` for a
+  thread; `view` groups threads and marks outdated ones. `pail-web` (with `actions: true`)
+  writes the same records, so a PR made in either shows up live in the other. Every change to
+  `prs/<n>.json` is a compare-and-swap (`pail put --expect`): it re-reads and decides again
+  when the record changed, so no edit overwrites one it did not see. The protocol is modelled
+  in `verify/pr.qnt` and the plugin is checked against it (`verify/README.md`).
 - **`extensions/pail-ci`**: `run` follows `pail events`, checks out the exact commit of each
   event (`pail clone --at`), runs the checks `pail.ci.json` declares and records each result
   on `_meta`; `status <rev>` shows them.

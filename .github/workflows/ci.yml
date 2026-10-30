@@ -38,6 +38,8 @@ jobs:
       - run: npm test
       - run: npm run simulate
       - run: npm run witness
+      - run: npm run witness:pr
+      - run: npm run mutate:pr
   s3:
     # The store contract and CAS tests against an S3 API (moto), as PAIL_TEST_STORES runs them.
     runs-on: ubuntu-latest

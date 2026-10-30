@@ -10,10 +10,10 @@ describe("reading (actions off)", () => {
 
   it("shows comments in order, with the count on the list", async () => {
     const d = await json(app.base, "/api/repos/tidepool/prs/2");
-    expect(d.comments.map((c: any) => c.who)).toEqual(["bo", "chen"]);
+    expect(d.comments.map((c: any) => c.who)).toEqual(["bo", "chen", "bo", "chen"]);
     expect(d.comments[0].body).toContain("ttl / 3");
     const list = await json(app.base, "/api/repos/tidepool/prs");
-    expect(list.find((p: any) => p.id === 2).comments).toBe(2);
+    expect(list.find((p: any) => p.id === 2).comments).toBe(4);
     expect(list.find((p: any) => p.id === 3).comments).toBe(0);
   });
 
@@ -147,7 +147,8 @@ describe("writing (actions on)", () => {
     // Self-approval does not count; Bob's does (a review file per person).
     await send(app.base, "POST", `${api}/prs/6/review`, { verdict: "approve" });
     const { execFileSync } = await import("node:child_process");
-    const asBob = JSON.stringify({ verdict: "approve", comment: "lgtm", at: 1 });
+    const head = (await json(app.base, `${api}/prs/6`)).headCommit;
+    const asBob = JSON.stringify({ verdict: "approve", comment: "lgtm", at: 1, commit: head });
     execFileSync(process.env.PAIL_BIN!, ["--store", store, "put", "_meta", "-m", "Review PR 6", "--file", "prs/6/reviews/bob.json=-"], { input: asBob, env: { ...process.env, PAIL_AUTHOR: "Bob <b@x>" } });
     const d = await eventually(async () => { const x = await json(app.base, `${api}/prs/6`); return x.reviews.some((r: any) => r.who === "bob") && x; });
     expect(d.reviews.find((r: any) => r.who === "bob")).toMatchObject({ verdict: "approve", byAuthor: false });
