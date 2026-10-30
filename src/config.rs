@@ -11,7 +11,8 @@
 //!
 //! Keys pail reads: `user.name`, `user.email`, `init.defaultBranch`, `core.pager`,
 //! `core.abbrev`, `color.ui`, `log.date`, `log.decorate`, `diff.renames`; and in a
-//! repository's own file `core.store`, `core.bare`.
+//! repository's own file `core.store`, `core.bare`; `maintenance.warnSmallPacks`,
+//! `maintenance.amortize`, `maintenance.amortizeSmallPacks`, `maintenance.amortizeFactor`.
 
 use std::path::{Path, PathBuf};
 

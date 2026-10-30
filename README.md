@@ -219,6 +219,17 @@ being moved, that file is left out and the rest is published on the new tip. The
 `clone` (and `status`, at most daily) warns when 100 or more of the tip's packs hold under
 256 KiB of it. `maintenance.warnSmallPacks` sets that count; 0 turns the warning off.
 
+Ordinary commits also compact as they go. When the commit's base has 16 or more small packs
+(under 1 MiB of the tip each), `commit` appends a relocation of old files to the pack it
+uploads anyway: whole packs, smallest first, up to as many bytes as the commit adds (at least
+256 KiB, at most 4 MiB). The bytes come from clean local files whose hash matches the tip's
+entry; a missing, edited or sparse-excluded file is skipped, and nothing is fetched. A
+relocation never makes a commit conflict, fail or retry more: if the branch moved a relocated
+path meanwhile, that relocation is dropped. The old packs stay (history names them), so a
+commit stores at most its budget of extra bytes. `maintenance.amortize = false` turns it off;
+`maintenance.amortizeSmallPacks` sets the trigger (0 = off) and `maintenance.amortizeFactor`
+the multiple of new bytes. Modelled in `verify/` ("Amortized compaction").
+
 ## Inspecting the physical model
 
 ```sh
