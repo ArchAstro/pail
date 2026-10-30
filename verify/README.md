@@ -704,8 +704,9 @@ so it never decides whether the commit lands.
 Nothing on the list. What is still abstracted is named in each section's simplifications:
 one branch for writers, four clients, two paths, one rewrite per client, a stack of one
 commit, the pack-file layout (ranges, `INLINE_MAX` and `PACK_MAX` splitting), real chunk
-boundaries, time as ticks with the stated bounds, and soft relocations (the code does not have
-them yet: `soft_scenarios.qnt` runs in Quint only).
+boundaries, time as ticks with the stated bounds, and the relocation budget (two paths cannot
+show the 256 KiB floor, the 4 MiB cap or the manifest-leaf charge; `src/amortize.rs`'s unit
+tests do).
 
 ## Lease timing (`clock.qnt`)
 

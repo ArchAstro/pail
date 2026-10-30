@@ -1017,7 +1017,8 @@ async fn run(args: RunArgs) -> Result<()> {
                     }
                     import_batched(&repo, &git, &c.pail_branch, head, sha, &mut batch).await?
                 } else if args.client_flow {
-                    let ids_map = (args.amortize && (!args.alternate || seq % 2 == 0)).then_some(&ids.map);
+                    let ids_map =
+                        (args.amortize && (!args.alternate || seq % 2 == 0)).then_some(&ids.map);
                     let (h, n, a, moved) =
                         import_client_flow(&repo, &git, &c.pail_branch, head, sha, ids_map).await?;
                     eprintln!("  relocated {moved} files");
