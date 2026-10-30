@@ -1275,9 +1275,8 @@ impl Harness {
                 data: Bytes::from(decoy),
             });
         }
-        let (entries, relocs, uploads) = self
-            .observer
-            .prepare_files_moving(&inputs, &reuse, &moving);
+        let (entries, relocs, uploads) =
+            self.observer.prepare_files_moving(&inputs, &reuse, &moving);
         let delta = entries
             .into_iter()
             .filter(|e| e.path != DECOY)
