@@ -106,6 +106,11 @@ module publish {
   pure def checkLeasesNext(s: State, c: str): State =
     if (leasedByOthers(s.bucket, c, Set(Exclusive), s.now))
       withClient({ ...s, bucket: unleased(s.bucket, c) }, c, { ...client(s, c), phase: Leasing })
+    // `create_branch` checks its lease before the write, which is its next request.
+    else if (client(s, c).branching)
+      Set(holding(withClient(s, c, { ...client(s, c), phase: Branching }), c)).fold(s, (n, after) =>
+        guarded(after, c, finished(after, c, { ...client(after, c), phase: Done, outcome: Unknown, branching: false }))
+      )
     else
       holding(
         withClient(s, c, { ...client(s, c), phase:
@@ -226,7 +231,7 @@ module publish {
 
   /// The process dies mid-call: it makes no more requests, its refresher stops, and it
   /// leaves its lease behind, which others ignore once it is older than `TTL`.
-  pure def crashCan(s: State, c: str): bool = not(Set(Idle, Stacked, Done).contains(client(s, c).phase))
+  pure def crashCan(s: State, c: str): bool = not(Set(Idle, Branched, Stacked, Done).contains(client(s, c).phase))
 
   pure def crashNext(s: State, c: str): State =
     notHolding(withClient(s, c, { ...client(s, c), phase: Done, outcome: Unknown }), c)

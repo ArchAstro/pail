@@ -135,6 +135,13 @@ module pail {
 
   // ---------- landing a stack ----------
 
+  action beginBranch(c: str): bool = all { beginBranchCan(state, c), state' = beginBranchNext(state, c) }
+
+  action createBranch(c: str, d: Delivery): bool = all {
+    createBranchCan(state, c),
+    state' = createBranchNext(state, c, d),
+  }
+
   action stack(c: str, delta: Delta): bool = all { stackCan(state, c), state' = stackNext(state, c, delta) }
 
   action beginLand(c: str): bool = all { beginLandCan(state, c), state' = beginLandNext(state, c) }
@@ -277,6 +284,8 @@ module pail {
       rwRead(c),
       rwSwap(c, d),
       rwRecheck(c),
+      beginBranch(c),
+      createBranch(c, d),
       stack(c, delta),
       beginLand(c),
       ldRead(c),
@@ -353,6 +362,8 @@ module pail {
       rwRead(c),
       rwSwap(c, d),
       rwRecheck(c),
+      beginBranch(c),
+      createBranch(c, d),
       stack(c, delta),
       beginLand(c),
       ldRead(c),
@@ -374,6 +385,12 @@ module pail {
   /// stored: no page points into a pack that is gone.
   val packsAreStored: bool =
     packsStored(state.bucket, refsReach(state.bucket).union(reflogReaches(state.bucket)))
+
+  /// Only a writer's upload stores a pack: every pack in the bucket is a client's own (a
+  /// rewrite's copy, a landed stack's copy and a combined intent's commit point at the packs
+  /// their originals or writers stored).
+  val packsAreWritersOwn: bool =
+    state.bucket.packs.keys().forall(k => length(k) == 1 and CLIENTS.contains(k[0]))
 
   /// Every big file reads back its content through its page's pack, a relocated file
   /// too: moving a file between packs (a commit writing a path to the content it has)
@@ -570,7 +587,7 @@ module pail {
   /// Whether `c` can still move a ref: in flight (past its first read), with a swap on its
   /// way or a lease fresh enough to pass the check before one.
   def canSwap(c: str): bool =
-    not(Set(Idle, Stacked, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
+    not(Set(Idle, Branched, Stacked, Leasing, CheckingLeases, Done).contains(client(state, c).phase))
       and (swapping(client(state, c)) or fresh(state, c))
 
   /// While gc is about to delete (its lease checked), no writer that can move a ref is in
@@ -582,6 +599,7 @@ module pail {
     gcRunsAlone,
     branchIsComplete,
     packsAreStored,
+    packsAreWritersOwn,
     relocateKeepsContent,
     relocationsKeepContent,
     relocationsNeverConflict,

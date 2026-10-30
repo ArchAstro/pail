@@ -966,6 +966,10 @@ module scenarios {
   /// alice retried and landed her change again.)
   /// @conformance
   run landAfterResetRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(begin("carol", ROOT, BOB_B))
     .then(lease("carol"))
@@ -998,7 +1002,15 @@ module scenarios {
   /// alice's commit.
   /// @conformance
   run landFastForwardRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
+    .then(beginBranch("carol"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(createBranch("carol", Answered))
     .then(stack("carol", BOB_B))
     .then(beginLand("alice"))
     .then(lease("alice"))
@@ -1032,6 +1044,10 @@ module scenarios {
     .then(readRef("bob"))
     .then(upload("bob"))
     .then(swap("bob", Answered))
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(beginRewrite("dave"))
     .then(lease("dave"))
@@ -1058,6 +1074,10 @@ module scenarios {
   /// landed.
   /// @conformance
   run landConflictRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(begin("bob", ROOT, BOB_A))
     .then(lease("bob"))
@@ -1083,6 +1103,10 @@ module scenarios {
   /// more lands.
   /// @conformance
   run landTwiceRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(begin("carol", ROOT, BOB_B))
     .then(lease("carol"))
@@ -1126,6 +1150,10 @@ module scenarios {
     .then(readRef("bob"))
     .then(upload("bob"))
     .then(swap("bob", Answered))
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(beginReset("carol"))
     .then(lease("carol"))
@@ -1993,6 +2021,10 @@ module scenarios {
     .then(tick)
     .then(tick)
     .then(tick)
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(graceElapses)
     .then(gcListCommits)
@@ -2029,6 +2061,10 @@ module scenarios {
     .then(gcMark)
     .then(tick)
     .then(tick)
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(graceElapses)
     .then(gcListCommits)
@@ -2055,6 +2091,10 @@ module scenarios {
     .then(gcMark)
     .then(tick)
     .then(tick)
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(refreshLand(GC, Answered))
     .then(refreshAck(GC))
@@ -2102,6 +2142,10 @@ module scenarios {
   /// branch (and, the lease still stale, would refuse again).
   /// @conformance
   run staleLanderRefusesRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
     .then(stack("alice", ALICE_A))
     .then(beginLand("alice"))
     .then(lease("alice"))
@@ -2822,6 +2866,355 @@ module scenarios {
         liveKeys(state.bucket.packs) == Set(["alice"], ["carol"]),
         packsAreStored,
         relocateKeepsContent,
+      }),
+      state' = state,
+    })
+
+  // ---------- packs through rewrites and landing ----------
+  //
+  // A rewrite's copy and a landed stack's copy are written from the original's change list,
+  // whose entries carry their locations: the copy's page names the original's pack and
+  // stores none. Only a writer's upload makes a pack.
+
+  pure val BIG_BOB: Delta = Map("b" -> "p3")
+
+  /// Alice writes `a` and bob `b`, each a big file in a pack of his own. Carol swaps the two
+  /// commits: both copies point at their originals' packs, no pack is stored, and gc, with
+  /// the originals only in the reflog, keeps both.
+  /// @conformance
+  run rebaseReorderKeepsPacksRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", BIG_1, BIG_BOB))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "reorder"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "bob", "~carol", "alice", "~carol"],
+        body(state.bucket.commits, ["root", "bob", "~carol"]).locs == Map("b" -> ["bob"]),
+        body(state.bucket.commits, tip(state.bucket).commit).locs == Map("a" -> ["alice"], "b" -> ["bob"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"]),
+        packsAreWritersOwn,
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"]),
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+
+  /// Carol melds bob's commit into alice's: the one commit has `a` from alice's pack and `b`
+  /// from bob's, and stores no pack.
+  /// @conformance
+  run rebaseSquashKeepsPacksRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", BIG_1, BIG_BOB))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "squash"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        authorsOf(tip(state.bucket).commit) == Set("alice", "bob"),
+        body(state.bucket.commits, tip(state.bucket).commit).locs == Map("a" -> ["alice"], "b" -> ["bob"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"]),
+        packsAreWritersOwn,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+
+  /// Both commits write `a`, to different big contents; melded, the later entry replaces the
+  /// earlier one's, location and all: the one commit names bob's pack for `a`. Alice's pack
+  /// stays (the reflog's record names her commit).
+  /// @conformance
+  run rebaseSquashLaterPackWinsRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(begin("bob", BIG_1, BIG_A2))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(beginRebase("carol", "squash"))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        treeOf(state.bucket, tip(state.bucket).commit) == Map("a" -> "p2", "b" -> "0"),
+        body(state.bucket.commits, tip(state.bucket).commit).locs == Map("a" -> ["bob"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"]),
+        packsAreWritersOwn,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"]),
+        packsAreStored,
+      }),
+      state' = state,
+    })
+
+  /// Carol rewords alice's commit while bob lands a big file on it. The reword's copy
+  /// keeps alice's page (same locations); bob's commit carried onto it names bob's pack.
+  /// @conformance
+  run carryKeepsPacksRun = init
+    .then(begin("alice", ROOT, BIG_A))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(beginRewrite("carol"))
+    .then(begin("bob", BIG_1, BIG_BOB))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(rwStore("carol"))
+    .then(rwRead("carol"))
+    .then(rwSwap("carol", Answered))
+    .then(all {
+      assert(all {
+        tip(state.bucket).commit == ["root", "alice", "~carol", "bob", "~carol"],
+        body(state.bucket.commits, ["root", "alice", "~carol"]).locs == Map("a" -> ["alice"]),
+        body(state.bucket.commits, tip(state.bucket).commit).locs == Map("a" -> ["alice"], "b" -> ["bob"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["bob"]),
+        packsAreWritersOwn,
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+
+  /// Alice stacks a big file on the root; carol lands another on the branch first. Alice's
+  /// land copies her commit onto carol's: the copy names alice's pack for `a` and carol's
+  /// for `b`, and stores no pack.
+  /// @conformance
+  run landCopyKeepsPacksRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
+    .then(stack("alice", BIG_A))
+    .then(begin("carol", ROOT, BIG_BOB))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(beginLand("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(ldRead("alice"))
+    .then(ldSwap("alice", Answered))
+    .then(all {
+      assert(all {
+        client(state, "alice").outcome == Published,
+        tip(state.bucket).commit == ["root", "carol", "alice", "~alice"],
+        body(state.bucket.commits, tip(state.bucket).commit).locs == Map("a" -> ["alice"], "b" -> ["carol"]),
+        liveKeys(state.bucket.packs) == Set(["alice"], ["carol"]),
+        packsAreWritersOwn,
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+    .then(graceElapses)
+    .then(gcLease)
+    .then(gcCheckLeases)
+    .then(gcMark)
+    .then(gcListCommits)
+    .then(gcListPages)
+    .then(gcListPacks)
+    .then(gcListChunks)
+    .then(gcDone)
+    .then(all {
+      assert(all {
+        liveKeys(state.bucket.packs) == Set(["alice"], ["carol"]),
+        packsAreStored,
+      }),
+      state' = state,
+    })
+
+  // ---------- content reuse through combining ----------
+
+  pure val CAROL_PACK: CommitId = ["root", "carol"]
+
+  /// Carol writes a big file. Alice, based on it, writes the same content at `b` (a copy:
+  /// her base has it), so her upload stores no pack. Bob and dave land on `a` first; she
+  /// loses twice and combines. Her intent carries the entry with the location her upload
+  /// found, so the commit the round makes for it names carol's pack for `b`: still no pack
+  /// of alice's.
+  /// @conformance
+  run reuseThroughCombiningRun = init
+    .then(begin("carol", ROOT, BIG_A))
+    .then(lease("carol"))
+    .then(checkLeases("carol"))
+    .then(readRef("carol"))
+    .then(upload("carol"))
+    .then(swap("carol", Answered))
+    .then(begin("alice", CAROL_PACK, Map("b" -> "p1")))
+    .then(all { assert(client(state, "alice").reuse == Map("b" -> ["carol"])), state' = state })
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(readRef("alice"))
+    .then(begin("bob", CAROL_PACK, BOB_A))
+    .then(lease("bob"))
+    .then(checkLeases("bob"))
+    .then(readRef("bob"))
+    .then(upload("bob"))
+    .then(swap("bob", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(readRef("alice"))
+    .then(begin("dave", CAROL_PACK.append("bob"), Map("a" -> "3")))
+    .then(lease("dave"))
+    .then(checkLeases("dave"))
+    .then(readRef("dave"))
+    .then(upload("dave"))
+    .then(swap("dave", Answered))
+    .then(upload("alice"))
+    .then(swap("alice", Answered))
+    .then(all { assert(client(state, "alice").phase == Intending), state' = state })
+    .then(intend("alice", 1))
+    .then(pollRef("alice"))
+    .then(pollList("alice"))
+    .then(gather("alice", Set()))
+    .then(batchSwap("alice", Answered))
+    .then(cleanup("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").outcome == Published,
+        tip(state.bucket).commit == CAROL_PACK.append("bob").append("dave").append("alice+"),
+        treeOf(state.bucket, tip(state.bucket).commit) == Map("a" -> "3", "b" -> "p1"),
+        body(state.bucket.commits, tip(state.bucket).commit).locs == Map("b" -> ["carol"]),
+        liveKeys(state.bucket.packs) == Set(["carol"]),
+        packsAreStored,
+        relocateKeepsContent,
+      }),
+      state' = state,
+    })
+
+  // ---------- making a stack's branch ----------
+
+  /// Alice's branch is created under a lease of its own, checked before the write
+  /// (`create_branch`). Her lease was put at tick 0 and is listed at tick 4, past the
+  /// margin: the check refuses, nothing is written, the call fails and its lease goes.
+  /// @conformance
+  run staleBranchCreateRefusesRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(checkLeases("alice"))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == Done,
+        client(state, "alice").outcome == Unknown,
+        not(state.bucket.refs.keys().contains("alice")),
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// The same at the edge of the margin: three ticks, and the check passes.
+  /// @conformance
+  run branchCreateAtTheEdgeRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(tick)
+    .then(tick)
+    .then(tick)
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Answered))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == Branched,
+        body(state.bucket.refs, "alice").commit == ROOT,
+        liveKeys(state.bucket.locks) == Set(),
+      }),
+      state' = state,
+    })
+
+  /// The write lands but its answer is lost: the call fails, and the branch exists, naming
+  /// the commit it was made at. A stack is not made.
+  /// @conformance
+  run createBranchLostReplyRun = init
+    .then(beginBranch("alice"))
+    .then(lease("alice"))
+    .then(checkLeases("alice"))
+    .then(createBranch("alice", Lost))
+    .then(all {
+      assert(all {
+        client(state, "alice").phase == Done,
+        client(state, "alice").outcome == Unknown,
+        body(state.bucket.refs, "alice").commit == ROOT,
+        liveKeys(state.bucket.locks) == Set(),
       }),
       state' = state,
     })
