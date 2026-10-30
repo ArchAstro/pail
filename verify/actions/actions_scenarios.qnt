@@ -364,6 +364,98 @@ module actionsScenarios {
       state' = state,
     })
 
+  /// A newer push cancels run 1 while a sweep requeues its running job (the runner's lease
+  /// lapsed). The sweep lands first: the cancel commit, which read that job, finds it changed
+  /// and conflicts; read again, it cancels the requeued job too. (Without the guard on the
+  /// jobs it read, the cancelled run would keep a queued job: found by simulation.)
+  /// @conformance
+  run cancelRacesSweepRun = init
+    .then(fire("push1"))
+    .then(read("o1", ITrigger("push1")))
+    .then(write("o1"))
+    .then(sync)
+    .then(claimRead("r1", BLD))
+    .then(claimWrite("r1"))
+    .then(read("o1", IStart(BLD)))
+    .then(write("o1"))
+    .then(tick)
+    .then(tick)
+    .then(read("o2", ISweep(BLD)))
+    .then(fire("push2"))
+    .then(read("o1", ITrigger("push2")))
+    .then(write("o2"))
+    .then(write("o1"))
+    .then(all {
+      assert(all {
+        state.t1.jobs.get(BLD).status == Queued,
+        not(state.t1.runs.get(1).cancel),
+        state.t1.runs.keys() == Set(1),
+      }),
+      state' = state,
+    })
+    .then(read("o1", ITrigger("push2")))
+    .then(write("o1"))
+    .then(all {
+      assert(all {
+        state.t1.runs.get(1).cancel,
+        state.t1.jobs.get(BLD).concl == Cancelled,
+        cancelledIsIdle,
+        oneActivePerGroup,
+      }),
+      state' = state,
+    })
+
+  /// A failed run is rerun while a newer push takes the group over. Both read the run done
+  /// (so the push has nothing to cancel); the rerun lands first, the push finds the run
+  /// changed and conflicts, and read again it cancels the rerun. (Without the guard on the
+  /// previous holder, two runs would be active in the group: found by simulation.)
+  /// @conformance
+  run rerunRacesPushRun = init
+    .then(fire("push1"))
+    .then(read("o1", ITrigger("push1")))
+    .then(write("o1"))
+    .then(sync)
+    .then(claimRead("r1", BLD))
+    .then(claimWrite("r1"))
+    .then(read("o1", IStart(BLD)))
+    .then(write("o1"))
+    .then(started("r1"))
+    .then(result("r1", Failure))
+    .then(read("o1", IAccept({ jk: BLD, seq: 1 })))
+    .then(write("o1"))
+    .then(read("o1", IPromote(TST)))
+    .then(write("o1"))
+    .then(read("o1", IPromote(DEP)))
+    .then(write("o1"))
+    .then(read("o1", IFinish(1)))
+    .then(write("o1"))
+    .then(fire("push2"))
+    .then(read("o1", IRerun(1)))
+    .then(read("o2", ITrigger("push2")))
+    .then(write("o1"))
+    .then(write("o2"))
+    .then(all {
+      assert(all {
+        state.t1.runs.keys() == Set(1),
+        state.t1.runs.get(1).att == 2,
+        not(state.t1.runs.get(1).done),
+        state.pend.get("o2") == NoPend,
+      }),
+      state' = state,
+    })
+    .then(read("o2", ITrigger("push2")))
+    .then(write("o2"))
+    .then(all {
+      assert(all {
+        state.t1.runs.get(1).cancel,
+        not(state.t1.runs.get(2).cancel),
+        state.t1.groups == Map("main" -> 2),
+        oneActivePerGroup,
+        cancelledIsIdle,
+      }),
+      state' = state,
+    })
+
   /// Two runners read the queue entry at once: the lease write has one winner, and the other
   /// finds the lease changed and leaves the job.
   /// @conformance
