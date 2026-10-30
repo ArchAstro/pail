@@ -190,6 +190,10 @@ enum Cmd {
         /// Skip the pre-publish hook.
         #[arg(short = 'n', long)]
         no_verify: bool,
+        /// With --stack: land only if the branch is at this commit (exit 4 if it moved), so
+        /// what lands is what the caller judged.
+        #[arg(long, value_name = "COMMIT", requires = "stack")]
+        expect_tip: Option<String>,
     },
     /// Rewrite a branch's commits (reorder, reword, squash, fixup, drop, move onto another
     /// base) in one atomic publish.
@@ -396,9 +400,14 @@ enum Cmd {
         /// Remove PATH from the branch.
         #[arg(long = "delete", value_name = "PATH")]
         deletes: Vec<String>,
-        /// Fail (exit 4) if any PATH already exists: create-only, e.g. to claim an id.
+        /// Fail (exit 4) if any --file PATH already exists: create-only, e.g. to claim an id.
+        /// Sugar for `--expect PATH=absent` on each.
         #[arg(long)]
         if_absent: bool,
+        /// `PATH=ID` (a blob id, as `cat-file --batch` prints it) or `PATH=absent`: fail (exit 4)
+        /// unless PATH is as the caller read it. PATH must be one of the --file/--delete paths.
+        #[arg(long = "expect", value_name = "PATH=ID|absent")]
+        expect: Vec<String>,
     },
     /// Stream ref changes as JSON lines, from the store's own notifications or by polling.
     #[command(after_long_help = cli_help::EVENTS)]
@@ -786,6 +795,10 @@ fn main() {
             eprintln!("error: {m}");
             std::process::exit(4);
         }
+        if let Some(t) = e.downcast_ref::<pail::repo::TipError>() {
+            eprintln!("error: {t}");
+            std::process::exit(4);
+        }
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
@@ -981,6 +994,7 @@ async fn run(cli: Cli) -> Result<()> {
             files,
             deletes,
             if_absent,
+            expect,
         } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let repo = &ctx.repo;
@@ -1007,21 +1021,53 @@ async fn run(cli: Cli) -> Result<()> {
             if inputs.is_empty() && deletes.is_empty() {
                 bail!("nothing to put: pass --file PATH=SRC or --delete PATH");
             }
-            if if_absent && base.is_some() {
-                let root = repo.root_of(base).await?;
-                let present: Vec<String> = {
-                    let mut v = vec![];
-                    for i in &inputs {
-                        if repo.get_entry(root, &i.path).await?.is_some() {
-                            v.push(i.path.clone());
-                        }
-                    }
-                    v
+            // path -> the blob id the caller read (None: absent). Checked against the tip read
+            // above; `commit` then fails (exit 4) if anyone changed these paths since, so the
+            // check holds at the swap.
+            let mut expects: BTreeMap<String, Option<String>> = BTreeMap::new();
+            for e in &expect {
+                let (path, want) = e
+                    .split_once('=')
+                    .with_context(|| format!("--expect wants PATH=ID or PATH=absent, got {e}"))?;
+                let path = path.trim_matches('/').to_string();
+                if !inputs.iter().any(|i| i.path == path)
+                    && !deletes.iter().any(|d| d.trim_matches('/') == path)
+                {
+                    bail!("--expect {path}: not a --file or --delete path");
+                }
+                expects.insert(path, (want != "absent").then(|| want.to_string()));
+            }
+            if if_absent {
+                for i in &inputs {
+                    expects.entry(i.path.clone()).or_insert(None);
+                }
+            }
+            if !expects.is_empty() {
+                let root = match base {
+                    Some(b) => Some(repo.root_of(Some(b)).await?),
+                    None => None,
                 };
-                if !present.is_empty() {
+                let objs = pail::gitobj::GitObjects::new(&ctx);
+                let mut stale = vec![];
+                for (path, want) in &expects {
+                    let have = match (root, base) {
+                        (Some(r), Some(b)) => match repo.get_entry(r, path).await? {
+                            Some(entry) => Some(
+                                objs.id(&pail::gitobj::Object::Blob { commit: b, entry })
+                                    .await?,
+                            ),
+                            None => None,
+                        },
+                        _ => None,
+                    };
+                    if &have != want {
+                        stale.push(path.clone());
+                    }
+                }
+                if !stale.is_empty() {
                     return Err(pail::repo::ConflictError {
                         branch: branch.clone(),
-                        paths: present,
+                        paths: stale,
                     }
                     .into());
                 }
@@ -1554,9 +1600,14 @@ async fn run(cli: Cli) -> Result<()> {
             onto,
             stack: true,
             no_verify,
+            expect_tip,
             ..
         } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let expect_tip = match expect_tip {
+                Some(t) => Some(ctx.resolve(&t).await?),
+                None => None,
+            };
             let onto = match onto {
                 Some(o) => o,
                 None => ctx.default_branch().await?.to_string(),
@@ -1571,12 +1622,13 @@ async fn run(cli: Cli) -> Result<()> {
                 };
             let out = ctx
                 .repo
-                .land_stack_with(
+                .land_stack_expecting(
                     &branch,
                     &onto,
                     &ctx.config.identity("committer")?,
                     &now_date(),
                     check,
+                    expect_tip,
                 )
                 .await?;
             if out.landed.is_empty() {
@@ -1617,6 +1669,7 @@ async fn run(cli: Cli) -> Result<()> {
             message,
             stack: false,
             no_verify,
+            ..
         } => {
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
             let onto = match onto {

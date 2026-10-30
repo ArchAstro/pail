@@ -5,13 +5,24 @@ A pull request is a branch plus records on the `_meta` branch. There is no serve
 write is a `pail put` (an atomic commit), ids are claimed with `--if-absent`, and merging is
 `pail land --stack`. pail-web reads and writes the same records.
 
-    _meta:prs/<n>.json                       the PR: id, title, body, head, base, author, state,
-                                             draft, created, updated, closed_at/by,
-                                             merged_at/by, merged_commit
-    _meta:prs/<n>/reviews/<who>.json         {"verdict": "approve"|"changes", "comment", "at", "who"}
-    _meta:prs/<n>/comments/<ms>-<who>.json   {"who", "body", "at"}
+    _meta:prs/<n>.json                       the PR: id, title, body, head, base, author, state
+                                             (open|closed|merging|merged), draft, created, updated,
+                                             closed_at/by, merging {by, commit}, merged_at/by,
+                                             merged_commit
+    _meta:prs/<n>/reviews/<who>.json         {"verdict": "approve"|"changes", "comment", "at", "who",
+                                             "commit": the head it was given on}
+    _meta:prs/<n>/comments/<ms>-<who>.json   {"who", "body", "at"}, and for a line comment
+                                             "path", "line", "side" (new|old), "commit" (the PR head
+                                             it was read at), for a reply "in_reply_to" (a comment's
+                                             file name, without .json)
     _meta:checks/<commit>/<check>.json       written by CI (pail-ci)
     <base>:pail.pr.json                      policy: {"approvals": 1, "required_checks": ["test"]}
+
+Concurrency (modelled in verify/pr.qnt, checked by tests/pr_refinement.rs): a record is changed
+with `put --expect` on the blob it read, so a write never overwrites one it did not see; on exit 4
+the command re-reads and decides again. Merging claims the PR first (state `merging`, which edit,
+close, ready and reopen refuse), then lands exactly the commit it judged (`land --expect-tip`),
+then records the merge. An approval counts for the commit it was given on.
 
 Install (once): put this file on PATH as `pail-pr`, then `pail pr ...` works.
 
@@ -73,37 +84,54 @@ def ls(target):
     return [line.split()[-1] for line in r.stdout.decode().splitlines() if line.strip()]
 
 
-def read_many(paths, rev=META):
-    """{path: parsed JSON | None}, all from one process (`cat-file --batch`)."""
-    if not paths:
-        return {}
-    names = [f"{rev}:{p}" for p in paths]
+def read_blobs(names):
+    """[(blob id, bytes) | None] for `rev:path` names, from one process (`cat-file --batch`)."""
+    if not names:
+        return []
     buf = pail(["cat-file", "--batch"], data=("\n".join(names) + "\n").encode()).stdout
-    out, pos = {}, 0
-    for p in paths:
+    out, pos = [], 0
+    for _ in names:
         nl = buf.find(b"\n", pos)
         if nl < 0:
-            break
-        m = re.match(rb"^\S+ \S+ (\d+)$", buf[pos:nl])
+            out.append(None)
+            continue
+        m = re.match(rb"^(\S+) \S+ (\d+)$", buf[pos:nl])
         pos = nl + 1
         if not m:
-            out[p] = None
+            out.append(None)
             continue
-        size = int(m.group(1))
-        try:
-            out[p] = json.loads(buf[pos:pos + size])
-        except ValueError:
-            out[p] = None
+        size = int(m.group(2))
+        out.append((m.group(1).decode(), buf[pos:pos + size]))
         pos += size + 1
     return out
+
+
+def read_raw(paths, rev=META):
+    """{path: (blob id, parsed JSON | None) | None}."""
+    out = {}
+    for p, b in zip(paths, read_blobs([f"{rev}:{p}" for p in paths])):
+        if b is None:
+            out[p] = None
+            continue
+        try:
+            out[p] = (b[0], json.loads(b[1]))
+        except ValueError:
+            out[p] = (b[0], None)
+    return out
+
+
+def read_many(paths, rev=META):
+    """{path: parsed JSON | None}."""
+    return {p: (v[1] if v else None) for p, v in read_raw(paths, rev).items()}
 
 
 def read_json(rev, path):
     return read_many([path], rev).get(path)
 
 
-def put(message, path, data, if_absent=False):
-    """Commit one file to _meta atomically."""
+def put(message, path, data, if_absent=False, expect=None):
+    """Commit one file to _meta atomically. `expect`: the blob id the caller read (exit 4 if
+    the file differs now); `if_absent`: the file must not exist; neither: overwrite."""
     with tempfile.TemporaryDirectory() as tmp:
         src = os.path.join(tmp, "f")
         with open(src, "wb") as f:
@@ -111,6 +139,8 @@ def put(message, path, data, if_absent=False):
         args = ["put", META, "-m", message, "--file", f"{path}={src}"]
         if if_absent:
             args.append("--if-absent")
+        if expect:
+            args += ["--expect", f"{path}={expect}"]
         return pail(args)
 
 
@@ -155,12 +185,13 @@ def load(only=None):
     prs = [p for p in paths if re.fullmatch(r"prs/\d+\.json", p)]
     revs = sorted(p for p in paths if re.fullmatch(r"prs/\d+/reviews/[^/]+\.json", p))
     coms = sorted(p for p in paths if re.fullmatch(r"prs/\d+/comments/[^/]+\.json", p))
-    got = read_many(prs + revs + coms)
+    raw = read_raw(prs + revs + coms)
+    got = {p: (v[1] if v else None) for p, v in raw.items()}
     out = {}
     for p in prs:
         rec = got.get(p)
         if rec:
-            out[int(rec.get("id", p.split("/")[1][:-5]))] = {"pr": rec, "reviews": {}, "comments": []}
+            out[int(rec.get("id", p.split("/")[1][:-5]))] = {"pr": rec, "ver": raw[p][0], "reviews": {}, "comments": []}
     for p in revs:
         n, who = int(p.split("/")[1]), p.rsplit("/", 1)[-1][:-5]
         if n in out and got.get(p):
@@ -210,7 +241,9 @@ def readiness(d):
     pol = policy(rec["base"])
     checks = checks_for(head)
     problems = []
-    if rec["state"] != "open":
+    if rec["state"] == "merging":
+        problems.append(f"pull request is being merged by {rec.get('merging', {}).get('by', '?')}")
+    elif rec["state"] != "open":
         problems.append(f"pull request is {rec['state']}")
     if rec.get("draft"):
         problems.append("pull request is a draft")
@@ -219,9 +252,12 @@ def readiness(d):
     failing = [c for c in pol["required_checks"] if checks.get(c, {}).get("state") != "success"]
     if failing:
         problems.append(f"required checks not passing on {(head or '')[:12]}: {', '.join(failing)}")
-    approvals = [w for w, r in d["reviews"].items() if r.get("verdict") == "approve" and w != slug(rec["author"])]
+    # An approval is of the commit it was given on: a push makes it stale.
+    approved = [w for w, r in d["reviews"].items() if r.get("verdict") == "approve" and w != slug(rec["author"])]
+    approvals = [w for w in approved if d["reviews"][w].get("commit") == head]
     if len(approvals) < pol["approvals"]:
-        problems.append(f"{len(approvals)} of {pol['approvals']} approvals")
+        old = f" ({len(approved) - len(approvals)} on an older commit)" if len(approved) > len(approvals) else ""
+        problems.append(f"{len(approvals)} of {pol['approvals']} approvals{old}")
     return head, checks, pol, problems
 
 
@@ -258,6 +294,86 @@ def check_branch(name):
     if not name or name.startswith("-") or re.search(r"[\s\0]", name) or len(name) > 300:
         die(f"bad branch name {name!r}")
     return name
+
+
+# ---- line comments ---------------------------------------------------------------------
+
+
+def file_lines(rev, path):
+    """The lines of `rev:path`, or None if it has none."""
+    return lines_at([(rev, path)])[0]
+
+
+def lines_at(pairs):
+    out = []
+    for b in read_blobs([f"{rev}:{path}" for rev, path in pairs]):
+        if b is None:
+            out.append(None)
+            continue
+        lines = b[1].decode("utf-8", "replace").split("\n")
+        out.append(lines[:-1] if lines and lines[-1] == "" else lines)
+    return out
+
+
+def pr_commits(rec, head):
+    """(fork point, the PR's commits oldest first): what `head` has that `base` has not."""
+    commits = commits_between(rec["base"], head) if head else []
+    return (commits[-1].get("parent") if commits else None), [c["id"] for c in reversed(commits)]
+
+
+def anchor_for(rec, path, line, side, commit):
+    """The anchor of a line comment, or die. The commit (default: the head) must be one of the
+    PR's, the path changed by the PR at that commit, and the line a line of that side's file:
+    the new side is the file at the commit, the old side the file at the PR's fork point."""
+    head = rev_parse(rec["head"])
+    if not head:
+        die(f"branch {rec['head']} no longer exists")
+    if not path or line is None:
+        die("a line comment needs --path and --line")
+    if side not in ("new", "old"):
+        die("--side is new or old")
+    fork, ids = pr_commits(rec, head)
+    ids = [i for i in ids if i.startswith(commit)] if commit else [head]
+    if len(ids) != 1:
+        die(f"commit {commit} is not one of PR {rec['id']}'s commits")
+    commit = ids[0]
+    names = text(["diff", "--name-only", fork, commit]).split() if fork else ls(f"{commit}:")
+    if path not in names:
+        die(f"{path} is not changed by PR {rec['id']} at {commit[:12]}")
+    lines = file_lines(commit if side == "new" else fork, path) if side == "new" or fork else None
+    if lines is None or not 1 <= line <= len(lines):
+        die(f"{path} has no line {line} on the {side} side at {commit[:12]}")
+    return {"path": path, "line": line, "side": side, "commit": commit}
+
+
+def mark_outdated(rec, comments):
+    """Set c["outdated"] on every comment. A line comment is outdated when the head has moved
+    since its commit and its line, on the new side, is not what it was there (changed, or
+    gone). The old side is the fork point's file, which a push does not change. A comment
+    whose commit left the PR (the branch was rewritten) is outdated too."""
+    head = rev_parse(rec["head"]) if rec["state"] != "merged" else None
+    _, ids = pr_commits(rec, head)
+    todo = []
+    for c in comments:
+        c["outdated"] = False
+        if c.get("commit") and head and c["commit"] != head and c.get("side") == "new":
+            if c["commit"] not in ids:
+                c["outdated"] = True
+            else:
+                todo.append(c)
+    now_, then = lines_at([(head, c["path"]) for c in todo]), lines_at([(c["commit"], c["path"]) for c in todo])
+    for c, a, b in zip(todo, now_, then):
+        i = c["line"] - 1
+        c["outdated"] = (a[i] if a and i < len(a) else None) != (b[i] if b and i < len(b) else None)
+
+
+def thread_of(c, by_file):
+    """The file name of the comment that opened `c`'s thread."""
+    seen = set()
+    while c.get("in_reply_to") in by_file and c["file"] not in seen:
+        seen.add(c["file"])
+        c = by_file[c["in_reply_to"]]
+    return c["file"]
 
 
 # ---- commands --------------------------------------------------------------------------
@@ -343,10 +459,16 @@ def cmd_list(a):
 
 def view_json(d):
     head, checks, pol, problems = readiness(d)
+    comments = [dict(c) for c in d["comments"]]
+    mark_outdated(d["pr"], comments)
+    by_file = {c["file"]: c for c in comments}
+    for c in comments:
+        c["thread"] = thread_of(c, by_file)
     return {
         "pr": d["pr"], "head_commit": head, "checks": checks, "policy": pol,
-        "reviews": [dict(r, who=r.get("who") or w, key=w) for w, r in sorted(d["reviews"].items())],
-        "comments": d["comments"], "ready": not problems, "problems": problems,
+        "reviews": [dict(r, who=r.get("who") or w, key=w, stale=bool(head and r.get("commit") != head))
+                    for w, r in sorted(d["reviews"].items())],
+        "comments": comments, "ready": not problems, "problems": problems,
     }
 
 
@@ -373,11 +495,22 @@ def cmd_view(a):
     if d["reviews"]:
         print("\nreviews:")
         for who, r in sorted(d["reviews"].items()):
-            print(f"  {r.get('who') or who:12} {r['verdict']}" + (f": {r['comment']}" if r.get("comment") else ""))
+            old = " (older commit)" if head and r.get("commit") != head else ""
+            print(f"  {r.get('who') or who:12} {r['verdict']}{old}" + (f": {r['comment']}" if r.get("comment") else ""))
     if d["comments"]:
         print("\ncomments:")
-        for c in d["comments"]:
-            print(f"  {c.get('who', '?')} {when(c.get('at'))}\n    " + c.get("body", "").replace("\n", "\n    "))
+        comments = [dict(c) for c in d["comments"]]
+        mark_outdated(rec, comments)
+        by_file = {c["file"]: c for c in comments}
+        for root in comments:
+            if thread_of(root, by_file) != root["file"]:
+                continue
+            for c in [root] + [x for x in comments if x is not root and thread_of(x, by_file) == root["file"]]:
+                pad = "  " if c is root else "      "
+                where = f"  {c['path']}:{c['line']} ({c['side']})" if c.get("path") else ""
+                out = "  (outdated)" if c["outdated"] else ""
+                print(f"{pad}{c.get('who', '?')} {when(c.get('at'))}{where}{out}  [{c['file']}]")
+                print(pad + "  " + c.get("body", "").replace("\n", "\n" + pad + "  "))
     if rec["state"] == "open":
         print("\nmergeable" if not problems else "\nnot mergeable: " + "; ".join(problems))
     if rec.get("closed_at"):
@@ -430,18 +563,40 @@ def message_arg(a, label, required):
 def cmd_review(a):
     rec = get_pr(a.n, full=False)
     verdict = "approve" if a.approve else "changes"
-    r = {"verdict": verdict, "comment": message_arg(a, "comment", False), "at": now(), "who": user()}
+    head = rev_parse(rec["head"])
+    commit = head
+    if a.commit:  # the head the reviewer read, when a push may have come since
+        commit = next((i for i in pr_commits(rec, head)[1] if i.startswith(a.commit)), None)
+        if not commit:
+            die(f"commit {a.commit} is not one of PR {a.n}'s commits")
+    r = {"verdict": verdict, "comment": message_arg(a, "comment", False), "at": now(), "who": user(), "commit": commit}
     put(f"Review PR {a.n}: {verdict}", f"prs/{a.n}/reviews/{slug(user())}.json", json.dumps(r))
     print(f"reviewed PR {a.n}: {verdict}" + (" (your own approval does not count)" if verdict == "approve" and slug(rec["author"]) == slug(user()) else ""))
 
 
+def comment_id(s):
+    return s if re.fullmatch(r"\d{13}-[A-Za-z0-9._-]+", s or "") else None
+
+
 def cmd_comment(a):
-    get_pr(a.n, full=False)
+    pr = get_pr(a.n, full=False)
     body = message_arg(a, "comment", True)
     who = user()
+    anchor = {}
+    line = getattr(a, "line", None)
+    if getattr(a, "reply_to", None):
+        # A reply is in its parent's thread and on its parent's line.
+        if a.path or line is not None or a.commit or a.side:
+            die("a reply takes its parent's line: drop --path, --line, --side and --commit")
+        pid = comment_id(a.reply_to) or die(f"bad comment id {a.reply_to!r}")
+        parent = read_json(META, f"prs/{a.n}/comments/{pid}.json") or die(f"PR {a.n} has no comment {pid}")
+        anchor = {k: parent[k] for k in ("path", "line", "side", "commit") if k in parent}
+        anchor["in_reply_to"] = pid
+    elif getattr(a, "path", None) or line is not None or getattr(a, "commit", None):
+        anchor = anchor_for(pr, a.path, line, a.side or "new", a.commit)
     ms = int(time.time() * 1000)
     for _ in range(50):
-        rec = {"who": who, "body": body, "at": now()}
+        rec = {"who": who, "body": body, "at": now(), **anchor}
         try:
             put(f"Comment on PR {a.n}", f"prs/{a.n}/comments/{ms:013d}-{slug(who)}.json", json.dumps(rec), if_absent=True)
             break
@@ -452,25 +607,83 @@ def cmd_comment(a):
     print(f"commented on PR {a.n}")
 
 
-def save(rec, message):
-    rec["updated"] = now()
-    put(message, f"prs/{rec['id']}.json", dump(rec))
+def update(n, decide, message):
+    """Change PR n's record: `decide(rec)` returns the next one (or None to leave it, or dies).
+    It is written only if the record is still the one read (`put --expect`); otherwise
+    re-read and decide again, so a write never overwrites one it did not see."""
+    for _ in range(50):
+        got = read_raw([f"prs/{n}.json"])[f"prs/{n}.json"]
+        if not got or not got[1]:
+            die(f"no PR {n}")
+        rec = decide(dict(got[1]))
+        if rec is None:
+            return got[1]
+        rec["updated"] = now()
+        try:
+            put(message, f"prs/{n}.json", dump(rec), expect=got[0])
+            return rec
+        except PailError as e:
+            if e.code != 4:  # 4: the record changed since we read it
+                raise
+    die(f"PR {n} keeps changing; try again")
+
+
+def busy(rec):
+    """Only a merge changes a PR that is being merged."""
+    if rec["state"] == "merging":
+        die(f"PR {rec['id']} is being merged by {rec.get('merging', {}).get('by', '?')}")
 
 
 def cmd_merge(a):
-    d = get_pr(a.n)
-    rec = d["pr"]
-    head, _, _, problems = readiness(d)
-    # Policy can be overridden; a closed, merged or draft PR or a missing branch cannot.
-    hard = [p for p in problems if p.startswith("pull request is ") or "no longer exists" in p]
-    if hard:
-        die("cannot merge: " + "; ".join(hard))
-    if problems and not a.force:
-        die("cannot merge: " + "; ".join(problems) + " (--force overrides)")
-    out = text(["land", rec["head"], "--stack", "--onto", rec["base"]])
-    tip = rev_parse(rec["base"])
-    rec.update(state="merged", merged_commit=tip, merged_by=user(), merged_at=now())
-    save(rec, f"Merge PR {a.n}")
+    me = slug(user())
+    for _ in range(50):
+        d = get_pr(a.n)
+        rec = d["pr"]
+        head, _, _, problems = readiness(d)
+        if rec["state"] == "merging" and a.takeover:
+            problems = [p for p in problems if not p.startswith("pull request is being merged")]
+        # Policy can be overridden; a closed, merged, draft or merging PR or a missing branch cannot.
+        hard = [p for p in problems if p.startswith("pull request is ") or "no longer exists" in p]
+        if hard:
+            die("cannot merge: " + "; ".join(hard))
+        if problems and not a.force:
+            die("cannot merge: " + "; ".join(problems) + " (--force overrides)")
+        # Claim the PR before landing: from here close, edit and ready refuse, so a PR that was
+        # judged open and ready is not closed or drafted while its commits land.
+        claim = dict(rec, state="merging", merging={"by": me, "commit": head}, updated=now())
+        try:
+            put(f"Merge PR {a.n}: claim", f"prs/{a.n}.json", dump(claim), expect=d["ver"])
+            break
+        except PailError as e:
+            if e.code != 4:
+                raise
+    else:
+        die(f"PR {a.n} keeps changing; try again")
+
+    def unclaim(r):
+        if r["state"] == "merging" and r.get("merging", {}).get("by") == me:
+            r["state"] = "open"
+            r.pop("merging", None)
+            return r
+
+    try:
+        # Land the commit that was judged, not whatever the branch has become.
+        out = text(["land", rec["head"], "--stack", "--onto", rec["base"], "--expect-tip", head])
+    except PailError as e:
+        update(a.n, unclaim, f"Merge PR {a.n}: released")
+        die(f"cannot merge: {e} (nothing landed)")
+    tip = landed_tip(out, rec["base"])
+
+    def finish(r):
+        if r["state"] == "merged":
+            return None
+        if r["state"] != "merging" or r.get("merging", {}).get("by") != me:
+            die(f"PR {a.n} was changed while merging; its commits are on {rec['base']}")
+        r.pop("merging", None)
+        r.update(state="merged", merged_commit=tip, merged_by=user(), merged_at=now())
+        return r
+
+    rec = update(a.n, finish, f"Merge PR {a.n}")
     if a.json:
         print(json.dumps(rec))
         return
@@ -478,52 +691,88 @@ def cmd_merge(a):
     print(f"merged PR {a.n} into {rec['base']} @ {tip[:12]}")
 
 
+def landed_tip(out, base):
+    """The full id of the tip `land` printed (it prints twelve digits); the base's tip if it
+    printed none, as when there was nothing to land."""
+    m = re.search(r"@ ([0-9a-f]{12})", out)
+    if m:
+        r = pail(["log", "--json", "-n", "50", base], check=False)
+        for l in r.stdout.decode().splitlines():
+            try:
+                if json.loads(l)["id"].startswith(m.group(1)):
+                    return json.loads(l)["id"]
+            except (ValueError, KeyError):
+                pass
+    return rev_parse(base)
+
+
 def cmd_close(a):
-    rec = get_pr(a.n, full=False)
-    if rec["state"] != "open":
-        die(f"PR {a.n} is {rec['state']}")
+    state = get_pr(a.n, full=False)["state"]
+    if state != "open":
+        die(f"PR {a.n} is {state}")
     if a.message:
-        cmd_comment(argparse.Namespace(n=a.n, message=a.message))
-    rec.update(state="closed", closed_at=now(), closed_by=user())
-    save(rec, f"Close PR {a.n}")
+        cmd_comment(argparse.Namespace(n=a.n, message=a.message, path=None, line=None, side=None, commit=None, reply_to=None))
+
+    def decide(rec):
+        busy(rec)
+        if rec["state"] != "open":
+            die(f"PR {a.n} is {rec['state']}")
+        rec.update(state="closed", closed_at=now(), closed_by=user())
+        return rec
+
+    update(a.n, decide, f"Close PR {a.n}")
     print(f"closed PR {a.n}")
 
 
 def cmd_reopen(a):
-    rec = get_pr(a.n, full=False)
-    if rec["state"] != "closed":
-        die(f"PR {a.n} is {rec['state']}; only a closed PR can be reopened")
-    if not rev_parse(rec["head"]):
-        die(f"branch {rec['head']} no longer exists")
-    rec.update(state="open")
-    rec.pop("closed_at", None)
-    rec.pop("closed_by", None)
-    save(rec, f"Reopen PR {a.n}")
+    def decide(rec):
+        busy(rec)
+        if rec["state"] != "closed":
+            die(f"PR {a.n} is {rec['state']}; only a closed PR can be reopened")
+        if not rev_parse(rec["head"]):
+            die(f"branch {rec['head']} no longer exists")
+        rec.update(state="open")
+        rec.pop("closed_at", None)
+        rec.pop("closed_by", None)
+        return rec
+
+    update(a.n, decide, f"Reopen PR {a.n}")
     print(f"reopened PR {a.n}")
 
 
 def cmd_edit(a):
-    rec = get_pr(a.n, full=False)
     if a.title is None and a.body is None and a.draft is None:
         die("nothing to edit: pass --title, --body or --draft/--ready")
-    if a.title is not None:
-        rec["title"] = check_text("title", a.title.strip(), MAX_TITLE, True)
-        if not rec["title"]:
-            die("a title is required")
-    if a.body is not None:
-        rec["body"] = check_text("body", a.body, MAX_BODY, False)
-    if a.draft is not None:
-        rec["draft"] = a.draft
-    save(rec, f"Edit PR {a.n}")
+    title = check_text("title", a.title.strip(), MAX_TITLE, True) if a.title is not None else None
+    if a.title is not None and not title:
+        die("a title is required")
+    body = check_text("body", a.body, MAX_BODY, False) if a.body is not None else None
+
+    def decide(rec):
+        busy(rec)
+        if rec["state"] == "merged":
+            die(f"PR {a.n} is merged")
+        if title is not None:
+            rec["title"] = title
+        if body is not None:
+            rec["body"] = body
+        if a.draft is not None:
+            rec["draft"] = a.draft
+        return rec
+
+    update(a.n, decide, f"Edit PR {a.n}")
     print(f"edited PR {a.n}")
 
 
 def cmd_ready(a):
-    rec = get_pr(a.n, full=False)
-    if rec["state"] != "open":
-        die(f"PR {a.n} is {rec['state']}")
-    rec["draft"] = bool(a.undo)
-    save(rec, f"PR {a.n} {'back to draft' if a.undo else 'ready for review'}")
+    def decide(rec):
+        busy(rec)
+        if rec["state"] != "open":
+            die(f"PR {a.n} is {rec['state']}")
+        rec["draft"] = bool(a.undo)
+        return rec
+
+    update(a.n, decide, f"PR {a.n} {'back to draft' if a.undo else 'ready for review'}")
     print(f"PR {a.n} is {'a draft' if a.undo else 'ready for review'}")
 
 
@@ -587,6 +836,8 @@ examples:
   pail pr list --state all --json
   pail pr view 3; pail pr diff 3; pail pr checkout 3
   pail pr review 3 --approve -m "lgtm"; pail pr comment 3 -m "one question"
+  pail pr comment 3 -m "rename?" --path src/a.rs --line 12   # on a line of the diff (--side old: before)
+  pail pr comment 3 -m "done" --reply-to 1700000000000-alice  # in that comment's thread
   pail pr ready 3; pail pr merge 3; pail pr close 3; pail pr reopen 3
   pail pr edit 3 --title "New title" --body "More words"
   pail pr watch
@@ -639,14 +890,21 @@ def main():
     g.add_argument("--approve", "-a", action="store_true")
     g.add_argument("--request-changes", "-r", action="store_true")
     r.add_argument("-m", "--message", help="the review comment")
+    r.add_argument("--commit", help="the PR commit you read (default: the head now); an approval counts for that commit only")
 
-    cm = add("comment", cmd_comment, "add a comment (stdin if no -m)")
+    cm = add("comment", cmd_comment, "add a comment (stdin if no -m), on a line with --path/--line, or a reply with --reply-to")
     cm.add_argument("n", type=int, metavar="N")
     cm.add_argument("-m", "--message")
+    cm.add_argument("--path", help="comment on this file of the PR's diff")
+    cm.add_argument("--line", type=int, help="the line (1-based) of --path on --side")
+    cm.add_argument("--side", choices=["old", "new"], help="old: the file before the PR; new: after (default)")
+    cm.add_argument("--commit", help="the PR commit the line was read at (default: the head now)")
+    cm.add_argument("--reply-to", metavar="ID", help="a comment's id (its file name in `view --json`); the reply joins its thread")
 
     m = add("merge", cmd_merge, "merge when the base's policy allows (pail land --stack)")
     m.add_argument("n", type=int, metavar="N")
     m.add_argument("--force", action="store_true", help="merge despite policy problems (never a draft or closed PR)")
+    m.add_argument("--takeover", action="store_true", help="take over a merge that died after claiming the PR")
     jflag(m)
 
     cl = add("close", cmd_close, "close without merging")
