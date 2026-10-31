@@ -20,11 +20,14 @@ module actionsSim {
     ran: RunAtt -> Concl,
     // how many commits created the run of each event key
     creates: str -> int,
+    // for the witnesses: a wake-up was lost, a safety poll ticked a replica
+    lost: bool,
+    polled: bool,
   }
 
   var ghost: Ghost
 
-  pure val GHOST0: Ghost = { accepted: Map(), done: Map(), ran: Map(), creates: EVENTS.mapBy(k => 0) }
+  pure val GHOST0: Ghost = { accepted: Map(), done: Map(), ran: Map(), creates: EVENTS.mapBy(k => 0), lost: false, polled: false }
 
   /// What the step `a`, taking `s` to `t`, did to the ghost.
   pure def ghostAfter(g: Ghost, s: State, a: Act, t: State): Ghost = {
@@ -49,6 +52,8 @@ module actionsSim {
       done: fresh.fold(g.done, (m, jk) => m.put(jk, { concl: jobs.get(jk).concl, by: jobs.get(jk).by, byseq: jobs.get(jk).byseq })),
       ran: freshRuns.fold(g.ran, (m, id) => m.put({ rid: id, att: runs.get(id).att }, runs.get(id).concl)),
       creates: g.creates.keys().mapBy(k => g.creates.get(k) + (if (created.contains(k)) 1 else 0)),
+      lost: g.lost or (match a { | ALose(_) => true | _ => false }),
+      polled: g.polled or (match a { | AWake(_) => true | _ => false }),
     }
   }
 
@@ -70,6 +75,8 @@ module actionsSim {
     | AStarted(_) => 9
     | AResult(_) => 10
     | ACrash(_) => 11
+    | AWake(_) => 12
+    | ALose(_) => 13
   }
 
   action simStep = {
@@ -115,6 +122,10 @@ module actionsSim {
   val neverRerun: bool = not(state.t1.runs.keys().exists(id => state.t1.runs.get(id).att > 1))
   /// A job behind an environment gate is queued, on an approval.
   val neverApproved: bool = not(state.t1.jobs.keys().exists(jk => gated(jk.job) and (state.t1.jobs.get(jk).status == InProgress or state.t1.jobs.get(jk).status == Queued)))
+  /// An event's wake-up is lost.
+  val neverLostWake: bool = not(ghost.lost)
+  /// The safety poll wakes a replica.
+  val neverPolled: bool = not(ghost.polled)
   /// A job is skipped because a need failed.
   val neverSkipped: bool = not(state.t1.jobs.keys().exists(jk => state.t1.jobs.get(jk).concl == Skipped))
 }

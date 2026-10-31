@@ -85,6 +85,12 @@ module actions {
   /// `_checks` is projected from the accepted job (else from the runners' raw results).
   pure val CHECK_FROM_JOB = true
 
+  /// The orchestrator also ticks every so often, whatever it was told (the events model's
+  /// safety poll, `verify/events/events.qnt`), and when it starts (the cursor resume). Else
+  /// it ticks only on events, and a lease that expires, which writes nothing and so announces
+  /// nothing, strands its job.
+  pure val SAFETY_POLL = true
+
   pure def needsOf(j: str): Set[str] = if (j == "build") Set() else Set("build")
   /// The job has `environment: prod`.
   pure def gated(j: str): bool = j == "deploy"
@@ -175,6 +181,9 @@ module actions {
     t2: T2,
     runners: str -> Runner,
     pend: str -> PendO,
+    // the replicas with a wake-up pending: an event announced a write, the safety poll came
+    // due, or the replica started. A replica ticks (`read`) only when woken.
+    woken: Set[str],
   }
 
   pure val EMPTY1: T1 = { runs: Map(), claims: Map(), jobs: Map(), groups: Map(), checks: Map(), approvals: Set() }
@@ -186,6 +195,7 @@ module actions {
     t2: { queue: Set(), leases: Map(), results: Map(), cancels: Set(), started: Set() },
     runners: RUNNERS.mapBy(r => { alive: true, ph: RIdle }),
     pend: REPLICAS.mapBy(o => NoPend),
+    woken: REPLICAS,
   }
 
   // ---------- reading ----------
@@ -426,11 +436,36 @@ module actions {
     | NoPend => false
   }
 
-  pure def readCan(s: State, o: str, i: Intent): bool = not(isPend(s.pend.get(o))) and deciding(s, i)
+  // ---------- wake-ups: the events model's contract ----------
+  //
+  // `pail events --branch '*' --prefix actions/ --cursor ...` runs beside each replica and
+  // wakes it. Its contract (`events.qnt`): a notification is only a hint; one may be lost,
+  // repeated or reordered (a wake is a flag, so repeating and reordering change nothing, and
+  // `lose` drops it); the safety poll re-lists everything every so often and the start-up
+  // diff against the cursor emits what changed while the process was down, so a wake lost
+  // only delays a tick (`wake`). What announces nothing, the passing of time, wakes no one.
 
+  /// A write to a branch or an object of the area was announced to every replica.
+  pure def announced(s: State): State = s.with("woken", REPLICAS)
+
+  pure def wakeCan(s: State, o: str): bool = SAFETY_POLL and not(s.woken.contains(o))
+  pure def wakeNext(s: State, o: str): State = s.with("woken", s.woken.union(Set(o)))
+
+  pure def loseCan(s: State, o: str): bool = s.woken.contains(o)
+  pure def loseNext(s: State, o: str): State = s.with("woken", s.woken.exclude(Set(o)))
+
+  /// Some replica will tick: it is woken, mid-commit (its write is a ref event and a retry),
+  /// or the safety poll will come.
+  pure def willTick(s: State): bool = SAFETY_POLL or s.woken.size() > 0 or REPLICAS.exists(o => isPend(s.pend.get(o)))
+
+  pure def readCan(s: State, o: str, i: Intent): bool =
+    not(isPend(s.pend.get(o))) and s.woken.contains(o) and deciding(s, i)
+
+  /// A tick takes the wake-up it answers.
   pure def readNext(s: State, o: str, i: Intent): State = match decide(s, i) {
     | Refuse => s
     | Do(d) => s.with("pend", s.pend.set(o, Pend({ intent: i, snap: s.t1, d: d })))
+      .with("woken", s.woken.exclude(Set(o)))
   }
 
   pure def writeCan(s: State, o: str): bool = isPend(s.pend.get(o))
@@ -439,19 +474,21 @@ module actions {
   pure def writeNext(s: State, o: str): State = match s.pend.get(o) {
     | NoPend => s
     | Pend(c) =>
-      val s2 = s.with("pend", s.pend.set(o, NoPend))
-      if (landable(s.t1, c)) s2.with("t1", landed(s.t1, c)) else s2
+      // a conflict sends the replica back to read again; a landed commit is announced to all
+      val s2 = s.with("pend", s.pend.set(o, NoPend)).with("woken", s.woken.union(Set(o)))
+      if (landable(s.t1, c)) announced(s2.with("t1", landed(s.t1, c))) else s2
   }
 
   /// The orchestrator keeps the queue to the queued jobs, and marks the running jobs of
   /// cancelled runs. (Both are idempotent Tier 2 writes, and may lag.)
   pure def syncNext(s: State): State = {
     val v = s.t1
-    s.with("t2", {
+    val t = s.with("t2", {
       ...s.t2,
       queue: v.jobs.keys().filter(jk => v.jobs.get(jk).status == Queued),
       cancels: s.t2.cancels.union(v.jobs.keys().filter(jk => v.jobs.get(jk).status == InProgress and runOf(v, jk.rid).cancel)),
     })
+    if (t.t2 == s.t2) s else announced(t)
   }
 
   pure def tickCan(s: State): bool = s.now < MAX_T
@@ -483,8 +520,8 @@ module actions {
   pure def claimWriteNext(s: State, r: str): State = match s.runners.get(r).ph {
     | RReading(x) =>
       if (not(LEASE_CREATE_ONLY) or leaseOf(s.t2, x.jk) == x.seen)
-        setRunner(setLease(s, x.jk, { holder: r, seq: x.seen.seq + 1, exp: s.now + TTL }), r,
-          RHolding({ jk: x.jk, seq: x.seen.seq + 1, started: false }))
+        announced(setRunner(setLease(s, x.jk, { holder: r, seq: x.seen.seq + 1, exp: s.now + TTL }), r,
+          RHolding({ jk: x.jk, seq: x.seen.seq + 1, started: false })))
       else setRunner(s, r, RIdle)
     | _ => s
   }
@@ -499,7 +536,7 @@ module actions {
   pure def refreshNext(s: State, r: str): State = match s.runners.get(r).ph {
     | RHolding(x) =>
       val l = leaseOf(s.t2, x.jk)
-      if (l.holder == r and l.seq == x.seq) setLease(s, x.jk, { ...l, exp: s.now + TTL })
+      if (l.holder == r and l.seq == x.seq) announced(setLease(s, x.jk, { ...l, exp: s.now + TTL }))
       else setRunner(s, r, RIdle)
     | _ => s
   }
@@ -511,8 +548,8 @@ module actions {
 
   pure def startedNext(s: State, r: str): State = match s.runners.get(r).ph {
     | RHolding(x) =>
-      setRunner(s, r, RHolding({ ...x, started: true }))
-        .with("t2", { ...s.t2, started: s.t2.started.union(Set({ jk: x.jk, seq: x.seq })) })
+      announced(setRunner(s, r, RHolding({ ...x, started: true }))
+        .with("t2", { ...s.t2, started: s.t2.started.union(Set({ jk: x.jk, seq: x.seq })) }))
     | _ => s
   }
 
@@ -527,7 +564,7 @@ module actions {
     | RHolding(x) =>
       val rk: ResKey = { jk: x.jk, seq: resSeq(x.seq) }
       if (s.t2.results.keys().contains(rk)) setRunner(s, r, RIdle)
-      else setRunner(s, r, RIdle).with("t2", { ...s.t2, results: s.t2.results.put(rk, { runner: r, seq: x.seq, concl: c }) })
+      else announced(setRunner(s, r, RIdle).with("t2", { ...s.t2, results: s.t2.results.put(rk, { runner: r, seq: x.seq, concl: c }) }))
     | _ => s
   }
 
@@ -538,7 +575,7 @@ module actions {
     s.t1.runs.keys().contains(a.rid) and a.att <= s.t1.runs.get(a.rid).att and not(s.t1.approvals.contains(a))
 
   pure def approveNext(s: State, a: Approval): State =
-    s.with("t1", { ...s.t1, approvals: s.t1.approvals.union(Set(a)) })
+    announced(s.with("t1", { ...s.t1, approvals: s.t1.approvals.union(Set(a)) }))
 
   // ---------- every step, as data (so that the simulation can wrap each) ----------
 
@@ -555,6 +592,8 @@ module actions {
     | AStarted(str)
     | AResult({ r: str, c: Concl })
     | ACrash(str)
+    | AWake(str)
+    | ALose(str)
 
   pure def intentsOf(s: State): Set[Intent] = {
     val js = s.t1.jobs.keys()
@@ -589,11 +628,13 @@ module actions {
       .union(live.filter(r => startedCan(s, r)).map(r => AStarted(r)))
       .union(unions(live.map(r => Set(Success, Failure, Cancelled).filter(c => resultCan(s, r, c)).map(c => AResult({ r: r, c: c })))))
       .union(live.map(r => ACrash(r)))
+      .union(REPLICAS.filter(o => wakeCan(s, o)).map(o => AWake(o)))
+      .union(REPLICAS.filter(o => loseCan(s, o)).map(o => ALose(o)))
   }
 
   pure def apply(s: State, a: Act): State = match a {
     | ATick => tickNext(s)
-    | AFire(k) => s.with("occurred", s.occurred.union(Set(k)))
+    | AFire(k) => announced(s.with("occurred", s.occurred.union(Set(k))))
     | AApprove(x) => approveNext(s, x)
     | ARead(x) => readNext(s, x.o, x.i)
     | AWrite(o) => writeNext(s, o)
@@ -604,6 +645,8 @@ module actions {
     | AStarted(r) => startedNext(s, r)
     | AResult(x) => resultNext(s, x.r, x.c)
     | ACrash(r) => crashNext(s, r)
+    | AWake(o) => wakeNext(s, o)
+    | ALose(o) => loseNext(s, o)
   }
 
   // ---------- actions ----------
@@ -630,6 +673,8 @@ module actions {
   action started(r: str): bool = all { startedCan(state, r), state' = startedNext(state, r) }
   action result(r: str, c: Concl): bool = all { resultCan(state, r, c), state' = resultNext(state, r, c) }
   action crash(r: str): bool = all { state.runners.get(r).alive, state' = crashNext(state, r) }
+  action wake(o: str): bool = all { wakeCan(state, o), state' = wakeNext(state, o) }
+  action lose(o: str): bool = all { loseCan(state, o), state' = loseNext(state, o) }
 
   /// Any interleaving: one enabled step, uniformly.
   action step = {
@@ -640,11 +685,12 @@ module actions {
   // ---------- properties ----------
 
   /// 2. No job stays in_progress once its lease has expired: it is live (its holder's lease
-  /// has not), or the orchestrator can accept its result or sweep it.
+  /// has not), or the orchestrator can accept its result or sweep it, and some replica will
+  /// tick to do it (`willTick`: woken, mid-commit, or the safety poll will come).
   val noStranded: bool = state.t1.jobs.keys().forall(jk => {
     val j = state.t1.jobs.get(jk)
-    j.status != InProgress or liveFor(state, jk, j) or
-      state.t2.results.keys().exists(rk => rk.jk == jk and deciding(state, IAccept(rk))) or deciding(state, ISweep(jk))
+    j.status != InProgress or liveFor(state, jk, j) or (willTick(state) and (
+      state.t2.results.keys().exists(rk => rk.jk == jk and deciding(state, IAccept(rk))) or deciding(state, ISweep(jk))))
   })
 
   /// 4. A job queued, waiting, started or concluded by a runner has all its needs succeeded;

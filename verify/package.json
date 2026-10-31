@@ -16,7 +16,7 @@
     "witness:pr": "for inv in neverMerged neverOutdated neverStale; do quint run pr_sim.qnt --main=prSim --init=simInit --step=simStep --invariant=$inv --max-steps=60 --max-samples=50000 | grep -q '^\\[violation\\]' || { echo \"never reached: $inv\"; exit 1; }; done",
     "mutate:pr": "sh mutate_pr.sh",
     "simulate:actions": "quint run actions/actions_sim.qnt --main=actionsSim --init=simInit --step=simStep --invariant=simSafety --max-steps=60 --max-samples=60000",
-    "witness:actions": "for inv in neverRequeued neverCancelled neverRerun neverApproved neverSkipped; do quint run actions/actions_sim.qnt --main=actionsSim --init=simInit --step=simStep --invariant=$inv --max-steps=60 --max-samples=50000 | grep -q '^\\[violation\\]' || { echo \"never reached: $inv\"; exit 1; }; done",
+    "witness:actions": "for inv in neverRequeued neverCancelled neverRerun neverApproved neverSkipped neverLostWake neverPolled; do quint run actions/actions_sim.qnt --main=actionsSim --init=simInit --step=simStep --invariant=$inv --max-steps=60 --max-samples=50000 | grep -q '^\\[violation\\]' || { echo \"never reached: $inv\"; exit 1; }; done",
     "mutate:actions": "sh mutate_actions.sh",
     "compile:events": "quint-refinements compile events/events_scenarios.qnt --module eventsScenarios --compact --artifact events/events-refinements.json --rust ../tests/events_refinement/generated.rs",
     "simulate:events": "quint run events/events_sim.qnt --main=eventsSim --init=simInit --step=simStep --invariant=simSafety --max-steps=60 --max-samples=100000",
