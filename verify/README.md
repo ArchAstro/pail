@@ -95,7 +95,8 @@ cd .. && cargo test --release --test refinement --test store_refinement --test p
 PAIL_TEST_STORES="s3://bucket/prefix" AWS_ENDPOINT=... cargo test --release --test store_refinement
 ```
 
-CI runs all of it (`npm run check` in place of `compile`, failing on stale generated files).
+CI runs `npm run check` (in place of `compile`, failing on stale generated files) and `npm test` on every push.
+The long runs (`simulate`, `witness*`, `mutate*`) are manual: `gh workflow run model --ref <branch>`.
 
 ## Properties (`pail.qnt`)
 
