@@ -12,16 +12,19 @@ runs each check, and records the result on the `_meta` branch with `pail put`:
     _meta:checks/<commit>/<check>.json   {"state": "pending"|"success"|"failure", ...}
 
 Results are keyed by commit, so duplicate or reordered notifications are harmless, and a
-runner that restarts skips commits that already have results. `_meta` itself (and any `_*`
+runner that restarts skips commits that already have results. `run` keeps a `pail events
+--cursor` (default `$XDG_STATE_HOME/pail-ci/<store hash>.cursor`), so a restart builds the
+commits that landed while it was down, and never skips one: a crash may repeat an event. `_meta` itself (and any `_*`
 branch) is never built, so recording a result cannot trigger another run.
 
-    pail-ci run [--branch GLOB ...] [--gcs-subscription SUB] [--once]
+    pail-ci run [--branch GLOB ...] [--gcs-subscription SUB] [--cursor FILE | --no-cursor] [--once]
     pail-ci status REV
 
 The store comes from --store or PAIL_STORE; the pail binary from PAIL_BIN or PATH.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -109,7 +112,15 @@ def build(store, branch, commit, timeout):
 def cmd_run(a):
     if not (a.store or os.environ.get("PAIL_STORE")):
         sys.exit("pail-ci needs --store or PAIL_STORE")
-    args = ["events", "--initial"] + sum((["--branch", g] for g in a.branch), [])
+    store = a.store or os.environ["PAIL_STORE"]
+    args = ["events"] + sum((["--branch", g] for g in a.branch), [])
+    if a.no_cursor:
+        args += ["--initial"]
+    else:
+        state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+        cursor = a.cursor or os.path.join(state, "pail-ci", hashlib.sha256(store.encode()).hexdigest()[:16] + ".cursor")
+        os.makedirs(os.path.dirname(os.path.abspath(cursor)), exist_ok=True)
+        args += ["--cursor", cursor]
     if a.gcs_subscription:
         args += ["--gcs-subscription", a.gcs_subscription]
     proc = subprocess.Popen([PAIL, "--store", a.store or os.environ["PAIL_STORE"]] + args, stdout=subprocess.PIPE, text=True)
@@ -122,7 +133,7 @@ def cmd_run(a):
             build(a.store, e["branch"], e["commit"], a.timeout)
         except Exception as err:  # keep watching: one broken commit must not stop CI
             print(f"pail-ci: {e['branch']} {e['commit'][:12]}: {err}", file=sys.stderr, flush=True)
-        if a.once and e.get("source") != "initial":
+        if a.once and e.get("source") not in ("initial", "resume"):
             proc.terminate()
             break
 
@@ -146,6 +157,8 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("--branch", action="append", default=[], help="branch glob to build (default: all but _*)")
     r.add_argument("--gcs-subscription")
+    r.add_argument("--cursor", help="where to keep what was built (default: per store, under $XDG_STATE_HOME/pail-ci)")
+    r.add_argument("--no-cursor", action="store_true", help="build every branch's tip at start, and keep nothing")
     r.add_argument("--timeout", type=int, default=1800)
     r.add_argument("--once", action="store_true", help="stop after the first live event (tests)")
     s = sub.add_parser("status")
