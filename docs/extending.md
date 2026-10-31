@@ -9,7 +9,7 @@ writes   pail put <branch> --file PATH=SRC     atomic commit to any branch, no w
          pail land <branch> --stack            every commit of a branch, one atomic swap
          pail rebase --plan FILE --json        rewrite a branch from a JSON plan, one atomic swap
 reads    pail cat <rev>:<path>, pail ls -r <rev>:<dir>, pail log, pail rev-parse
-events   pail events [--branch GLOB] [--gcs-subscription SUB]
+events   pail events [--branch GLOB] [--prefix AREA/P] [--cursor C] [--gcs-subscription SUB]
          one JSON line per ref change: {"branch","commit","old","source","at"}
 ```
 
@@ -48,10 +48,43 @@ gcloud pubsub subscriptions create pail-ci --topic=pail-refs
 pail --store gs://BUCKET/REPO events --gcs-subscription projects/P/subscriptions/pail-ci
 ```
 
-`pail events` treats each notification as a nudge: it re-reads the ref and emits only real
-changes, once. Without notifications (`file://`, emulators) it polls with the same output.
-S3 (EventBridge/SQS), Azure (Event Grid) and R2 (Queues) offer the same prefix-filtered
-create events; adding them is a new source in `src/events.rs`.
+`pail events` treats each notification as a hint: it names a key, and the key is re-read.
+A line is written only if the key differs from the last one written for it, so duplicated and
+reordered notifications cost a read, and nothing in a notification's payload is trusted.
+Without notifications (`file://`, emulators) it re-lists every `--interval-ms` with the same
+output. S3 (EventBridge/SQS), Azure (Event Grid) and R2 (Queues) offer the same
+prefix-filtered create events; adding them is a new `HintSource` in `src/events.rs`.
+
+The guarantees, which `verify/events/events.qnt` states and `tests/events_refinement.rs`
+checks the code against:
+
+1. **A dropped hint costs latency, never correctness.** With notifications, everything is
+   also re-listed every `--safety-poll` seconds (default 60; `0` turns it off).
+2. **At-least-once.** A crash may repeat a line, never skip one. Consumers key work by commit
+   (refs) or by key and version (objects).
+3. **`--cursor` makes a restart lossless.** The cursor (a file, or `bucket:AREA/KEY`) holds
+   what was emitted. On start, every key that differs (deletions too) is written with
+   `"source":"resume"`, then it streams. Per key the cursor records the intent to emit, the
+   line is written, and the cursor takes the new state, so a key that returned to the state
+   the cursor holds (a ref reset, an object deleted again) is still reported. A bucket
+   cursor is compare-and-swapped: a second consumer on it fails instead of overwriting.
+   The first run with a new cursor emits everything that exists. Without `--cursor` a
+   restart takes the present state as already seen.
+4. **Order.** For one key, versions are emitted in the order the store had them.
+
+Objects beside the repository are events too: the Actions orchestrator's `<repo>.actions/`
+area (queue entries, leases, results) is the sibling `gs://BUCKET/REPO.actions/`.
+
+```sh
+gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \
+    --object-prefix=REPO.actions/ --event-types=OBJECT_FINALIZE,OBJECT_DELETE
+pail --store gs://BUCKET/REPO events --branch '*' --prefix actions/ \
+    --cursor bucket:actions/cursors/orchestrator --gcs-subscription projects/P/subscriptions/pail-ci
+# {"key":"queue/ubuntu-latest/4182.1.test.json","version":"1792…","old":null,"op":"put","source":"gcs","at":…}
+```
+
+`--prefix AREA/PREFIX` is `<repo>.AREA/PREFIX`. The cursor lives in the area too, and is not
+reported as an event.
 
 Measured on GCS (2026-10-20, residential client): a ref event arrived 1.2–1.6 s after the
 commit started (the commit itself ~0.5 s).

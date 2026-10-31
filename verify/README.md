@@ -6,8 +6,9 @@ collects it, the properties they must keep, and scenarios the real code is check
 against request by request with
 [quint-refinements](https://github.com/ArchAstro/quint-refinements). Beside it: the store
 contract every backend follows, the branch policy every enforcement point decides, and the
-pull request protocol of `pail pr` (`pr.qnt`, below) and, designed but not yet built, the
-workflow system pail Actions (`actions.qnt`, below).
+pull request protocol of `pail pr` (`pr.qnt`, below), the consumer of `pail events`
+(`events/events.qnt`, below) and, designed but not yet built, the workflow system pail
+Actions (`actions.qnt`, below).
 
 Layers, each importing those below. A feature is a set of pure steps (`xCan(s, ...)`:
 may it happen; `xNext(s, ...)`: the state after) over one shared state, so a new protocol
@@ -51,6 +52,12 @@ tests/pr_refinement.rs ── the real extensions/pail-pr, its put and land held
 actions/actions.qnt ─── actions_sim.qnt ──quint run──▶ safety + history properties hold in every simulated interleaving
    │
 actions_scenarios.qnt ──quint test──▶ the runs a refinement harness will follow (no code to refine yet)
+
+events/events.qnt ─── events/events_sim.qnt ──quint run──▶ safety + history properties hold in every simulated interleaving
+   │
+events/events_scenarios.qnt ──compile──▶ events/events-refinements.json + tests/events_refinement/generated.rs
+                                   │
+tests/events_refinement.rs ── the real events::Watcher over a file:// store, refs and sibling-area objects ──▶ same state after every step
 ```
 
 ## Files
@@ -83,6 +90,12 @@ actions_scenarios.qnt ──quint test──▶ the runs a refinement harness wi
 | `mutate_actions.sh` | Flips each design switch in a scratch copy and expects `actions_sim.qnt` to find a violation |
 | `quint-refinements.json`, `store-refinements.json`, `policy/policy-refinements.json`, `pr-refinements.json` | Generated scenario artifacts (do not edit) |
 | `../tests/*/generated.rs`, `policy/pailpolicy_refinement_gen_test.go` | Generated Rust traits and Go interface (do not edit) |
+| `events/events.qnt` | The `pail events` consumer: keys with versions, notifications that are lost, repeated and reordered, a cursor, crashes; the properties (`safety`) and the design switches (`RESCAN_ON_START`, `CURSOR_AFTER_EMIT`, `WRITE_AHEAD`, `RE_READ`, `SAFETY_POLL`, `DEDUPE`) |
+| `events/events_scenarios.qnt` | `@conformance` runs: the interleavings the watcher must follow |
+| `events/events_sim.qnt` | `events.qnt` under random interleavings, with a ghost for noPhantom, per-key order and cursorMonotone |
+| `mutate_events.sh` | Flips each design switch in a scratch copy and expects `events_sim.qnt` to find a violation |
+| `events/events-refinements.json`, `../tests/events_refinement/generated.rs` | Generated (do not edit) |
+| `../tests/events_refinement.rs` | `events::Watcher` (`observe`, `scan`, `mark`, `emit`, `save`, `open`) against `events.qnt`, for refs with a cursor file and for sibling-area objects with a cursor in the bucket |
 | `../tests/refinement.rs` | `Repo::commit`, `Repo::rewrite_ref`, `Repo::land_stack`, `Repo::successor` and `gc` against `pail.qnt`: real actors over a shared in-memory bucket |
 | `../tests/store_refinement.rs` | Each `Store` backend against `store_spec.qnt` |
 | `../tests/policy_refinement.rs` | `Policy::parse`, `Policy::decide`, `policy::request_op` against `policy.qnt` |
@@ -96,8 +109,9 @@ npm test            # scenarios pass in Quint
 npm run simulate    # random interleavings against `safety` (`step`, then writers only: `contendStep`; then `pr_sim.qnt`, `actions_sim.qnt`)
 npm run mutate:pr   # each design switch of pr.qnt off: the simulation must find a violation
 npm run witness:actions && npm run mutate:actions   # the cases actions.qnt reaches; each of its switches off is caught
+npm run simulate:events && npm run witness:events && npm run mutate:events   # the same for events/
 npm run compile     # after editing any .qnt file
-cd .. && cargo test --release --test refinement --test store_refinement --test policy_refinement --test pr_refinement
+cd .. && cargo test --release --test refinement --test store_refinement --test policy_refinement --test pr_refinement --test events_refinement
 # GCS runs in `cargo test` against the in-process emulator (src/gcs_emulator.rs); as a process:
 #   cargo run --release --bin pail-gcs-emulator 127.0.0.1:4443
 #   PAIL_TEST_STORES=gs://bucket/prefix PAIL_GCS_BASE_URL=http://127.0.0.1:4443 cargo test ...
@@ -150,6 +164,62 @@ one run in 10,000 to 20,000 at 100 steps, one in 150,000 at 60 (the old `--max-s
 (`nobodyPublishesAReuse`) is rarer still (one in about 200,000): the reuse scenarios cover it. Two mutations confirm it is
 not vacuous: gc ignoring writers' leases, or writers ignoring gc's, each break
 `branchIsComplete` within seconds.
+
+## `pail events` (`events/events.qnt`)
+
+The design: a bucket notification is only a hint. Truth is re-reading the key. A consumer
+is idempotent, delivery is at-least-once, and a dropped notification costs latency, never
+correctness. A key is a ref (its version is the commit) or an object of the sibling area
+`<repo>.actions/` (its generation); the model does not tell them apart. The `.qnt` files are
+in `events/`, not beside `scenarios.qnt`, so that they do not change the digest of the other
+generated artifacts (the digest covers the top-level `.qnt` files of the directory).
+
+One consumer, in steps that a crash may separate: `readKey` (re-read the key a notification
+names, or one the safety poll or the start-up diff visits: it becomes pending if it differs
+from what was emitted), `mark` (the cursor records the intent), `emit` (the line), `save` (the
+cursor takes the state and clears the mark), `finish` (the notification is acknowledged). The
+environment writes and removes keys, drops, repeats and reorders notifications, and
+crashes the consumer, which restarts from its cursor.
+
+| Property | Meaning |
+|---|---|
+| `noLoss` | once the consumer is up and nothing more is written, one scan later (the start-up diff, the safety poll, a held notification) the last line for each key is the store's state |
+| `cursorBehindOut` | the cursor never names a state that was not emitted (never skip) |
+| `intentRecorded` | a key whose last line is not the cursor's state is marked in the cursor |
+| `noRedundant` | only a real change is emitted |
+| `noPhantom` (sim) | every line is a state the key had |
+| `perKeyOrder` (sim) | a key's lines never go back in the store's order |
+| `cursorMonotone` (sim) | a key's saved state never goes back |
+
+`npm run mutate:events` switches each part off and expects `simSafety` to fail:
+
+| Switch off | Caught by |
+|---|---|
+| `RESCAN_ON_START` (restart takes the store's state as emitted: the first `pail events`) | `noLoss` |
+| `CURSOR_AFTER_EMIT` (cursor before the line) | `cursorBehindOut`, `noLoss`, `intentRecorded` |
+| `RE_READ` (trust the notification's payload) | `perKeyOrder`, `cursorMonotone` |
+| `SAFETY_POLL` | `noLoss` |
+| `DEDUPE` | `noRedundant` |
+| `WRITE_AHEAD` (no mark before the line) | `noLoss`, `intentRecorded` |
+
+The model found a hole in the first design of the cursor (`WRITE_AHEAD`): the line for a put
+is out, the consumer dies before the cursor moves, and the key is deleted (or a ref reset to
+the commit the cursor holds). The restart sees the store equal to the cursor and emits
+nothing, though the readers saw the put. The mark in the cursor makes the restart unsure of
+that key, so it emits whatever is there. `events::watch` before this change had the first two
+rows of the table above as its behaviour: a restart seeded its memory from the store (no
+`RESCAN_ON_START`) and with a push source nothing re-listed (no `SAFETY_POLL`).
+
+Where the real code differs from the model: a batch of changes is marked, emitted and saved
+as a group (each key still in the order mark, line, save); the refinement drives one key at a
+time. The harness stands in for Pub/Sub (it holds the notifications; the parsing of a real
+pull response is a unit test) and for a crash (it drops the watcher; the cursor is read back
+from its file or object). `tests/events.rs` runs the real loop and command.
+
+The refinement is not vacuous: the watcher with its mark dropped, its dirty keys not made
+unsure, its cursor moved at the mark (before the line), its dedupe off, `Unsure` equal to
+everything, deletions left out of `scan`, the mark not cleared by `save`, or its memory
+not updated by `emit`, each fails a scenario.
 
 ## The store contract (`store_scenarios.qnt`)
 

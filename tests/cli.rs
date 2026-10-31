@@ -1717,6 +1717,7 @@ fn pr_and_ci_extensions() {
     pail(&w, &["commit", "-m", "ci config"]);
     let mut ci = Command::new(ext.join("pail-ci"))
         .args(["run", "--branch", "pr/*"])
+        .env("XDG_STATE_HOME", t.join("state"))
         .env("PAIL_BIN", env!("CARGO_BIN_EXE_pail"))
         .env("PAIL_STORE", &store)
         .env("PAIL_AUTHOR", "CI <ci@x>")
