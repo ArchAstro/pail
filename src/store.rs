@@ -34,6 +34,17 @@ pub struct ObjInfo {
     pub key: String,
     pub size: u64,
     pub modified: i64,
+    /// Changes whenever the object is written: the GCS generation, the S3 version id or
+    /// ETag, a local file's inode, mtime and size.
+    pub version: String,
+}
+
+/// An object's version token from its metadata (see [`ObjInfo::version`]).
+fn version_token(m: &object_store::ObjectMeta) -> String {
+    m.version
+        .clone()
+        .or_else(|| m.e_tag.clone())
+        .unwrap_or_else(|| format!("{}-{}", m.size, m.last_modified.timestamp_millis()))
 }
 
 pub enum Cas {
@@ -489,6 +500,18 @@ impl Store {
         }
     }
 
+    /// An object's version token, or None if it doesn't exist. One `HEAD`: the object is not read.
+    pub async fn object_version(&self, key: &str) -> Result<Option<String>> {
+        let _trace = Trace::start("head", key);
+        self.stats.gets.fetch_add(1, Ordering::Relaxed);
+        let p = self.path(key);
+        match self.retry(|| self.inner.head(&p)).await {
+            Ok(m) => Ok(Some(version_token(&m))),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn list_meta(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
         let _trace = Trace::start("list", prefix);
         let p = self.path(prefix.trim_end_matches('/'));
@@ -508,6 +531,7 @@ impl Store {
                 key: m.location.as_ref()[strip..].to_string(),
                 size: m.size,
                 modified: m.last_modified.timestamp(),
+                version: version_token(&m),
             })
             .filter(|o| !o.key.starts_with(".lock") && !o.key.contains(".tmp"))
             .collect();

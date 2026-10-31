@@ -24,3 +24,5 @@ jobs:
       - run: npm run mutate:pr
       - run: npm run witness:actions
       - run: npm run mutate:actions
+      - run: npm run witness:events
+      - run: npm run mutate:events
