@@ -22,3 +22,5 @@ jobs:
       - run: npm run witness
       - run: npm run witness:pr
       - run: npm run mutate:pr
+      - run: npm run witness:events
+      - run: npm run mutate:events

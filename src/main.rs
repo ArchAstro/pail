@@ -409,12 +409,26 @@ enum Cmd {
         #[arg(long = "expect", value_name = "PATH=ID|absent")]
         expect: Vec<String>,
     },
-    /// Stream ref changes as JSON lines, from the store's own notifications or by polling.
+    /// Stream ref and object changes as JSON lines, from the store's own notifications or by polling.
     #[command(after_long_help = cli_help::EVENTS)]
     Events {
-        /// Only branches matching this glob (`*` matches anything; repeatable).
+        /// Only branches matching this glob (`*` matches anything; repeatable). Default:
+        /// every branch, unless --prefix is given.
         #[arg(long = "branch", value_name = "GLOB")]
         branches: Vec<String>,
+        /// Also (or only) watch the objects under AREA/PREFIX of the repository's sibling
+        /// area: `actions/` is all of `<repo>.actions/`, `actions/queue/` its `queue/`.
+        #[arg(long, value_name = "AREA/PREFIX")]
+        prefix: Option<String>,
+        /// Resume from, and keep, what was emitted: a file, or `bucket:AREA/KEY` for an
+        /// object in a sibling area (compare-and-swapped: one consumer per cursor). On
+        /// start, everything that changed since (deletions too) is emitted, then it streams.
+        #[arg(long, value_name = "FILE|bucket:AREA/KEY", conflicts_with = "initial")]
+        cursor: Option<String>,
+        /// With notifications, also re-list everything every SECS seconds, so that a lost
+        /// notification only delays an event (0: never). Polling re-lists every --interval-ms.
+        #[arg(long, value_name = "SECS", default_value_t = 60)]
+        safety_poll: u64,
         /// Pull the bucket's GCS notifications from this Pub/Sub subscription
         /// (projects/<p>/subscriptions/<s>); default: poll.
         #[arg(long)]
@@ -1108,6 +1122,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Events {
             branches,
+            prefix,
+            cursor,
+            safety_poll,
             gcs_subscription,
             interval_ms,
             initial,
@@ -1128,13 +1145,42 @@ async fn run(cli: Cli) -> Result<()> {
                     interval: std::time::Duration::from_millis(interval_ms),
                 },
             };
+            let spec = pail::events::Spec {
+                refs: prefix.is_none() || !branches.is_empty(),
+                globs: branches,
+                prefix,
+            };
+            let cursor = match cursor {
+                None => None,
+                Some(c) => Some(match c.strip_prefix("bucket:") {
+                    Some(p) => {
+                        let (area, key) = pail::events::split_area(p)?;
+                        anyhow::ensure!(!key.is_empty(), "bucket:AREA/KEY needs a key");
+                        let url = pail::events::area_url(&ctx.repo.store.url, area)?;
+                        pail::events::Cursor::Bucket {
+                            store: pail::store::Store::open_in(&url, ctx.repo.local.as_deref())?,
+                            key: key.to_string(),
+                            version: None,
+                        }
+                    }
+                    None => pail::events::Cursor::File(c.into()),
+                }),
+            };
             use std::io::Write as _;
-            pail::events::watch(&ctx.repo, source, &branches, initial, |e| {
-                let mut out = std::io::stdout().lock();
-                writeln!(out, "{}", serde_json::to_string(&e)?)?;
-                out.flush()?;
-                Ok(())
-            })
+            pail::events::watch(
+                &ctx.repo,
+                source,
+                &spec,
+                cursor,
+                initial,
+                std::time::Duration::from_secs(safety_poll),
+                |e| {
+                    let mut out = std::io::stdout().lock();
+                    writeln!(out, "{}", serde_json::to_string(&e)?)?;
+                    out.flush()?;
+                    Ok(())
+                },
+            )
             .await?;
         }
         Cmd::Auth(AuthCmd::Logout) => println!(

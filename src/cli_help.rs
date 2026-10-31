@@ -362,19 +362,36 @@ Examples:
   pail put _meta -m \"close\" --delete prs/12/draft.json";
 
 pub const EVENTS: &str = "\
-One JSON line per ref change: {\"branch\",\"commit\",\"old\",\"source\",\"at\"} (commit null:
-deleted). With --gcs-subscription the events are the bucket's own notifications; otherwise
-refs are polled. Notifications are at-least-once and unordered, so each one is checked
-against the ref and duplicates are dropped: consumers should still key work by commit.
+One JSON line per change. A ref: {\"branch\",\"commit\",\"old\",\"source\",\"at\"} (commit null:
+deleted). An object under --prefix AREA/PREFIX, of the sibling area <repo>.AREA/:
+{\"key\",\"version\",\"old\",\"op\":\"put\"|\"delete\",\"source\",\"at\"} (key relative to the area,
+version its generation). With --gcs-subscription the bucket's own notifications say where to
+look; otherwise everything is re-listed every --interval-ms.
 
-Wire a GCS bucket once:
+A notification is only a hint: the key is re-read, and a line is written only if it differs from
+the last one written for the key. A duplicated or reordered notification costs a read; a lost
+one costs latency, because with notifications everything is also re-listed every --safety-poll
+seconds (default 60). Delivery is at-least-once: key work by commit, or by key and version.
+
+--cursor FILE (or bucket:AREA/KEY, an object in a sibling area, compare-and-swapped: one consumer
+per cursor) makes a restart lossless. On start, every key that differs from the cursor is
+written (deletions too) with source \"resume\", then it streams. The cursor moves only after a
+line is out, so a crash may repeat a line and never skips one. The first run with a new cursor
+emits everything that exists. Without --cursor a restart takes the present state as already
+seen; --initial emits every key once at start (not with --cursor).
+
+Wire a GCS bucket once (a second notification config for the sibling area, if you watch one):
   gcloud pubsub topics create pail-refs
   gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \\
       --object-prefix=REPO/refs/ --event-types=OBJECT_FINALIZE,OBJECT_DELETE
+  gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \\
+      --object-prefix=REPO.actions/ --event-types=OBJECT_FINALIZE,OBJECT_DELETE
   gcloud pubsub subscriptions create pail-ci --topic=pail-refs
 
 Examples:
   pail events --branch 'pr/*' --branch main
+  pail events --branch main --cursor ~/.cache/ci.cursor          # lossless across restarts
+  pail events --branch '*' --prefix actions/ --cursor bucket:actions/cursors/orchestrator
   pail --store gs://acme/app events --gcs-subscription projects/acme/subscriptions/pail-ci";
 
 pub const POLICY: &str = "\
