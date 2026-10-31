@@ -6,7 +6,7 @@ set -e
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 for sw in CAS IF_ABSENT GUARD_READS LEASE_CREATE_ONLY FENCE FENCE_ON_JOB RESULT_PER_LEASE SWEEP \
-  NEEDS_CHECK APPROVAL_EXCLUDES_ACTOR CANCEL_IN_PROGRESS RERUN_NEW_ATTEMPT CHECK_FROM_JOB; do
+  NEEDS_CHECK APPROVAL_EXCLUDES_ACTOR CANCEL_IN_PROGRESS RERUN_NEW_ATTEMPT CHECK_FROM_JOB SAFETY_POLL; do
   cp actions/actions.qnt actions/actions_sim.qnt "$tmp"/
   sed "s/pure val $sw = true/pure val $sw = false/" actions/actions.qnt > "$tmp/actions.qnt"
   if cmp -s actions/actions.qnt "$tmp/actions.qnt"; then echo "no such switch: $sw"; exit 1; fi
