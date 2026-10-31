@@ -259,6 +259,46 @@ module actionsScenarios {
       state' = state,
     })
 
+  /// UC4, and the events contract (`events.qnt`). The runner dies; the lease lapsing writes
+  /// nothing, so no event announces it, and the events that did arrive were lost. Only the
+  /// safety poll wakes a replica, which sweeps the job. (A replica cannot tick unwoken.)
+  /// @conformance
+  run safetyPollSweepsRun = init
+    .then(fire("push1"))
+    .then(read("o1", ITrigger("push1")))
+    .then(write("o1"))
+    .then(sync)
+    .then(claimRead("r1", BLD))
+    .then(claimWrite("r1"))
+    .then(read("o1", IStart(BLD)))
+    .then(write("o1"))
+    .then(crash("r1"))
+    // the announcements of those writes are lost, and the lease lapses in silence
+    .then(lose("o1"))
+    .then(lose("o2"))
+    .then(tick)
+    .then(tick)
+    .then(all {
+      assert(all {
+        deciding(state, ISweep(BLD)),
+        state.woken == Set(),
+        not(readCan(state, "o1", ISweep(BLD))),
+      }),
+      state' = state,
+    })
+    .then(wake("o2"))
+    .then(read("o2", ISweep(BLD)))
+    .then(write("o2"))
+    .then(all {
+      assert(all {
+        state.t1.jobs.get(BLD).status == Queued,
+        state.t1.jobs.get(BLD).lost == 1,
+        // the commit was announced: both replicas are woken again
+        state.woken == Set("o1", "o2"),
+      }),
+      state' = state,
+    })
+
   /// UC4. The runner dies after a step started: the job concludes failure, "runner lost",
   /// and its dependents are skipped.
   /// @conformance

@@ -858,6 +858,14 @@ read. Runners claim a lease (`claimRead`, then `claimWrite`: create, or take ove
 one by generation match), refresh it, report a step started, write a create-only result, see a
 cancel marker, or crash. Approvers create approval files.
 
+A replica ticks only when woken (`woken`), by the contract of `pail events --branch '*'
+--prefix actions/ --cursor ...` (`events/events.qnt`, in the events model's section): every
+write to `_actions`, `_checks` or an object of the area is announced (`announced`) to every
+replica; an announcement may be lost (`lose`), and repeating or reordering one changes
+nothing (a wake is a flag); the safety poll (`wake`) and the start-up diff against the
+cursor wake a replica whatever it was told; time passing announces nothing, so a lease that
+lapses is found only by the poll. A write that conflicts sends its replica back to read.
+
 | Intent | Commit |
 |---|---|
 | `ITrigger` | a run from an event key, cron slot: `runs/<id>` (`--if-absent`), `claims/<key>` (`--if-absent`), its jobs, `concurrency/<group>` (CAS), cancelling the group's previous run |
@@ -874,7 +882,9 @@ Properties (`safety` in `actions.qnt`; `simSafety` adds the history ones of `act
    job); `acceptedWasHolder`: the result a job concluded by is the holder's and seq's it
    started under.
 2. `noStranded`: a job is never in_progress with a lapsed lease unless the orchestrator can
-   accept its result or sweep it (the state form of "no job stays in_progress forever").
+   accept its result or sweep it, and some replica will tick to do it (`willTick`: woken,
+   mid-commit, or the safety poll will come); the state form of "no job stays in_progress
+   forever", given that events may be lost.
 3. `finality` and `attemptsAreFrozen` (sim): `completed`, its conclusion and who concluded it
    never change; a rerun is a new attempt and the old one keeps its conclusion.
 4. `ordering`: a job is queued, waiting, started or concluded by a runner only when every
@@ -903,6 +913,7 @@ a scratch copy and the simulation finds a violation:
 | `FENCE_ON_JOB` | intake also compares the live lease's seq (the plan's "lease seq matches"): a lease taken over after the job started strands the job (`noStranded`) |
 | `RESULT_PER_LEASE` | one create-only result path per job: a late result of a lost runner blocks the next holder's, and the sweep sees a result (`noStranded`) |
 | `SWEEP` | a runner that dies leaves its job in_progress for good (`noStranded`) |
+| `SAFETY_POLL` | the orchestrator relies on events only: a lease that lapses, a lost announcement, writes nothing to wake anyone, and the job is stranded (`noStranded`) |
 | `NEEDS_CHECK` | a job is queued before its need concluded (`ordering`) |
 | `APPROVAL_EXCLUDES_ACTOR` | the actor approves their own deploy (`gatesHold`) |
 | `CANCEL_IN_PROGRESS` | a push does not cancel the run it supersedes (`oneActivePerGroup`) |
@@ -936,8 +947,9 @@ What modelling found in the design (before any code), each now a rule of the mod
    repaired by reconcile (it is a second branch, written after the first).
 
 Witnesses (`npm run witness:actions`): a lost runner's job is requeued and runs again, a run is
-cancelled, a run is rerun, an environment job is queued on an approval, a job is skipped.
-`actions_scenarios.qnt` has 18 runs, for the plan's UC1, UC2, UC3, UC4, UC6, UC7 and UC8
+cancelled, a run is rerun, an environment job is queued on an approval, a job is skipped, a
+wake-up is lost, the safety poll wakes a replica.
+`actions_scenarios.qnt` has 19 runs, for the plan's UC1, UC2, UC3, UC4, UC6, UC7 and UC8
 (and UC9's projection), written as single actions so that they compile with
 `quint-refinements` (checked by hand: the artifact is large, so none is committed). The
 refinement harness comes with the orchestrator (T1.7) and the runner (T2.5); until then the
