@@ -1,0 +1,24 @@
+name: model
+# Long model runs (simulate alone takes ~3h). Manual only: Actions tab -> model -> Run workflow,
+# or `gh workflow run model --ref <branch>`.
+on:
+  workflow_dispatch:
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        working-directory: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: verify/package-lock.json
+      - run: npm ci
+      - run: npm run simulate
+      - run: npm run witness
+      - run: npm run witness:pr
+      - run: npm run mutate:pr

@@ -22,6 +22,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --release
   model:
+    # Fast model checks only: artifacts in sync with the models, and the scenarios.
+    # Simulation, witnesses and mutation runs are manual: see model.yml.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -36,10 +38,6 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: npm run simulate
-      - run: npm run witness
-      - run: npm run witness:pr
-      - run: npm run mutate:pr
   s3:
     # The store contract and CAS tests against an S3 API (moto), as PAIL_TEST_STORES runs them.
     runs-on: ubuntu-latest
