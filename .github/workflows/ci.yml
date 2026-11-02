@@ -80,13 +80,20 @@ jobs:
           PAIL_GCS_BASE_URL: http://127.0.0.1:19002
   actions:
     # pail-actions (actions/): plans every workflow of the compatibility corpus against its
-    # fixture. Tests that need docker or a pail binary skip themselves here.
+    # fixture, and runs the orchestrator against a real pail on a file:// store. Tests that
+    # need docker skip themselves here.
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: actions
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - run: cargo build --release --bin pail
+        working-directory: .
       - uses: actions/setup-go@v5
         with:
           go-version-file: actions/go.mod
@@ -94,3 +101,5 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
+        env:
+          PAIL_BIN: ${{ github.workspace }}/target/release/pail
