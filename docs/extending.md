@@ -9,7 +9,8 @@ writes   pail put <branch> --file PATH=SRC     atomic commit to any branch, no w
          pail land <branch> --stack            every commit of a branch, one atomic swap
          pail rebase --plan FILE --json        rewrite a branch from a JSON plan, one atomic swap
 reads    pail cat <rev>:<path>, pail ls -r <rev>:<dir>, pail log, pail rev-parse
-events   pail events [--branch GLOB] [--prefix AREA/P] [--cursor C] [--gcs-subscription SUB]
+events   pail events [--branch GLOB] [--prefix AREA/P] [--cursor C] [--gcs-subscription SUB | --sqs-queue URL | --azure-queue URL | --r2-queue ACCT/Q]
+         pail events setup --consumer NAME   (prints the provider commands that wire the notifications)
          one JSON line per ref change: {"branch","commit","old","source","at"}
 ```
 
@@ -38,22 +39,76 @@ Because records are commits:
 
 ## Events from the bucket
 
-Wire a GCS bucket once (per repository prefix):
+Wire the bucket once per consumer. `pail events setup --consumer ci` prints the commands for
+this store (the provider comes from the store's URL; `--provider` overrides), then how to
+consume the queue it made. It only prints. `--apply` runs them after a y/N question (`--yes`
+skips it) and creates billable cloud resources in your account; it refuses while a command
+still holds a placeholder (`PROJECT`, `REGION`, ...).
 
 ```sh
-gcloud pubsub topics create pail-refs
-gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \
-    --object-prefix=REPO/refs/ --event-types=OBJECT_FINALIZE,OBJECT_DELETE
-gcloud pubsub subscriptions create pail-ci --topic=pail-refs
+pail --store gs://BUCKET/REPO events setup --consumer ci --project P
+# gcloud pubsub topics create pail-ci
+# gcloud storage buckets notifications create gs://BUCKET --topic=pail-ci --object-prefix=REPO/refs/ …
+# gcloud storage buckets notifications create gs://BUCKET --topic=pail-ci --object-prefix=REPO.actions/ …
+# gcloud pubsub subscriptions create pail-ci --topic=pail-ci
 pail --store gs://BUCKET/REPO events --gcs-subscription projects/P/subscriptions/pail-ci
 ```
+
+Each consumer gets its own queue or subscription (`pail-NAME`): two consumers on one queue
+split its messages instead of each seeing all of them.
+
+| Provider | Store | Notification path | `setup` runs | Consume with | Latency |
+|---|---|---|---|---|---|
+| GCS | `gs://B/REPO` | bucket notification → Pub/Sub topic → subscription | `gcloud` | `--gcs-subscription projects/P/subscriptions/S` | 1.2–1.6 s measured (below) |
+| S3 | `s3://B/REPO` | S3 event notification (or EventBridge) → SQS | `aws` (`sqs`, `s3api`) | `--sqs-queue URL` | unmeasured (SQS long poll returns on arrival) |
+| Azure Blob | `https://ACCT.blob.core.windows.net/C/REPO` | Event Grid system topic → Storage Queue | `az` (`storage`, `eventgrid`) | `--azure-queue URL` | unmeasured; the Storage Queue API cannot long-poll, so add up to 2 s of polling |
+| Cloudflare R2 | `s3://B/REPO` with `AWS_ENDPOINT` at R2 | R2 event notification → Queue (HTTP pull consumer) | `wrangler` | `--r2-queue ACCOUNT/QUEUE` | unmeasured; pull is polled every 2 s when idle |
+
+Instead of a flag, a source is one line of text: `gcs:SUBSCRIPTION`, `sqs:URL`, `azure:URL`,
+`r2:ACCOUNT/QUEUE` or `poll`. Extensions then never need to know a queue's name, only to run
+`pail events`. The order is the flag, then `PAIL_EVENTS_SOURCE`, then the config (the most
+specific store section wins, as for `credential`), then polling:
+
+```sh
+export PAIL_EVENTS_SOURCE=sqs:https://sqs.eu-west-1.amazonaws.com/111122223333/pail-ci
+pail config 'events.s3://acme/app.source' 'sqs:https://sqs.eu-west-1.amazonaws.com/111122223333/pail-ci'
+```
+
+How each queue is read, and with which credentials:
+
+1. **S3 / SQS.** Long-polls `ReceiveMessage` (20 s), deletes with `DeleteMessageBatch`, both
+   signed with SigV4. Reads S3 event notifications (`{"Records":[…]}`, keys URL-encoded),
+   EventBridge events (`Object Created` / `Object Deleted`), and either wrapped by SNS.
+   Credentials: the store's pail credential provider if it has one, else
+   `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, else the `aws` CLI's
+   (`aws configure export-credentials`: profiles, SSO, roles). The consumer needs
+   `sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:ChangeMessageVisibility`.
+2. **Azure / Storage Queue.** Gets messages and deletes them with their pop receipt. Reads
+   Event Grid `Microsoft.Storage.BlobCreated` / `BlobDeleted` (Event Grid or CloudEvents
+   schema, JSON or base64); a rename scans. Authorized by a SAS token in the queue URL
+   (`rp` permissions), else by a bearer token from a credential provider.
+3. **R2 / Queues.** Pulls and acknowledges through the Cloudflare API
+   (`/accounts/A/queues/ID/messages/pull` and `/ack`; a queue name is looked up to its id).
+   Reads `PutObject`, `CopyObject`, `CompleteMultipartUpload`, `DeleteObject` and
+   `LifecycleDeletion`. Authorized by `CLOUDFLARE_API_TOKEN` (Queues read and write), else by a
+   credential provider's token.
+
+The Azure and R2 sources are tested against fakes of the documented HTTP APIs, not the
+services. MinIO is not supported yet (follow-up: a webhook listener, or its NATS target).
+
+A message is deleted only after the events it caused are written and the cursor is saved, so
+a crash repeats a message and never loses one. A message that does not parse is logged
+(`pail events: sqs: unparseable message (…); scanning instead`) and counts as "something
+changed": everything is re-listed. A message for another bucket, or a key outside the
+repository, is deleted and ignored.
 
 `pail events` treats each notification as a hint: it names a key, and the key is re-read.
 A line is written only if the key differs from the last one written for it, so duplicated and
 reordered notifications cost a read, and nothing in a notification's payload is trusted.
 Without notifications (`file://`, emulators) it re-lists every `--interval-ms` with the same
-output. S3 (EventBridge/SQS), Azure (Event Grid) and R2 (Queues) offer the same
-prefix-filtered create events; adding them is a new `HintSource` in `src/events.rs`.
+output. Because a notification is only a nudge, a source needs to produce nothing more than
+"something under this prefix changed"; that is also why all four sources share one model
+(`verify/README.md`).
 
 The guarantees, which `verify/events/events.qnt` states and `tests/events_refinement.rs`
 checks the code against:
@@ -75,9 +130,9 @@ checks the code against:
 Objects beside the repository are events too: the Actions orchestrator's `<repo>.actions/`
 area (queue entries, leases, results) is the sibling `gs://BUCKET/REPO.actions/`.
 
+`setup` wires `REPO.actions/` as well as `REPO/refs/`.
+
 ```sh
-gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \
-    --object-prefix=REPO.actions/ --event-types=OBJECT_FINALIZE,OBJECT_DELETE
 pail --store gs://BUCKET/REPO events --branch '*' --prefix actions/ \
     --cursor bucket:actions/cursors/orchestrator --gcs-subscription projects/P/subscriptions/pail-ci
 # {"key":"queue/ubuntu-latest/4182.1.test.json","version":"1792…","old":null,"op":"put","source":"gcs","at":…}

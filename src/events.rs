@@ -45,6 +45,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::event_sources::SourceSpec;
 use crate::hash::Hash;
 use crate::repo::Repo;
 use crate::store::{Cas, Store, Version};
@@ -86,6 +87,9 @@ pub enum Event {
 pub enum Hint {
     Ref(String),
     Object(String),
+    /// Something changed, but the message did not say what (it did not parse, or named a
+    /// rename): re-list everything, as the safety poll does.
+    Scan,
 }
 
 /// Where hints come from. `pull` waits for the next batch and must be safe to drop while
@@ -105,6 +109,22 @@ pub enum Source {
     GcsPubSub {
         subscription: String,
         token: Arc<crate::creds::Source>,
+    },
+    /// An SQS queue fed by S3 event notifications or EventBridge (`event_sources`), plus the
+    /// safety poll. `creds`: the store's credential provider, if it has one.
+    Sqs {
+        queue: String,
+        creds: Option<Arc<crate::creds::Source>>,
+    },
+    /// An Azure Storage Queue fed by Event Grid.
+    AzureQueue {
+        queue: String,
+        creds: Option<Arc<crate::creds::Source>>,
+    },
+    /// A Cloudflare Queue (`ACCOUNT/QUEUE`) fed by R2 event notifications, pulled over HTTP.
+    R2Queue {
+        queue: String,
+        creds: Option<Arc<crate::creds::Source>>,
     },
     /// Any source of hints (tests inject them), plus the safety poll.
     Hints(Box<dyn HintSource>),
@@ -573,6 +593,17 @@ impl<'a> Watcher<'a> {
     }
 }
 
+fn queue_hints(
+    kind: SourceSpec,
+    repo: &Repo,
+    spec: &Spec,
+    creds: Option<Arc<crate::creds::Source>>,
+    safety_poll: Duration,
+) -> Result<(Option<Box<dyn HintSource>>, Option<Duration>)> {
+    let hs = crate::event_sources::open(&kind, &repo.store.url, spec, creds)?;
+    Ok((Some(hs), Some(safety_poll).filter(|d| !d.is_zero())))
+}
+
 /// Run until `emit` errs. Ref filters, the prefix, the cursor and `initial` are the
 /// command's flags; `safety_poll` is how often to re-list when a source delivers hints
 /// (zero: never, and a lost hint is then lost until the next restart with a cursor).
@@ -606,6 +637,15 @@ pub async fn watch(
                 Some(Box::new(hs)),
                 Some(safety_poll).filter(|d| !d.is_zero()),
             )
+        }
+        Source::Sqs { queue, creds } => {
+            queue_hints(SourceSpec::Sqs(queue), repo, spec, creds, safety_poll)?
+        }
+        Source::AzureQueue { queue, creds } => {
+            queue_hints(SourceSpec::Azure(queue), repo, spec, creds, safety_poll)?
+        }
+        Source::R2Queue { queue, creds } => {
+            queue_hints(SourceSpec::R2(queue), repo, spec, creds, safety_poll)?
         }
         Source::Hints(h) => (Some(h), Some(safety_poll).filter(|d| !d.is_zero())),
     };
@@ -644,13 +684,19 @@ pub async fn watch(
                 // The hint says something changed; the store says what.
                 let mut seen_keys = BTreeSet::new();
                 let mut changes = vec![];
-                for h in batch {
-                    let key = match h {
-                        Hint::Ref(b) => format!("ref:{b}"),
-                        Hint::Object(k) => format!("obj:{k}"),
-                    };
-                    if seen_keys.insert(key.clone()) {
-                        changes.extend(w.observe(&key).await?);
+                if batch.contains(&Hint::Scan) {
+                    // a message that named nothing: re-list, which covers every named key too
+                    changes = w.scan().await?;
+                } else {
+                    for h in batch {
+                        let key = match h {
+                            Hint::Ref(b) => format!("ref:{b}"),
+                            Hint::Object(k) => format!("obj:{k}"),
+                            Hint::Scan => unreachable!("handled above"),
+                        };
+                        if seen_keys.insert(key.clone()) {
+                            changes.extend(w.observe(&key).await?);
+                        }
                     }
                 }
                 let name = hints.as_ref().map(|h| h.name()).unwrap_or("hint");

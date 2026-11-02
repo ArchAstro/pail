@@ -216,6 +216,27 @@ time. The harness stands in for Pub/Sub (it holds the notifications; the parsing
 pull response is a unit test) and for a crash (it drops the watcher; the cursor is read back
 from its file or object). `tests/events.rs` runs the real loop and command.
 
+**Sources.** `Source::{GcsPubSub, Sqs, AzureQueue, R2Queue}` (and the test `Hints`) change
+nothing in the model; each is a way to produce the model's notification, and none has a
+semantic of its own:
+
+| Source message | Model |
+|---|---|
+| names a ref or an object of the area (GCS `objectId`, S3 `Records[].s3.object.key` or EventBridge `detail.object.key`, Event Grid `subject`, R2 `object.key`) | a notification naming key `k`: `readKey(k)` |
+| does not parse, or names a rename (`Hint::Scan`) | the safety poll's step: `readKey` of every key. The watcher scans instead of dropping it |
+| names another bucket, or a key outside the repository | no key of the model: acknowledged and ignored |
+| redelivered by the queue (visibility timeout, lost delete), or delivered out of order | `ARedeliver`, and the reordering the environment already has |
+| deleted from the queue only after the lines are out and the cursor is saved | `finish`, which requires `emitted` and `saved` |
+| lost | `ADrop`: the safety poll covers it |
+
+A queue's delete is the one place a source could differ (acknowledging before processing
+would turn a crash into a dropped notification), and none does: `QueueSource::ack` runs only
+when `watch` calls it after `handle`, as `finish` follows `save`. `tests/event_sources.rs`
+pins that per service (the fake looks at the cursor file when the delete arrives). So there
+is no new switch and no new mutant: the cases that matter are not new behaviours of the
+consumer. The parsers of the four services are unit tests with sample payloads from their
+documentation, and the loops run against HTTP fakes (no cloud).
+
 The refinement is not vacuous: the watcher with its mark dropped, its dirty keys not made
 unsure, its cursor moved at the mark (before the line), its dedupe off, `Unsure` equal to
 everything, deletions left out of `scan`, the mark not cleared by `save`, or its memory

@@ -410,8 +410,10 @@ enum Cmd {
         expect: Vec<String>,
     },
     /// Stream ref and object changes as JSON lines, from the store's own notifications or by polling.
-    #[command(after_long_help = cli_help::EVENTS)]
+    #[command(args_conflicts_with_subcommands = true, after_long_help = cli_help::EVENTS)]
     Events {
+        #[command(subcommand)]
+        sub: Option<EventsCmd>,
         /// Only branches matching this glob (`*` matches anything; repeatable). Default:
         /// every branch, unless --prefix is given.
         #[arg(long = "branch", value_name = "GLOB")]
@@ -431,8 +433,19 @@ enum Cmd {
         safety_poll: u64,
         /// Pull the bucket's GCS notifications from this Pub/Sub subscription
         /// (projects/<p>/subscriptions/<s>); default: poll.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["sqs_queue", "azure_queue", "r2_queue"])]
         gcs_subscription: Option<String>,
+        /// Pull S3's notifications from this SQS queue URL (S3 event notifications or
+        /// EventBridge, delivered to the queue).
+        #[arg(long, value_name = "URL", conflicts_with_all = ["azure_queue", "r2_queue"])]
+        sqs_queue: Option<String>,
+        /// Pull Azure Blob notifications (Event Grid) from this Storage Queue URL
+        /// (https://ACCOUNT.queue.core.windows.net/QUEUE, with a SAS token if no credential provider).
+        #[arg(long, value_name = "URL", conflicts_with = "r2_queue")]
+        azure_queue: Option<String>,
+        /// Pull R2's notifications from this Cloudflare Queue (an HTTP pull consumer).
+        #[arg(long, value_name = "ACCOUNT/QUEUE")]
+        r2_queue: Option<String>,
         /// Polling interval in milliseconds.
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
@@ -505,6 +518,40 @@ enum PolicyCmd {
         /// Command printing the broad source token (the broker's service account).
         #[arg(long, default_value = "gcloud auth print-access-token")]
         source_token_cmd: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventsCmd {
+    /// Print (or with --apply, run) the provider commands that wire this store's notifications
+    /// into a queue or subscription of your own.
+    #[command(after_long_help = cli_help::EVENTS_SETUP)]
+    Setup {
+        /// A name for the consumer: its queue or subscription is `pail-NAME`, so that
+        /// consumers never share one (a shared queue splits the messages between them).
+        #[arg(long, value_name = "NAME")]
+        consumer: String,
+        /// The provider hosting the store (default: from the store's URL).
+        #[arg(long, value_parser = ["gcs", "s3", "azure", "r2"])]
+        provider: Option<String>,
+        /// AWS region, or Azure location.
+        #[arg(long)]
+        region: Option<String>,
+        /// GCP project, or Azure subscription id.
+        #[arg(long)]
+        project: Option<String>,
+        /// AWS account id, Azure storage account, or Cloudflare account id.
+        #[arg(long)]
+        account: Option<String>,
+        /// Azure resource group.
+        #[arg(long)]
+        resource_group: Option<String>,
+        /// Run the commands (this creates billable cloud resources), after asking y/N.
+        #[arg(long)]
+        apply: bool,
+        /// With --apply: do not ask.
+        #[arg(long, requires = "apply")]
+        yes: bool,
     },
 }
 
@@ -1121,19 +1168,137 @@ async fn run(cli: Cli) -> Result<()> {
             );
         }
         Cmd::Events {
+            sub:
+                Some(EventsCmd::Setup {
+                    consumer,
+                    provider,
+                    region,
+                    project,
+                    account,
+                    resource_group,
+                    apply,
+                    yes,
+                }),
+            ..
+        } => {
+            let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
+            let store = ctx.repo.store.url.clone();
+            let endpoint = std::env::var("AWS_ENDPOINT")
+                .or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
+                .ok();
+            let plan = pail::event_setup::plan(
+                &store,
+                endpoint.as_deref(),
+                &pail::event_setup::Opts {
+                    consumer,
+                    provider: provider
+                        .as_deref()
+                        .map(pail::event_setup::Provider::parse)
+                        .transpose()?,
+                    region,
+                    project,
+                    account,
+                    resource_group,
+                },
+            )?;
+            println!("# pail events setup for {store} ({:?})", plan.provider);
+            for (i, step) in plan.steps.iter().enumerate() {
+                println!("\n# {}. {}", i + 1, step.title);
+                println!("{}", pail::event_setup::render(&step.argv));
+            }
+            println!("\n# Then consume it with one of:");
+            let flag = match &plan.source {
+                pail::event_sources::SourceSpec::Gcs(v) => format!("--gcs-subscription {v}"),
+                pail::event_sources::SourceSpec::Sqs(v) => format!("--sqs-queue {v}"),
+                pail::event_sources::SourceSpec::Azure(v) => format!("--azure-queue {v}"),
+                pail::event_sources::SourceSpec::R2(v) => format!("--r2-queue {v}"),
+                pail::event_sources::SourceSpec::Poll => String::new(),
+            };
+            println!("pail events {flag}");
+            println!(
+                "PAIL_EVENTS_SOURCE={} pail events",
+                pail::event_setup::shell_quote(&plan.source.to_string())
+            );
+            println!(
+                "pail config {} {}   # so extensions need not know the name",
+                pail::event_setup::shell_quote(&format!("events.{store}.source")),
+                pail::event_setup::shell_quote(&plan.source.to_string())
+            );
+            for n in &plan.notes {
+                println!("\n# note: {n}");
+            }
+            if !plan.unresolved.is_empty() {
+                println!(
+                    "\n# fill in {} (options of this command) before --apply",
+                    plan.unresolved.join(", ")
+                );
+            }
+            if apply {
+                pail::event_setup::apply(
+                    &plan,
+                    yes,
+                    &mut || {
+                        use std::io::{BufRead as _, Write as _};
+                        eprint!(
+                            "\nRun the {} command(s) above? This creates billable cloud resources. [y/N] ",
+                            plan.steps.len()
+                        );
+                        std::io::stderr().flush()?;
+                        let mut line = String::new();
+                        std::io::stdin().lock().read_line(&mut line)?;
+                        Ok(matches!(
+                            line.trim().to_ascii_lowercase().as_str(),
+                            "y" | "yes"
+                        ))
+                    },
+                    &mut |argv| {
+                        eprintln!("+ {}", pail::event_setup::render(argv));
+                        let st = std::process::Command::new(&argv[0])
+                            .args(&argv[1..])
+                            .status()
+                            .with_context(|| format!("running {}", argv[0]))?;
+                        anyhow::ensure!(st.success(), "{} exited with {st}", argv[0]);
+                        Ok(())
+                    },
+                )?;
+                eprintln!("done");
+            }
+        }
+        Cmd::Events {
+            sub: None,
             branches,
             prefix,
             cursor,
             safety_poll,
             gcs_subscription,
+            sqs_queue,
+            azure_queue,
+            r2_queue,
             interval_ms,
             initial,
         } => {
+            use pail::event_sources::SourceSpec;
             let ctx = Ctx::open(cli.store, cli.repo, ids).await?;
-            let source = match gcs_subscription {
-                Some(sub) => {
-                    let provider = pail::creds::choose(&ctx.repo.store.url, &ctx.config)?.provider;
-                    let token = pail::creds::Source::new(&provider, &ctx.repo.store.url).context(
+            let flag = gcs_subscription
+                .map(SourceSpec::Gcs)
+                .or(sqs_queue.map(SourceSpec::Sqs))
+                .or(azure_queue.map(SourceSpec::Azure))
+                .or(r2_queue
+                    .map(|q| SourceSpec::parse(&format!("r2:{q}")))
+                    .transpose()?);
+            let (chosen, _from) = pail::event_sources::choose(
+                flag,
+                std::env::var("PAIL_EVENTS_SOURCE").ok().as_deref(),
+                &ctx.config,
+                &ctx.repo.store.url,
+            )?;
+            let creds = || -> Result<Option<_>> {
+                let provider = pail::creds::choose(&ctx.repo.store.url, &ctx.config)?.provider;
+                Ok(pail::creds::Source::new(&provider, &ctx.repo.store.url))
+            };
+            let source = match chosen {
+                SourceSpec::Gcs(sub) => {
+                    let token = creds()?.context(
                         "GCS events need a credential provider for the store (e.g. `pail auth use gcloud --for <store>`)",
                     )?;
                     pail::events::Source::GcsPubSub {
@@ -1141,7 +1306,19 @@ async fn run(cli: Cli) -> Result<()> {
                         token,
                     }
                 }
-                None => pail::events::Source::Poll {
+                SourceSpec::Sqs(queue) => pail::events::Source::Sqs {
+                    queue,
+                    creds: creds()?,
+                },
+                SourceSpec::Azure(queue) => pail::events::Source::AzureQueue {
+                    queue,
+                    creds: creds()?,
+                },
+                SourceSpec::R2(queue) => pail::events::Source::R2Queue {
+                    queue,
+                    creds: creds()?,
+                },
+                SourceSpec::Poll => pail::events::Source::Poll {
                     interval: std::time::Duration::from_millis(interval_ms),
                 },
             };

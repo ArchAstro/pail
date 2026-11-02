@@ -6,6 +6,8 @@ pub mod clock;
 pub mod config;
 pub mod creds;
 pub mod enc;
+pub mod event_setup;
+pub mod event_sources;
 pub mod events;
 pub mod extensions;
 pub mod fetch;
