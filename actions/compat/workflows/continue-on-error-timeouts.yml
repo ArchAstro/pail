@@ -1,0 +1,27 @@
+name: continue-on-error-timeouts
+on: [push]
+jobs:
+  flaky:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+    steps:
+      - run: ./flaky.sh
+        continue-on-error: true
+        timeout-minutes: 2
+      - id: second
+        run: exit 1
+        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+      - if: steps.second.outcome == 'failure'
+        run: echo "second failed but conclusion is ${{ steps.second.conclusion }}"
+  slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - run: sleep 1
+  after:
+    needs: [flaky, slow]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "flaky=${{ needs.flaky.result }}"

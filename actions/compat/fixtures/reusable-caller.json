@@ -1,0 +1,177 @@
+{
+  "workflow": "workflows/reusable-caller.yml",
+  "scenarios": [
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "reusable-caller.yml",
+        "name": "reusable-caller",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "build-linux",
+            "job_id": "build-linux",
+            "uses": "./.github/workflows/reusable-callee.yml",
+            "children": {
+              "workflow": "reusable-callee.yml",
+              "name": "reusable-callee",
+              "triggers": [
+                "workflow_call"
+              ],
+              "input": {
+                "event": "workflow_call"
+              },
+              "triggered": true,
+              "reason": "workflow_call is in on:",
+              "jobs": [
+                {
+                  "id": "build",
+                  "job_id": "build",
+                  "runs_on": [
+                    "ubuntu-latest"
+                  ],
+                  "outputs": [
+                    "artifact"
+                  ],
+                  "steps": 3
+                }
+              ],
+              "stages": [
+                [
+                  "build"
+                ]
+              ],
+              "actions": [
+                "actions/checkout@v4",
+                "actions/upload-artifact@v4"
+              ]
+            }
+          },
+          {
+            "id": "build-matrix (aarch64-apple-darwin)",
+            "job_id": "build-matrix",
+            "matrix": {
+              "target": "aarch64-apple-darwin"
+            },
+            "fail_fast": true,
+            "uses": "./.github/workflows/reusable-callee.yml",
+            "children": {
+              "workflow": "reusable-callee.yml",
+              "name": "reusable-callee",
+              "triggers": [
+                "workflow_call"
+              ],
+              "input": {
+                "event": "workflow_call"
+              },
+              "triggered": true,
+              "reason": "workflow_call is in on:",
+              "jobs": [
+                {
+                  "id": "build",
+                  "job_id": "build",
+                  "runs_on": [
+                    "ubuntu-latest"
+                  ],
+                  "outputs": [
+                    "artifact"
+                  ],
+                  "steps": 3
+                }
+              ],
+              "stages": [
+                [
+                  "build"
+                ]
+              ],
+              "actions": [
+                "actions/checkout@v4",
+                "actions/upload-artifact@v4"
+              ]
+            }
+          },
+          {
+            "id": "build-matrix (x86_64-apple-darwin)",
+            "job_id": "build-matrix",
+            "matrix": {
+              "target": "x86_64-apple-darwin"
+            },
+            "fail_fast": true,
+            "uses": "./.github/workflows/reusable-callee.yml",
+            "children": {
+              "workflow": "reusable-callee.yml",
+              "name": "reusable-callee",
+              "triggers": [
+                "workflow_call"
+              ],
+              "input": {
+                "event": "workflow_call"
+              },
+              "triggered": true,
+              "reason": "workflow_call is in on:",
+              "jobs": [
+                {
+                  "id": "build",
+                  "job_id": "build",
+                  "runs_on": [
+                    "ubuntu-latest"
+                  ],
+                  "outputs": [
+                    "artifact"
+                  ],
+                  "steps": 3
+                }
+              ],
+              "stages": [
+                [
+                  "build"
+                ]
+              ],
+              "actions": [
+                "actions/checkout@v4",
+                "actions/upload-artifact@v4"
+              ]
+            }
+          },
+          {
+            "id": "publish",
+            "job_id": "publish",
+            "needs": [
+              "build-linux",
+              "build-matrix"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "build-linux",
+            "build-matrix (aarch64-apple-darwin)",
+            "build-matrix (x86_64-apple-darwin)"
+          ],
+          [
+            "publish"
+          ]
+        ],
+        "actions": [
+          "./.github/workflows/reusable-callee.yml"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,158 @@
+{
+  "workflow": "pail/web.yml",
+  "scenarios": [
+    {
+      "name": "pull_request, web changed",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "paths": [
+          "web/src/app.tsx"
+        ]
+      },
+      "plan": {
+        "workflow": "web.yml",
+        "name": "web",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "paths": [
+            "web/src/app.tsx"
+          ]
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "concurrency": {
+          "group": "web-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        },
+        "jobs": [
+          {
+            "id": "docker",
+            "job_id": "docker",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "web",
+            "job_id": "web",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 9
+          }
+        ],
+        "stages": [
+          [
+            "docker",
+            "web"
+          ]
+        ],
+        "actions": [
+          "Swatinem/rust-cache@v2",
+          "actions/checkout@v4",
+          "actions/setup-node@v4",
+          "dtolnay/rust-toolchain@stable"
+        ]
+      }
+    },
+    {
+      "name": "pull_request, docs only",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "paths": [
+          "docs/a.md"
+        ]
+      },
+      "plan": {
+        "workflow": "web.yml",
+        "name": "web",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "paths": [
+            "docs/a.md"
+          ]
+        },
+        "triggered": false,
+        "reason": "no changed file passes the paths filter",
+        "concurrency": {
+          "group": "web-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        }
+      }
+    },
+    {
+      "name": "push main, Cargo.lock changed",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "Cargo.lock"
+        ]
+      },
+      "plan": {
+        "workflow": "web.yml",
+        "name": "web",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "Cargo.lock"
+          ]
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "concurrency": {
+          "group": "web-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        },
+        "jobs": [
+          {
+            "id": "docker",
+            "job_id": "docker",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "web",
+            "job_id": "web",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 9
+          }
+        ],
+        "stages": [
+          [
+            "docker",
+            "web"
+          ]
+        ],
+        "actions": [
+          "Swatinem/rust-cache@v2",
+          "actions/checkout@v4",
+          "actions/setup-node@v4",
+          "dtolnay/rust-toolchain@stable"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+{
+  "workflow": "pail/release.yml",
+  "scenarios": [
+    {
+      "name": "tag v0.1.0",
+      "input": {
+        "event": "push",
+        "ref": "refs/tags/v0.1.0"
+      },
+      "plan": {
+        "workflow": "release.yml",
+        "name": "release",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "refs/tags/v0.1.0"
+        },
+        "triggered": true,
+        "reason": "push to tag v0.1.0",
+        "jobs": [
+          {
+            "id": "build (macos-latest, darwin-amd64, x86_64-apple-darwin)",
+            "job_id": "build",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "platform": "darwin-amd64",
+              "target": "x86_64-apple-darwin"
+            },
+            "fail_fast": true,
+            "steps": 7
+          },
+          {
+            "id": "build (macos-latest, darwin-arm64, aarch64-apple-darwin)",
+            "job_id": "build",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "platform": "darwin-arm64",
+              "target": "aarch64-apple-darwin"
+            },
+            "fail_fast": true,
+            "steps": 7
+          },
+          {
+            "id": "build (ubuntu-22.04, linux-amd64, x86_64-unknown-linux-gnu)",
+            "job_id": "build",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-22.04",
+              "platform": "linux-amd64",
+              "target": "x86_64-unknown-linux-gnu"
+            },
+            "fail_fast": true,
+            "steps": 7
+          },
+          {
+            "id": "build (ubuntu-22.04-arm, linux-arm64, aarch64-unknown-linux-gnu)",
+            "job_id": "build",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-22.04-arm",
+              "platform": "linux-arm64",
+              "target": "aarch64-unknown-linux-gnu"
+            },
+            "fail_fast": true,
+            "steps": 7
+          },
+          {
+            "id": "publish",
+            "job_id": "publish",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "build (macos-latest, darwin-amd64, x86_64-apple-darwin)",
+            "build (macos-latest, darwin-arm64, aarch64-apple-darwin)",
+            "build (ubuntu-22.04, linux-amd64, x86_64-unknown-linux-gnu)",
+            "build (ubuntu-22.04-arm, linux-arm64, aarch64-unknown-linux-gnu)"
+          ],
+          [
+            "publish"
+          ]
+        ],
+        "actions": [
+          "Swatinem/rust-cache@v2",
+          "actions/checkout@v4",
+          "actions/download-artifact@v4",
+          "actions/upload-artifact@v4",
+          "dtolnay/rust-toolchain@stable"
+        ]
+      }
+    },
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "release.yml",
+        "name": "release",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": false,
+        "reason": "only tags are filtered: a branch push does not trigger"
+      }
+    }
+  ]
+}

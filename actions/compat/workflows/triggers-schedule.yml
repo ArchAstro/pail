@@ -1,0 +1,19 @@
+name: triggers-schedule
+on:
+  schedule:
+    - cron: "17 3 * * *"
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./ci/nightly.sh
+  weekly-report:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 12 * * 1'
+    needs: nightly
+    steps:
+      - run: echo "weekly report for ${{ github.repository }}"

@@ -1,0 +1,200 @@
+{
+  "workflow": "workflows/triggers-schedule.yml",
+  "scenarios": [
+    {
+      "name": "nightly cron",
+      "input": {
+        "event": "schedule",
+        "ref": "main",
+        "cron": "17 3 * * *"
+      },
+      "plan": {
+        "workflow": "triggers-schedule.yml",
+        "name": "triggers-schedule",
+        "triggers": [
+          "schedule",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "schedule",
+          "ref": "main",
+          "cron": "17 3 * * *"
+        },
+        "triggered": true,
+        "reason": "cron 17 3 * * *",
+        "jobs": [
+          {
+            "id": "nightly",
+            "job_id": "nightly",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "timeout_minutes": "90",
+            "steps": 2
+          },
+          {
+            "id": "weekly-report",
+            "job_id": "weekly-report",
+            "needs": [
+              "nightly"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event.schedule == '0 12 * * 1'",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "nightly"
+          ],
+          [
+            "weekly-report"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "weekly cron",
+      "input": {
+        "event": "schedule",
+        "ref": "main",
+        "cron": "0 12 * * 1"
+      },
+      "plan": {
+        "workflow": "triggers-schedule.yml",
+        "name": "triggers-schedule",
+        "triggers": [
+          "schedule",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "schedule",
+          "ref": "main",
+          "cron": "0 12 * * 1"
+        },
+        "triggered": true,
+        "reason": "cron 0 12 * * 1",
+        "jobs": [
+          {
+            "id": "nightly",
+            "job_id": "nightly",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "timeout_minutes": "90",
+            "steps": 2
+          },
+          {
+            "id": "weekly-report",
+            "job_id": "weekly-report",
+            "needs": [
+              "nightly"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event.schedule == '0 12 * * 1'",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "nightly"
+          ],
+          [
+            "weekly-report"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "unknown cron",
+      "input": {
+        "event": "schedule",
+        "ref": "main",
+        "cron": "5 5 * * *"
+      },
+      "plan": {
+        "workflow": "triggers-schedule.yml",
+        "name": "triggers-schedule",
+        "triggers": [
+          "schedule",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "schedule",
+          "ref": "main",
+          "cron": "5 5 * * *"
+        },
+        "triggered": false,
+        "reason": "cron \"5 5 * * *\" is not one of [17 3 * * * 0 12 * * 1]"
+      }
+    },
+    {
+      "name": "workflow_dispatch",
+      "input": {
+        "event": "workflow_dispatch",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "triggers-schedule.yml",
+        "name": "triggers-schedule",
+        "triggers": [
+          "schedule",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "workflow_dispatch",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "workflow_dispatch is in on:",
+        "jobs": [
+          {
+            "id": "nightly",
+            "job_id": "nightly",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "timeout_minutes": "90",
+            "steps": 2
+          },
+          {
+            "id": "weekly-report",
+            "job_id": "weekly-report",
+            "needs": [
+              "nightly"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event.schedule == '0 12 * * 1'",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "nightly"
+          ],
+          [
+            "weekly-report"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    }
+  ]
+}

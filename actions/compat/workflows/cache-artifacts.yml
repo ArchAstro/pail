@@ -1,0 +1,40 @@
+name: cache-artifacts
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary
+          path: target/release/app
+          retention-days: 3
+          if-no-files-found: error
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary
+          path: bin
+      - run: chmod +x bin/app && bin/app --version
+  test-reports:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "report-*"
+          merge-multiple: true

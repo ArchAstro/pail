@@ -1,0 +1,405 @@
+{
+  "workflow": "workflows/triggers-push-pr.yml",
+  "scenarios": [
+    {
+      "name": "push main, src changed",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "src/lib.rs"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 2
+          },
+          {
+            "id": "test",
+            "job_id": "test",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'push' || !github.event.pull_request.draft",
+            "if_static": "deferred",
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "test"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "push main, only docs and src markdown",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "docs/a.md",
+          "src/readme.md"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "docs/a.md",
+            "src/readme.md"
+          ]
+        },
+        "triggered": false,
+        "reason": "no changed file passes the paths filter"
+      }
+    },
+    {
+      "name": "push release/1.x",
+      "input": {
+        "event": "push",
+        "ref": "refs/heads/release/1.x",
+        "paths": [
+          "Cargo.toml"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "refs/heads/release/1.x",
+          "paths": [
+            "Cargo.toml"
+          ]
+        },
+        "triggered": true,
+        "reason": "push to branch release/1.x",
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 2
+          },
+          {
+            "id": "test",
+            "job_id": "test",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'push' || !github.event.pull_request.draft",
+            "if_static": "deferred",
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "test"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "push release/old-1 is excluded",
+      "input": {
+        "event": "push",
+        "ref": "release/old-1",
+        "paths": [
+          "src/lib.rs"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "release/old-1",
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "triggered": false,
+        "reason": "branch release/old-1 does not match the branches filter"
+      }
+    },
+    {
+      "name": "push tag, paths not evaluated",
+      "input": {
+        "event": "push",
+        "ref": "refs/tags/v1.2.3"
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "refs/tags/v1.2.3"
+        },
+        "triggered": true,
+        "reason": "push to tag v1.2.3",
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 2
+          },
+          {
+            "id": "test",
+            "job_id": "test",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'push' || !github.event.pull_request.draft",
+            "if_static": "deferred",
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "test"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "push other branch",
+      "input": {
+        "event": "push",
+        "ref": "feature/x",
+        "paths": [
+          "src/lib.rs"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "feature/x",
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "triggered": false,
+        "reason": "branch feature/x does not match the branches filter"
+      }
+    },
+    {
+      "name": "pull_request to main, src changed",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "paths": [
+          "src/lib.rs"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 2
+          },
+          {
+            "id": "test",
+            "job_id": "test",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'push' || !github.event.pull_request.draft",
+            "if_static": "deferred",
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "test"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "pull_request to main, docs only",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "paths": [
+          "docs/a.md",
+          "README.md"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "paths": [
+            "docs/a.md",
+            "README.md"
+          ]
+        },
+        "triggered": false,
+        "reason": "no changed file passes the paths filter"
+      }
+    },
+    {
+      "name": "pull_request to dev",
+      "input": {
+        "event": "pull_request",
+        "ref": "dev",
+        "paths": [
+          "src/lib.rs"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "dev",
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "triggered": false,
+        "reason": "base branch dev does not match the branches filter"
+      }
+    },
+    {
+      "name": "pull_request labeled is not a listed type",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "type": "labeled"
+      },
+      "plan": {
+        "workflow": "triggers-push-pr.yml",
+        "name": "triggers-push-pr",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "type": "labeled"
+        },
+        "triggered": false,
+        "reason": "type labeled is not in types [opened synchronize reopened ready_for_review]"
+      }
+    }
+  ]
+}

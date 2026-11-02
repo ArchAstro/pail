@@ -1,0 +1,64 @@
+{
+  "workflow": "workflows/triggers-dispatch.yml",
+  "scenarios": [
+    {
+      "name": "workflow_dispatch",
+      "input": {
+        "event": "workflow_dispatch",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "triggers-dispatch.yml",
+        "name": "triggers-dispatch",
+        "triggers": [
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "workflow_dispatch",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "workflow_dispatch is in on:",
+        "jobs": [
+          {
+            "id": "release",
+            "job_id": "release",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "environment": "${{ inputs.environment }}",
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "release"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "push does not trigger",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "triggers-dispatch.yml",
+        "name": "triggers-dispatch",
+        "triggers": [
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": false,
+        "reason": "push is not in on:"
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+name: needs-graph
+# A diamond, a fan-in with status functions, and job outputs flowing along needs.
+on: [push, pull_request]
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      sha_short: ${{ steps.vars.outputs.sha_short }}
+      run_e2e: ${{ steps.vars.outputs.run_e2e }}
+    steps:
+      - id: vars
+        run: |
+          echo "sha_short=$(echo $GITHUB_SHA | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "run_e2e=true" >> "$GITHUB_OUTPUT"
+  unit:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo unit ${{ needs.setup.outputs.sha_short }}
+  lint:
+    needs: [setup]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+  e2e:
+    needs: [unit, lint]
+    if: needs.setup.outputs.run_e2e == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo e2e
+  report:
+    needs: [unit, lint, e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "unit=${{ needs.unit.result }} e2e=${{ needs.e2e.result }}"
+  notify-failure:
+    needs: [unit, lint, e2e]
+    if: failure() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "main is red"

@@ -1,0 +1,32 @@
+name: triggers-dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Where to deploy
+        type: environment
+        required: true
+      version:
+        description: Version to release
+        type: string
+        required: true
+        default: latest
+      dry-run:
+        description: Skip the publish step
+        type: boolean
+        default: true
+      level:
+        type: choice
+        options: [debug, info, warn]
+        default: info
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show inputs
+        run: echo "version=${{ inputs.version }} level=${{ inputs.level }} dry=${{ inputs.dry-run }}"
+      - name: Publish
+        if: ${{ !inputs.dry-run }}
+        run: ./publish.sh "${{ inputs.version }}"

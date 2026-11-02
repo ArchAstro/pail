@@ -1,0 +1,172 @@
+{
+  "workflow": "workflows/triggers-branch-ignore.yml",
+  "scenarios": [
+    {
+      "name": "push dependabot branch",
+      "input": {
+        "event": "push",
+        "ref": "dependabot/npm/x",
+        "paths": [
+          "src/a.js"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-branch-ignore.yml",
+        "name": "triggers-branch-ignore",
+        "triggers": [
+          "pull_request_target",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "dependabot/npm/x",
+          "paths": [
+            "src/a.js"
+          ]
+        },
+        "triggered": false,
+        "reason": "branch dependabot/npm/x does not match the branches filter"
+      }
+    },
+    {
+      "name": "push main, markdown only",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "README.md",
+          "LICENSE"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-branch-ignore.yml",
+        "name": "triggers-branch-ignore",
+        "triggers": [
+          "pull_request_target",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "README.md",
+            "LICENSE"
+          ]
+        },
+        "triggered": false,
+        "reason": "no changed file passes the paths filter"
+      }
+    },
+    {
+      "name": "push main, code",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "src/a.js",
+          "README.md"
+        ]
+      },
+      "plan": {
+        "workflow": "triggers-branch-ignore.yml",
+        "name": "triggers-branch-ignore",
+        "triggers": [
+          "pull_request_target",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "src/a.js",
+            "README.md"
+          ]
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "lint",
+            "job_id": "lint",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "lint"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "pull_request_target labeled",
+      "input": {
+        "event": "pull_request_target",
+        "ref": "main",
+        "type": "labeled"
+      },
+      "plan": {
+        "workflow": "triggers-branch-ignore.yml",
+        "name": "triggers-branch-ignore",
+        "triggers": [
+          "pull_request_target",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request_target",
+          "ref": "main",
+          "type": "labeled"
+        },
+        "triggered": true,
+        "reason": "pull_request_target matches",
+        "jobs": [
+          {
+            "id": "lint",
+            "job_id": "lint",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "lint"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "pull_request_target synchronize is not listed",
+      "input": {
+        "event": "pull_request_target",
+        "ref": "main",
+        "type": "synchronize"
+      },
+      "plan": {
+        "workflow": "triggers-branch-ignore.yml",
+        "name": "triggers-branch-ignore",
+        "triggers": [
+          "pull_request_target",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request_target",
+          "ref": "main",
+          "type": "synchronize"
+        },
+        "triggered": false,
+        "reason": "type synchronize is not in types [labeled]"
+      }
+    }
+  ]
+}

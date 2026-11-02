@@ -1,0 +1,65 @@
+{
+  "workflow": "pail/model.yml",
+  "scenarios": [
+    {
+      "name": "workflow_dispatch",
+      "input": {
+        "event": "workflow_dispatch",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "model.yml",
+        "name": "model",
+        "triggers": [
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "workflow_dispatch",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "workflow_dispatch is in on:",
+        "jobs": [
+          {
+            "id": "model",
+            "job_id": "model",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "timeout_minutes": "360",
+            "steps": 11
+          }
+        ],
+        "stages": [
+          [
+            "model"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "actions/setup-node@v4"
+        ]
+      }
+    },
+    {
+      "name": "push does not trigger",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "model.yml",
+        "name": "model",
+        "triggers": [
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": false,
+        "reason": "push is not in on:"
+      }
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "workflow": "workflows/continue-on-error-timeouts.yml",
+  "scenarios": [
+    {
+      "name": "push",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "continue-on-error-timeouts.yml",
+        "name": "continue-on-error-timeouts",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "flaky",
+            "job_id": "flaky",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "timeout_minutes": "15",
+            "continue_on_error": "true",
+            "steps": 3
+          },
+          {
+            "id": "slow",
+            "job_id": "slow",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "timeout_minutes": "360",
+            "steps": 1
+          },
+          {
+            "id": "after",
+            "job_id": "after",
+            "needs": [
+              "flaky",
+              "slow"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "${{ !cancelled() }}",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "flaky",
+            "slow"
+          ],
+          [
+            "after"
+          ]
+        ]
+      }
+    }
+  ]
+}

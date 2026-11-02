@@ -1,0 +1,150 @@
+{
+  "workflow": "workflows/concurrency-cancel.yml",
+  "scenarios": [
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "concurrency-cancel.yml",
+        "name": "concurrency-cancel",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "concurrency": {
+          "group": "${{ github.workflow }}-${{ github.head_ref || github.run_id }}",
+          "cancel_in_progress": "${{ github.event_name == 'pull_request' }}"
+        },
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "deploy-preview",
+            "job_id": "deploy-preview",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'push'",
+            "if_static": "true",
+            "concurrency": {
+              "group": "deploy-main",
+              "cancel_in_progress": "false"
+            },
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "deploy-preview"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "push other branch",
+      "input": {
+        "event": "push",
+        "ref": "dev"
+      },
+      "plan": {
+        "workflow": "concurrency-cancel.yml",
+        "name": "concurrency-cancel",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "dev"
+        },
+        "triggered": false,
+        "reason": "branch dev does not match the branches filter",
+        "concurrency": {
+          "group": "${{ github.workflow }}-${{ github.head_ref || github.run_id }}",
+          "cancel_in_progress": "${{ github.event_name == 'pull_request' }}"
+        }
+      }
+    },
+    {
+      "name": "pull_request",
+      "input": {
+        "event": "pull_request",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "concurrency-cancel.yml",
+        "name": "concurrency-cancel",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "concurrency": {
+          "group": "${{ github.workflow }}-${{ github.head_ref || github.run_id }}",
+          "cancel_in_progress": "${{ github.event_name == 'pull_request' }}"
+        },
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "deploy-preview",
+            "job_id": "deploy-preview",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'push'",
+            "if_static": "false",
+            "concurrency": {
+              "group": "deploy-main",
+              "cancel_in_progress": "false"
+            },
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "deploy-preview"
+          ]
+        ]
+      }
+    }
+  ]
+}

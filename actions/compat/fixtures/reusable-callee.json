@@ -1,0 +1,65 @@
+{
+  "workflow": "workflows/reusable-callee.yml",
+  "scenarios": [
+    {
+      "name": "workflow_call",
+      "input": {
+        "event": "workflow_call"
+      },
+      "plan": {
+        "workflow": "reusable-callee.yml",
+        "name": "reusable-callee",
+        "triggers": [
+          "workflow_call"
+        ],
+        "input": {
+          "event": "workflow_call"
+        },
+        "triggered": true,
+        "reason": "workflow_call is in on:",
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "outputs": [
+              "artifact"
+            ],
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "actions/upload-artifact@v4"
+        ]
+      }
+    },
+    {
+      "name": "push does not trigger",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "reusable-callee.yml",
+        "name": "reusable-callee",
+        "triggers": [
+          "workflow_call"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": false,
+        "reason": "push is not in on:"
+      }
+    }
+  ]
+}

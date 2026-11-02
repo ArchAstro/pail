@@ -1,0 +1,64 @@
+{
+  "workflow": "workflows/matrix-dynamic.yml",
+  "scenarios": [
+    {
+      "name": "pull_request",
+      "input": {
+        "event": "pull_request",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "matrix-dynamic.yml",
+        "name": "matrix-dynamic",
+        "triggers": [
+          "pull_request"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "jobs": [
+          {
+            "id": "discover",
+            "job_id": "discover",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "outputs": [
+              "packages"
+            ],
+            "steps": 2
+          },
+          {
+            "id": "test",
+            "job_id": "test",
+            "needs": [
+              "discover"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "needs.discover.outputs.packages != '[]'",
+            "if_static": "deferred",
+            "matrix_dynamic": true,
+            "fail_fast": true,
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "discover"
+          ],
+          [
+            "test"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    }
+  ]
+}

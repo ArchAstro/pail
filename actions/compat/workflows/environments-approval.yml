@@ -1,0 +1,39 @@
+name: environments-approval
+# `staging` has no reviewers; `production` requires approval (configured in repo settings,
+# not in the file): the job waits in "waiting" until a reviewer approves.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+  deployments: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.pack.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pack
+        run: echo "name=app-${GITHUB_REF_NAME}.tgz" >> "$GITHUB_OUTPUT"
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.example.com
+    steps:
+      - run: ./deploy.sh staging
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - id: deploy
+        run: ./deploy.sh production
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}

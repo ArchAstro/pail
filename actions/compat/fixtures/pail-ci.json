@@ -1,0 +1,232 @@
+{
+  "workflow": "pail/ci.yml",
+  "scenarios": [
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "ci.yml",
+        "name": "ci",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "concurrency": {
+          "group": "ci-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        },
+        "jobs": [
+          {
+            "id": "actions",
+            "job_id": "actions",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 5
+          },
+          {
+            "id": "gcs",
+            "job_id": "gcs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 6
+          },
+          {
+            "id": "model",
+            "job_id": "model",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 5
+          },
+          {
+            "id": "s3",
+            "job_id": "s3",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 7
+          },
+          {
+            "id": "test (macos-latest)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest"
+            },
+            "fail_fast": false,
+            "steps": 5
+          },
+          {
+            "id": "test (ubuntu-latest)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest"
+            },
+            "fail_fast": false,
+            "steps": 5
+          }
+        ],
+        "stages": [
+          [
+            "actions",
+            "gcs",
+            "model",
+            "s3",
+            "test (macos-latest)",
+            "test (ubuntu-latest)"
+          ]
+        ],
+        "actions": [
+          "Swatinem/rust-cache@v2",
+          "actions/checkout@v4",
+          "actions/setup-go@v5",
+          "actions/setup-node@v4",
+          "actions/setup-python@v5",
+          "dtolnay/rust-toolchain@stable"
+        ]
+      }
+    },
+    {
+      "name": "push other branch",
+      "input": {
+        "event": "push",
+        "ref": "feature"
+      },
+      "plan": {
+        "workflow": "ci.yml",
+        "name": "ci",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "feature"
+        },
+        "triggered": false,
+        "reason": "branch feature does not match the branches filter",
+        "concurrency": {
+          "group": "ci-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        }
+      }
+    },
+    {
+      "name": "pull_request",
+      "input": {
+        "event": "pull_request",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "ci.yml",
+        "name": "ci",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "concurrency": {
+          "group": "ci-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        },
+        "jobs": [
+          {
+            "id": "actions",
+            "job_id": "actions",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 5
+          },
+          {
+            "id": "gcs",
+            "job_id": "gcs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 6
+          },
+          {
+            "id": "model",
+            "job_id": "model",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 5
+          },
+          {
+            "id": "s3",
+            "job_id": "s3",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 7
+          },
+          {
+            "id": "test (macos-latest)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest"
+            },
+            "fail_fast": false,
+            "steps": 5
+          },
+          {
+            "id": "test (ubuntu-latest)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest"
+            },
+            "fail_fast": false,
+            "steps": 5
+          }
+        ],
+        "stages": [
+          [
+            "actions",
+            "gcs",
+            "model",
+            "s3",
+            "test (macos-latest)",
+            "test (ubuntu-latest)"
+          ]
+        ],
+        "actions": [
+          "Swatinem/rust-cache@v2",
+          "actions/checkout@v4",
+          "actions/setup-go@v5",
+          "actions/setup-node@v4",
+          "actions/setup-python@v5",
+          "dtolnay/rust-toolchain@stable"
+        ]
+      }
+    }
+  ]
+}

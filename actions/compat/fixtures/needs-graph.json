@@ -1,0 +1,260 @@
+{
+  "workflow": "workflows/needs-graph.yml",
+  "scenarios": [
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "needs-graph.yml",
+        "name": "needs-graph",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "setup",
+            "job_id": "setup",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "outputs": [
+              "run_e2e",
+              "sha_short"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "lint",
+            "job_id": "lint",
+            "needs": [
+              "setup"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "unit",
+            "job_id": "unit",
+            "needs": [
+              "setup"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "e2e",
+            "job_id": "e2e",
+            "needs": [
+              "unit",
+              "lint"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "needs.setup.outputs.run_e2e == 'true'",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "notify-failure",
+            "job_id": "notify-failure",
+            "needs": [
+              "unit",
+              "lint",
+              "e2e"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "failure() && github.ref == 'refs/heads/main'",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "report",
+            "job_id": "report",
+            "needs": [
+              "unit",
+              "lint",
+              "e2e"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "always()",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "setup"
+          ],
+          [
+            "lint",
+            "unit"
+          ],
+          [
+            "e2e"
+          ],
+          [
+            "notify-failure",
+            "report"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "pull_request",
+      "input": {
+        "event": "pull_request",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "needs-graph.yml",
+        "name": "needs-graph",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "jobs": [
+          {
+            "id": "setup",
+            "job_id": "setup",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "outputs": [
+              "run_e2e",
+              "sha_short"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "lint",
+            "job_id": "lint",
+            "needs": [
+              "setup"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "unit",
+            "job_id": "unit",
+            "needs": [
+              "setup"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          },
+          {
+            "id": "e2e",
+            "job_id": "e2e",
+            "needs": [
+              "unit",
+              "lint"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "needs.setup.outputs.run_e2e == 'true'",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "notify-failure",
+            "job_id": "notify-failure",
+            "needs": [
+              "unit",
+              "lint",
+              "e2e"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "failure() && github.ref == 'refs/heads/main'",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "report",
+            "job_id": "report",
+            "needs": [
+              "unit",
+              "lint",
+              "e2e"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "always()",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "setup"
+          ],
+          [
+            "lint",
+            "unit"
+          ],
+          [
+            "e2e"
+          ],
+          [
+            "notify-failure",
+            "report"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "release event does not trigger",
+      "input": {
+        "event": "release",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "needs-graph.yml",
+        "name": "needs-graph",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "release",
+          "ref": "main"
+        },
+        "triggered": false,
+        "reason": "release is not in on:"
+      }
+    }
+  ]
+}

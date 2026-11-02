@@ -1,0 +1,128 @@
+{
+  "workflow": "workflows/oss-docker-publish.yml",
+  "scenarios": [
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "oss-docker-publish.yml",
+        "name": "oss-docker-publish",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "image",
+            "job_id": "image",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "permissions": "contents:read,packages:write",
+            "steps": 6
+          }
+        ],
+        "stages": [
+          [
+            "image"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "docker/build-push-action@v6",
+          "docker/login-action@v3",
+          "docker/metadata-action@v5",
+          "docker/setup-buildx-action@v3",
+          "docker://alpine:3.20"
+        ]
+      }
+    },
+    {
+      "name": "pull_request touching docker/",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "paths": [
+          "docker/a"
+        ]
+      },
+      "plan": {
+        "workflow": "oss-docker-publish.yml",
+        "name": "oss-docker-publish",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "paths": [
+            "docker/a"
+          ]
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "jobs": [
+          {
+            "id": "image",
+            "job_id": "image",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "permissions": "contents:read,packages:write",
+            "steps": 6
+          }
+        ],
+        "stages": [
+          [
+            "image"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "docker/build-push-action@v6",
+          "docker/login-action@v3",
+          "docker/metadata-action@v5",
+          "docker/setup-buildx-action@v3",
+          "docker://alpine:3.20"
+        ]
+      }
+    },
+    {
+      "name": "pull_request not touching docker",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "paths": [
+          "src/a"
+        ]
+      },
+      "plan": {
+        "workflow": "oss-docker-publish.yml",
+        "name": "oss-docker-publish",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "paths": [
+            "src/a"
+          ]
+        },
+        "triggered": false,
+        "reason": "no changed file passes the paths filter"
+      }
+    }
+  ]
+}

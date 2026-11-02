@@ -1,0 +1,25 @@
+name: reusable-caller
+on:
+  push:
+    branches: [main]
+jobs:
+  build-linux:
+    uses: ./.github/workflows/reusable-callee.yml
+    with:
+      target: x86_64-unknown-linux-gnu
+      release: true
+    secrets: inherit
+  build-matrix:
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    uses: ./.github/workflows/reusable-callee.yml
+    with:
+      target: ${{ matrix.target }}
+    secrets:
+      signing-key: ${{ secrets.SIGNING_KEY }}
+  publish:
+    needs: [build-linux, build-matrix]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "published ${{ needs.build-linux.outputs.artifact }}"
