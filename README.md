@@ -412,8 +412,9 @@ it. A mirror's resume and `verify` step over repack commits.
 
 Features like pull requests and CI are programs that agree on names, not server code:
 `pail put` writes records to a `_meta` branch atomically, `pail events` streams ref (and
-sibling-prefix object) changes from the bucket's own notifications (GCS Pub/Sub) or by
-polling, resumes from a `--cursor`, and treats every notification as a hint (a lost one
+sibling-prefix object) changes from the bucket's own notifications (GCS Pub/Sub, S3 via SQS,
+Azure Event Grid, R2 Queues; `pail events setup` prints the wiring) or by polling, resumes
+from a `--cursor`, and treats every notification as a hint (a lost one
 only delays an event; modelled in `verify/events/`), and `pail clone --at`
 checks out the exact commit an event names. `extensions/pail-pr` and `extensions/pail-ci`
 are working prototypes; see [docs/extending.md](docs/extending.md).

@@ -46,6 +46,7 @@ Working copies and caches
 Extend
   put <branch> --file P=SRC Commit files to a branch without a working copy
   events [--branch GLOB]    Stream ref changes (bucket notifications, or polling)
+  events setup --consumer N Print the provider commands that wire a bucket's notifications
   policy show|set|check     Branch policy: who may write what (brokers and landers build on it)
 
   <name> …                  Any other name runs the plugin `pail-<name>` from PATH (pail pr …); --list shows them
@@ -365,8 +366,20 @@ pub const EVENTS: &str = "\
 One JSON line per change. A ref: {\"branch\",\"commit\",\"old\",\"source\",\"at\"} (commit null:
 deleted). An object under --prefix AREA/PREFIX, of the sibling area <repo>.AREA/:
 {\"key\",\"version\",\"old\",\"op\":\"put\"|\"delete\",\"source\",\"at\"} (key relative to the area,
-version its generation). With --gcs-subscription the bucket's own notifications say where to
+version its generation). With a notification source the bucket's own notifications say where to
 look; otherwise everything is re-listed every --interval-ms.
+
+Sources (one per consumer: a queue shared by two consumers splits its messages between them):
+  --gcs-subscription projects/P/subscriptions/S   GCS: Pub/Sub pull
+  --sqs-queue URL                                 S3: SQS, fed by S3 event notifications or EventBridge
+  --azure-queue URL                               Azure Blob: Storage Queue, fed by Event Grid (SAS in the URL,
+                                                  or a credential provider that returns a token)
+  --r2-queue ACCOUNT/QUEUE                        R2: Cloudflare Queue, HTTP pull (CLOUDFLARE_API_TOKEN)
+Instead of a flag: PAIL_EVENTS_SOURCE=sqs:URL (gcs:SUB, azure:URL, r2:ACCOUNT/QUEUE, poll), or in
+the config `[events \"s3://acme/app\"] source = sqs:URL` (the most specific store section wins;
+`events.source` for all). Order: flag, environment, config, poll. A message is deleted from its
+queue only after the events it caused are written and the cursor is saved. A message that does not
+parse is logged and treated as \"something changed\": everything is re-listed.
 
 A notification is only a hint: the key is re-read, and a line is written only if it differs from
 the last one written for the key. A duplicated or reordered notification costs a read; a lost
@@ -380,6 +393,7 @@ line is out, so a crash may repeat a line and never skips one. The first run wit
 emits everything that exists. Without --cursor a restart takes the present state as already
 seen; --initial emits every key once at start (not with --cursor).
 
+`pail events setup --consumer NAME` prints the commands that wire a bucket (see below for GCS).
 Wire a GCS bucket once (a second notification config for the sibling area, if you watch one):
   gcloud pubsub topics create pail-refs
   gcloud storage buckets notifications create gs://BUCKET --topic=pail-refs \\
@@ -392,7 +406,32 @@ Examples:
   pail events --branch 'pr/*' --branch main
   pail events --branch main --cursor ~/.cache/ci.cursor          # lossless across restarts
   pail events --branch '*' --prefix actions/ --cursor bucket:actions/cursors/orchestrator
-  pail --store gs://acme/app events --gcs-subscription projects/acme/subscriptions/pail-ci";
+  pail --store gs://acme/app events --gcs-subscription projects/acme/subscriptions/pail-ci
+  pail --store s3://acme/app events --sqs-queue https://sqs.eu-west-1.amazonaws.com/1111/pail-ci
+  PAIL_EVENTS_SOURCE=r2:ACCOUNT/pail-ci pail --store s3://acme/app events --prefix actions/";
+
+pub const EVENTS_SETUP: &str = "\
+Prints, per provider, the commands that send this store's notifications for <repo>/refs/ and
+<repo>.actions/ to a queue or subscription named pail-NAME of your own, then how to consume it:
+
+  provider  store             commands              consumer flag
+  GCS       gs://B/REPO       gcloud                --gcs-subscription
+  S3        s3://B/REPO       aws (sqs, s3api)      --sqs-queue
+  Azure     blob https URL    az (storage, eventgrid)  --azure-queue
+  R2        s3:// + R2 endpoint  wrangler           --r2-queue
+
+The provider comes from the store URL (an s3:// store with AWS_ENDPOINT at r2.cloudflarestorage.com
+is R2); --provider overrides. Options you leave out show as UPPER CASE placeholders; a plan with
+placeholders in its commands cannot be applied.
+
+It only prints, by default. --apply runs the commands in order, after a y/N question (--yes skips
+it), and stops at the first failure. That creates billable cloud resources in your account.
+S3 note: put-bucket-notification-configuration replaces the bucket's existing notification
+configuration.
+
+Examples:
+  pail --store gs://acme/app events setup --consumer ci --project acme-prod
+  pail --store s3://acme/app events setup --consumer ci --region eu-west-1 --account 111122223333";
 
 pub const POLICY: &str = "\
 The repository's policy lives on the _policy branch as policy.json: who may read, which
