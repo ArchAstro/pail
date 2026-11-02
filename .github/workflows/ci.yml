@@ -54,7 +54,7 @@ jobs:
           moto_server -p 19001 > moto.log 2>&1 &
           for i in $(seq 1 30); do curl -s -o /dev/null localhost:19001 && break; sleep 1; done
           curl -sf -X PUT localhost:19001/pail
-      - run: cargo test --release --test backends --test store_refinement
+      - run: cargo test --release --test backends --test store_refinement --test obj
         env:
           PAIL_TEST_STORES: s3://pail/ci
           AWS_ENDPOINT: http://localhost:19001
@@ -74,7 +74,7 @@ jobs:
         run: |
           target/release/pail-gcs-emulator 127.0.0.1:19002 > emulator.log 2>&1 &
           sleep 1
-      - run: cargo test --release --test backends --test store_refinement --test gcs_emulator
+      - run: cargo test --release --test backends --test store_refinement --test gcs_emulator --test obj
         env:
           PAIL_TEST_STORES: gs://pail/ci
           PAIL_GCS_BASE_URL: http://127.0.0.1:19002

@@ -461,8 +461,103 @@ impl Store {
             })),
             Err(object_store::Error::AlreadyExists { .. })
             | Err(object_store::Error::Precondition { .. }) => Ok(Cas::Conflict),
+            // Replacing a generation of an object that is gone: the expectation failed.
+            Err(object_store::Error::NotFound { .. }) if expected.is_some() => Ok(Cas::Conflict),
             Err(e) => Err(e).with_context(|| format!("cas {key}")),
         }
+    }
+
+    /// Unconditional overwrite that returns the new version (for `pail obj put`).
+    pub async fn put_version(&self, key: &str, data: Bytes) -> Result<Version> {
+        let _trace = Trace::start("put", key);
+        self.stats.puts.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .bytes_up
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
+        if let Some(root) = &self.local_root {
+            return local_write(root, key, &data, |_| true).map(|v| v.expect("unconditional"));
+        }
+        let path = self.path(key);
+        let r = self
+            .retry(|| self.inner.put(&path, PutPayload::from(data.clone())))
+            .await
+            .with_context(|| format!("put {key}"))?;
+        Ok(Version {
+            etag: r.e_tag,
+            version: r.version,
+        })
+    }
+
+    /// Delete only if the object is at `expected`. Returns false when it is absent or has moved.
+    /// Local stores check and delete under the store lock; object stores have no conditional
+    /// delete, so there a write between the check and the delete can still be lost.
+    pub async fn delete_if(&self, key: &str, expected: &Version) -> Result<bool> {
+        let _trace = Trace::start("delete_if", key);
+        if let Some(root) = &self.local_root {
+            return local_delete_if(root, key, expected);
+        }
+        match self.get_opt(key).await? {
+            Some((_, v)) if &v == expected => {
+                self.delete(key).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Objects under a prefix with the version token `cas` accepts, and modified time in unix ms.
+    pub async fn list_versions(&self, prefix: &str) -> Result<Vec<(ObjInfo, Version)>> {
+        let _trace = Trace::start("list", prefix);
+        let p = self.path(prefix.trim_end_matches('/'));
+        let strip = if self.prefix.is_empty() {
+            0
+        } else {
+            self.prefix.len() + 1
+        };
+        let items: Vec<_> = match self.retry(|| self.inner.list(Some(&p)).try_collect()).await {
+            Ok(v) => v,
+            Err(object_store::Error::NotFound { .. }) => vec![],
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = vec![];
+        for m in items {
+            let key = m.location.as_ref()[strip..].to_string();
+            if key.starts_with(".lock") || key.contains(".tmp") {
+                continue;
+            }
+            let v = match &self.local_root {
+                // A local object's version is its content hash.
+                Some(root) => match std::fs::read(root.join(&key)) {
+                    Ok(b) => local_version(&b),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e.into()),
+                },
+                None => {
+                    let mut m = m.clone();
+                    if m.version.is_none() && self.url.starts_with("gs://") {
+                        // GCS's listing omits the generation that a conditional write needs.
+                        match self.retry(|| self.inner.head(&m.location)).await {
+                            Ok(h) => m = h,
+                            Err(object_store::Error::NotFound { .. }) => continue,
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+                    Version {
+                        etag: m.e_tag.clone(),
+                        version: m.version.clone(),
+                    }
+                }
+            };
+            let info = ObjInfo {
+                key,
+                size: m.size,
+                modified: m.last_modified.timestamp_millis(),
+                version: version_token(&m),
+            };
+            out.push((info, v));
+        }
+        out.sort_by(|a, b| a.0.key.cmp(&b.0.key));
+        Ok(out)
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
@@ -548,6 +643,45 @@ fn local_version(b: &[u8]) -> Version {
 }
 
 fn local_cas(root: &FsPath, key: &str, data: &[u8], expected: Option<&Version>) -> Result<Cas> {
+    Ok(
+        match local_write(root, key, data, |current| match (expected, current) {
+            (None, None) => true,
+            (Some(e), Some(c)) => e.etag == c.etag,
+            _ => false,
+        })? {
+            Some(v) => Cas::Ok(v),
+            None => Cas::Conflict,
+        },
+    )
+}
+
+fn local_delete_if(root: &FsPath, key: &str, expected: &Version) -> Result<bool> {
+    use fs2::FileExt;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join(".lock"))?;
+    lock.lock_exclusive()?;
+    let path = root.join(key);
+    match std::fs::read(&path) {
+        Ok(b) if local_version(&b).etag == expected.etag => {
+            std::fs::remove_file(&path)?;
+            Ok(true)
+        }
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Write under the store lock if `allow(current version)`; None when refused.
+fn local_write(
+    root: &FsPath,
+    key: &str,
+    data: &[u8],
+    allow: impl Fn(Option<&Version>) -> bool,
+) -> Result<Option<Version>> {
     use fs2::FileExt;
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -561,13 +695,8 @@ fn local_cas(root: &FsPath, key: &str, data: &[u8], expected: Option<&Version>) 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    let ok = match (expected, &current) {
-        (None, None) => true,
-        (Some(e), Some(c)) => e.etag == c.etag,
-        _ => false,
-    };
-    if !ok {
-        return Ok(Cas::Conflict);
+    if !allow(current.as_ref()) {
+        return Ok(None);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -575,7 +704,7 @@ fn local_cas(root: &FsPath, key: &str, data: &[u8], expected: Option<&Version>) 
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, &path)?;
-    Ok(Cas::Ok(local_version(data)))
+    Ok(Some(local_version(data)))
 }
 
 impl Store {

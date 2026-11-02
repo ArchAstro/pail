@@ -45,6 +45,7 @@ Working copies and caches
 
 Extend
   put <branch> --file P=SRC Commit files to a branch without a working copy
+  obj ls|get|put|rm         Single objects in the sibling area <repo>.<area>/ (--if-absent, --if-version)
   events [--branch GLOB]    Stream ref changes (bucket notifications, or polling)
   events setup --consumer N Print the provider commands that wire a bucket's notifications
   policy show|set|check     Branch policy: who may write what (brokers and landers build on it)
@@ -346,6 +347,27 @@ Examples:
   pail serve --store gs://acme-vcs --addr 0.0.0.0:8080 --auth-command 'acme-sso verify'
   pail serve --store file:///srv/pail --addr 127.0.0.1:8787 --allow-anonymous
   pail clone https://vcs.acme.dev/app      # a client, with credential.helper set for it";
+
+pub const OBJ: &str = "\
+Single objects in the repository's sibling area `<repo>.<AREA>/` (default AREA `actions`), the
+primitive for writers that need create-only or generation-matched writes without a commit. Works on
+file://, gs:// and s3:// stores. Keys are relative to the area.
+
+  ls [PREFIX]                   JSON lines: {\"key\",\"size\",\"version\",\"modified\"} (unix ms), sorted
+  get KEY [-o FILE]             body to stdout; with -o, body to FILE and the version token to stdout
+  put KEY (FILE|-) [--if-absent | --if-version TOKEN]   prints the new version token
+  rm KEY [--if-version TOKEN]   absent is success unless --if-version is given
+
+The version token is opaque: pass it back to --if-version. Exit 3: KEY is absent (get). Exit 4: a
+precondition failed (the object exists for --if-absent; it moved or is gone for --if-version),
+as for `pail put --expect`. `rm --if-version` is atomic on a file:// store; on a bucket it is a
+check then a delete, which cannot see a write in between.
+
+Examples:
+  pail obj put leases/r1/1/build lease.json --if-absent        # claim a lease
+  tok=$(pail obj put leases/r1/1/build lease.json --if-version \"$tok\")   # renew it
+  pail obj --area actions ls queue/linux | head
+  pail obj get results/r1/1/build/1 -o result.json";
 
 pub const PUT: &str = "\
 The write primitive for tools and extensions: an atomic commit straight to a branch, created

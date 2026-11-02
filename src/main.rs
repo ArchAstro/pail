@@ -409,6 +409,15 @@ enum Cmd {
         #[arg(long = "expect", value_name = "PATH=ID|absent")]
         expect: Vec<String>,
     },
+    /// Read, write and list single objects in the repository's sibling area (`<repo>.<area>/`).
+    #[command(after_long_help = cli_help::OBJ)]
+    Obj {
+        /// The sibling area (the objects live in `<repo>.<AREA>/`).
+        #[arg(long, default_value = "actions", global = true)]
+        area: String,
+        #[command(subcommand)]
+        sub: ObjCmd,
+    },
     /// Stream ref and object changes as JSON lines, from the store's own notifications or by polling.
     #[command(args_conflicts_with_subcommands = true, after_long_help = cli_help::EVENTS)]
     Events {
@@ -518,6 +527,40 @@ enum PolicyCmd {
         /// Command printing the broad source token (the broker's service account).
         #[arg(long, default_value = "gcloud auth print-access-token")]
         source_token_cmd: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ObjCmd {
+    /// One JSON line per object under PREFIX: key, size, version token, modified (unix ms).
+    Ls {
+        /// Key prefix relative to the area; empty is the whole area.
+        #[arg(default_value = "")]
+        prefix: String,
+    },
+    /// Print an object's body (exit 3 if absent). With -o, write it to FILE and print the version.
+    Get {
+        key: String,
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+    /// Write an object from FILE (or `-` for stdin); prints the new version token.
+    Put {
+        key: String,
+        src: String,
+        /// Fail (exit 4) if the object exists.
+        #[arg(long, conflicts_with = "if_version")]
+        if_absent: bool,
+        /// Fail (exit 4) unless the object is at this version token.
+        #[arg(long, value_name = "TOKEN")]
+        if_version: Option<String>,
+    },
+    /// Delete an object; absent is success unless --if-version is given.
+    Rm {
+        key: String,
+        /// Fail (exit 4) unless the object is at this version token.
+        #[arg(long, value_name = "TOKEN")]
+        if_version: Option<String>,
     },
 }
 
@@ -865,6 +908,113 @@ fn main() {
     }
 }
 
+async fn obj_cmd(
+    store: Option<String>,
+    repo: Option<PathBuf>,
+    ids: Ids,
+    area: &str,
+    sub: ObjCmd,
+) -> Result<()> {
+    use pail::obj::{
+        ABSENT_EXIT, PRECONDITION_EXIT, check_area, check_key, decode_version, encode_version,
+    };
+    use pail::store::Cas;
+    use std::io::{Read, Write};
+    check_area(area)?;
+    let ctx = Ctx::open(store, repo, ids).await?;
+    let url = pail::events::area_url(&ctx.repo.store.url, area)?;
+    let st = pail::store::Store::open_in(&url, ctx.repo.local.as_deref())?;
+    let fail = |code: i32, msg: String| -> ! {
+        eprintln!("{msg}");
+        std::process::exit(code)
+    };
+    match sub {
+        ObjCmd::Ls { prefix } => {
+            let prefix = prefix.trim_matches('/');
+            let mut out = std::io::stdout().lock();
+            for (o, v) in st.list_versions(prefix).await? {
+                // `a/b` must not list `a/bc`: the prefix is a path prefix when it names a directory.
+                if !prefix.is_empty()
+                    && o.key != prefix
+                    && !o.key.starts_with(&format!("{prefix}/"))
+                {
+                    continue;
+                }
+                let line = serde_json::json!({
+                    "key": o.key, "size": o.size,
+                    "version": encode_version(&v), "modified": o.modified,
+                });
+                writeln!(out, "{line}")?;
+            }
+        }
+        ObjCmd::Get { key, output } => {
+            check_key(&key)?;
+            let Some((body, v)) = st.get_opt(&key).await? else {
+                fail(ABSENT_EXIT, format!("error: {key}: not found in {url}"));
+            };
+            match output {
+                Some(f) => {
+                    std::fs::write(&f, &body)
+                        .with_context(|| format!("writing {}", f.display()))?;
+                    println!("{}", encode_version(&v));
+                }
+                None => {
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(&body)?;
+                    out.flush()?;
+                }
+            }
+        }
+        ObjCmd::Put {
+            key,
+            src,
+            if_absent,
+            if_version,
+        } => {
+            check_key(&key)?;
+            let data = if src == "-" {
+                let mut b = vec![];
+                std::io::stdin().read_to_end(&mut b)?;
+                b
+            } else {
+                std::fs::read(&src).with_context(|| format!("reading {src}"))?
+            };
+            let data = bytes::Bytes::from(data);
+            let cas = if if_absent {
+                Some(st.cas(&key, data, None).await?)
+            } else if let Some(t) = if_version {
+                Some(st.cas(&key, data, Some(&decode_version(&t)?)).await?)
+            } else {
+                println!("{}", encode_version(&st.put_version(&key, data).await?));
+                None
+            };
+            match cas {
+                Some(Cas::Ok(v)) => println!("{}", encode_version(&v)),
+                Some(Cas::Conflict) => fail(
+                    PRECONDITION_EXIT,
+                    format!("error: {key}: precondition failed (the object exists, or has moved)"),
+                ),
+                None => {}
+            }
+        }
+        ObjCmd::Rm { key, if_version } => {
+            check_key(&key)?;
+            match if_version {
+                None => st.delete(&key).await?,
+                Some(t) => {
+                    if !st.delete_if(&key, &decode_version(&t)?).await? {
+                        fail(
+                            PRECONDITION_EXIT,
+                            format!("error: {key}: precondition failed (absent, or has moved)"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Where command output goes: a pager when stdout is a terminal (as Git does), else stdout.
 struct Output {
     w: Box<dyn std::io::Write>,
@@ -1166,6 +1316,9 @@ async fn run(cli: Cli) -> Result<()> {
                 out.commit.short(),
                 message.lines().next().unwrap_or("")
             );
+        }
+        Cmd::Obj { area, sub } => {
+            obj_cmd(cli.store, cli.repo, ids, &area, sub).await?;
         }
         Cmd::Events {
             sub:

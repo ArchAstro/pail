@@ -8,6 +8,8 @@ object store itself. Features are programs that agree on names:
 writes   pail put <branch> --file PATH=SRC     atomic commit to any branch, no working copy
          pail land <branch> --stack            every commit of a branch, one atomic swap
          pail rebase --plan FILE --json        rewrite a branch from a JSON plan, one atomic swap
+objects  pail obj [--area NAME] ls|get|put|rm      single objects in <repo>.<area>/ (default actions);
+         put --if-absent | --if-version TOKEN (exit 4 on a failed precondition), get exits 3 if absent
 reads    pail cat <rev>:<path>, pail ls -r <rev>:<dir>, pail log, pail rev-parse
 events   pail events [--branch GLOB] [--prefix AREA/P] [--cursor C] [--gcs-subscription SUB | --sqs-queue URL | --azure-queue URL | --r2-queue ACCT/Q]
          pail events setup --consumer NAME   (prints the provider commands that wire the notifications)

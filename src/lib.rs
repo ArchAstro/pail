@@ -27,6 +27,7 @@ pub mod inspect;
 pub mod lease;
 pub mod local;
 pub mod manifest;
+pub mod obj;
 pub mod objects;
 pub mod pack;
 pub mod plugin;
