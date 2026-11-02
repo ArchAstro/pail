@@ -1,6 +1,6 @@
 # pail Actions: the storage contract
 
-**Status: designed, not built.** This is the contract the orchestrator, runner, scaler and
+**Status: designed; the orchestrator's Tier 1 half is built** (`actions/internal/orchestrator`, `pail-actions serve`: event mapping, trigger, promote, finish, check; Tier 2 sync, start, accept and sweep are not). This is the contract the orchestrator, runner, scaler and
 CLI are written against. The rules here are the ones `verify/actions/` checks
 (`actions.qnt`, `actions_sim.qnt`, `actions_scenarios.qnt`; see the Actions section of
 `verify/README.md`). Where this file and the model disagree, the model wins. Parts the model
@@ -84,7 +84,7 @@ Writer is always the orchestrator unless stated.
 | `runs/<id>/<att>/jobs/<job>.json` | create, then CAS | one job of one attempt (§3.2) |
 | `runs/<id>/<att>/approvals/<env>/<who>.json` | approver, create | `{"who","at"}`; one file per person, so approvers never contend |
 | `claims/<key>` | create | `{"run": id}`: the run created for an event key or cron slot (§3.3) |
-| `concurrency/<group>.json` | CAS | `{"run": id}`: newest run of a group |
+| `concurrency/<group>.json` | CAS | `{"run": id}`: newest run of a group; the group is the workflow's `concurrency.group` with its `${{ github.* }}` references filled in (unknown ones become empty) and escaped like a branch name (§1 rule 3; other characters outside `A-Za-z0-9._@+=-` become `%XX`) |
 | `numbers/<workflow>/<n>` | create | run-number claim, in the run's commit **(unmodelled)** |
 | `idx/{branch,workflow,sha}/…/<id>` | create | empty markers for listing runs, in the run's commit **(unmodelled)** |
 | `secrets/<NAME>.json` | admin, CAS | `{"ref": "gcpsm://…", "env": null}`: a reference, never a value **(unmodelled)** |
@@ -102,6 +102,11 @@ Writer is always the orchestrator unless stated.
   "updated_at": "2026-10-30T17:02:14Z" }
 ```
 
+0. `status` is `queued` when created, `in_progress` once a job is, `completed` with the conclusion
+   when the run finishes. An optional `payload` holds the GitHub-shaped event payload
+   (`push`: `ref`, `before`, `after`; `pull_request`: `action`, `number`, `pull_request.{head,base}`;
+   `workflow_dispatch`: `ref`, `inputs`), so the Tier 2 queue entry's `github` context can be
+   built from Tier 1 alone. `concurrency.cancel_in_progress` is a boolean here.
 1. `run_attempt` is the *current* attempt; older attempts' jobs are frozen.
 2. `cancel: true` means the run was superseded or cancelled: nothing of it may start.
 3. `conclusion`: `cancelled` if `cancel`, else `failure` if any job failed, else `success`.
@@ -118,6 +123,11 @@ Writer is always the orchestrator unless stated.
   "steps": [], "log": null }
 ```
 
+0. The file name is the job *instance* (`build`, or `build (ubuntu-latest, 20)` for a matrix job)
+   with `/` escaped as `~`; `job_id` (`build`) is the workflow's job id, and `needs` lists job
+   ids: a job needs every instance of each. `name` is the display name. A job whose `if` the
+   planner decides is false at plan time is created `completed/skipped`; one without `needs` and
+   without an `environment` is created `queued`, any other `pending`.
 1. `holder` + `seq`: the lease this job started under. Set by `IStart` from the lease.
 2. `accepted`: `{"runner","seq"}` of the result that concluded it. Null for skipped, lost
    (`"runner lost"` failure), cancelled and copied jobs.
@@ -134,7 +144,7 @@ restarts.
 | Trigger | Key (a path, `/` between parts) |
 |---|---|
 | push | `<wf>/push/<branch~>@<sha>` |
-| pull_request | `<wf>/pull_request/<n>@<sha>` |
+| pull_request | `<wf>/pull_request/<n>@<sha>` for `opened` and `synchronize`; `<wf>/pull_request/<n>@<sha>/<type>` for `reopened` and `closed`, so a close at the head that was just pushed is not swallowed by that push's claim |
 | schedule | `<wf>/schedule/<slot>` (slot = the due cron minute, UTC) |
 | workflow_dispatch | `<wf>/dispatch/<request-uuid>` |
 
@@ -152,11 +162,15 @@ restarts.
 
 1. **Projected from the accepted job in `_actions`, never from `results/`.** A late success
    from a lost runner cannot become a check.
-2. It is a second branch written after `_actions`, so it can lag or be missed by a crash.
+2. It is a second branch written after `_actions`, so it can lag or be missed by a crash. The
+   projection commit cannot guard the run it read (§7.2 "check"): a ref is guarded only by its
+   own records. Only the checks it writes are guarded, and a stale projection is overwritten by
+   the next tick's reconcile.
    **Reconcile repairs it**: every tick compares each completed job (current attempt) with
    its check and rewrites the differing ones.
 3. `state` (`pending|success|failure`) is the legacy field `pail pr merge` reads from
-   `_meta:checks/`; derived from `status`/`conclusion`. `pail pr merge` reads `_checks`
+   `_meta:checks/`; derived from `status`/`conclusion`: not completed is `pending`, `success` and
+   `skipped` are `success`, every other conclusion is `failure`. `pail pr merge` reads `_checks`
    first and falls back to `_meta:checks` during migration.
 4. Check names are flat (`ci.test-linux-stable`); a rerun overwrites the check in place.
 
@@ -249,7 +263,7 @@ are unmodelled)**.
 
 ## 7. The orchestrator
 
-`pail actions serve` is **stateless**: everything it knows it re-reads. Any number of
+`pail-actions serve --store URL [--replica NAME]` (a `pail actions serve` plugin later) is **stateless**: everything it knows it re-reads. Any number of
 replicas are safe; the leader lease (the existing `locks/` protocol) is an optimisation
 that saves wasted retries and is never needed for correctness.
 
@@ -272,13 +286,37 @@ pail events --branch '*' --prefix actions/ --cursor bucket:actions/cursors/<repl
    (and the start-up diff against the cursor) finds it. The detection latency of a dead
    runner is `TTL + safety-poll`; the poll must stay on.
 3. Each replica has its own cursor: a bucket cursor is CAS'd, one consumer per cursor.
+4. **Event mapping.** A ref line is mapped by the tick to triggers (claims make repeats
+   harmless):
+
+   | Line | Triggers |
+   |---|---|
+   | branch `B` moved (not `_*`) | `push` on `B`, planned against the workflows at the new commit; if `B` is the head of an open PR, also `pull_request` `synchronize` |
+   | `_meta` moved | per changed `prs/<n>.json`: absent to open = `opened`, closed to open = `reopened`, open to closed or merged = `closed`; head sha is the PR branch's tip |
+   | `requests/dispatch/<uuid>.json` (Tier 2) | `workflow_dispatch` of the requested workflow at the ref |
+   | `schedule` | not built |
+
+   Workflows are read from the **base** branch (D7) for every `pull_request` event and for a
+   push to any `pr/*` branch, because the PR author controls the head. The event line does
+   not carry who wrote the ref, so every `pr/*` branch is treated as untrusted. The mapped
+   triggers are kept in memory until they are claimed; a crash after the cursor moved and
+   before the commit lands loses them (cost: re-push). A new cursor emits every branch head
+   once (§7.1 of `extending.md`), so the first start on an existing repository triggers
+   every branch whose workflows match.
+5. The tick also runs on a timer (`--interval`, default 10 s), since a lapsed lease emits nothing.
 
 ### 7.2 Intents and their guards
 
 Every tick decides these from a read; a real commit batches several. **A commit guards every
 record it read, not only those it writes**: written records that existed are `--expect`ed,
 written records that did not are `--if-absent`, and records read but not written are
-`--expect`ed too. A conflict means: re-read, decide again.
+`--expect`ed too. A conflict means: re-read, decide again. `pail put --expect` accepts only paths the
+same command writes, so a record that is read and not written is guarded by writing it back
+unchanged with `--expect <blob id read>`. Within a tick the passes run in the order trigger,
+promote, finish over one working copy of the records, so a run cancelled by a trigger whose
+jobs are all concluded is finished in the same commit. A group without `cancel-in-progress`
+is recorded in `concurrency/` but nothing is cancelled and runs are not serialised (GitHub
+queues one pending run; not built).
 
 | Intent | Does | Writes | Also guards (read, not written) |
 |---|---|---|---|

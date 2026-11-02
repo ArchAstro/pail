@@ -24,6 +24,8 @@ func main() {
 		err = cmdPlan(os.Args[2:])
 	case "run-local":
 		err = cmdRunLocal(os.Args[2:])
+	case "serve":
+		err = cmdServe(os.Args[2:])
 	default:
 		usage()
 	}
@@ -36,6 +38,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   pail-actions plan --event <name> [--ref <branch|refs/tags/x>] [--paths a,b] [--cron "<expr>"] [--type <activity>] <workflow file or dir>
+  pail-actions serve --store <url> [--pail pail] [--replica <name>] [--default-branch main] [--safety-poll 10] [--interval 10s]
   pail-actions run-local --store <url> --commit <rev> --job <id> [--pail pail] [--host | --image <img>] <workflow file>`)
 	os.Exit(2)
 }
