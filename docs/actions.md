@@ -178,6 +178,11 @@ All objects expire by bucket lifecycle rules except the ones noted.
 | `requests/<kind>/<uuid>.json` | CLI, create | `dispatch`, `rerun`, `cancel` requests (§6) | deleted by the orchestrator once acted on |
 | `cursors/<replica>` | `pail events`, CAS | event cursor of one orchestrator replica | never |
 
+Tier 2 writers use `pail obj [--area actions]` (`ls`, `get`, `put`, `rm`; keys are relative to
+`<repo>.actions/`): "create" is `put KEY FILE --if-absent`, "gen-match" is `put KEY FILE
+--if-version TOKEN` with the token from the last `get -o`, `put` or `ls` (opaque, base64url). A
+failed precondition exits 4, an absent key on `get` exits 3, and `rm` is idempotent.
+
 `progress/` and `logs/` carry the lease seq in the path **(unmodelled; a decision, see open
 questions)**: a lost runner that wakes up late then writes under its own seq and cannot
 overwrite its successor's progress, and "a step started under seq N" stays well defined for
