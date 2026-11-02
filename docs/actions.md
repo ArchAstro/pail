@@ -193,6 +193,15 @@ the sweep.
   "timeout_minutes": 30, "secrets": [ {"name":"NPM_TOKEN","ref":"gcpsm://proj/npm-token"} ] }
 ```
 
+Optional job keys, added so a runner can build the job without reading Tier 1 workflow files:
+`runs_on` (default: the label the entry sits under), `name`, `container`, `services`,
+`defaults`; each has the same shape as the YAML key. `github` may also carry `run_number`,
+`actor`, `head_ref`, `base_ref`. Each step is the YAML step object verbatim (`name`, `id`,
+`if`, `uses`, `with`, `run`, `shell`, `env`, `working-directory`, `continue-on-error`). The
+runner sets act's `github` context (sha, ref, event_name, run_id, repository) from the entry,
+never from a local git repository, and swaps `actions/checkout` for `pail clone --at <sha>`.
+`secrets[]` is ignored by the runner today (logged).
+
 The orchestrator keeps the queue equal to the set of `queued` jobs: it creates an entry when
 a job becomes `queued`, and deletes it when the job starts, is cancelled or skipped. Both are
 idempotent and may lag. An entry can outlive the job's start, so a lease can be taken over
