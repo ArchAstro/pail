@@ -89,6 +89,9 @@ reported as an event.
 Measured on GCS (2026-10-20, residential client): a ref event arrived 1.2–1.6 s after the
 commit started (the commit itself ~0.5 s).
 
+Pail Actions, a workflow system built on exactly these conventions, has its storage
+contract in [actions.md](actions.md) (designed, not yet built).
+
 ## Plugins
 
 `pail <name> args…` runs `pail-<name>` from `PATH` when `<name>` is not a built-in (as `git`
