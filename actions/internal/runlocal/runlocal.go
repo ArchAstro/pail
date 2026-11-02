@@ -51,6 +51,16 @@ func SwapCheckout(w *model.Workflow, pail, store, commit string) int {
 	return n
 }
 
+// DockerOptions are the container options that make `pail clone` work inside the job
+// container: the linux pail binary, and the store directory for file:// stores.
+func DockerOptions(store, linuxPail string) string {
+	opts := []string{"-v " + linuxPail + ":/usr/local/bin/pail:ro"}
+	if u, err := url.Parse(store); err == nil && u.Scheme == "file" {
+		opts = append(opts, "-v "+u.Path+":"+u.Path+":ro")
+	}
+	return strings.Join(opts, " ")
+}
+
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 func Run(o Options) error {
@@ -106,11 +116,7 @@ func Run(o Options) error {
 		if o.LinuxPail == "" {
 			return fmt.Errorf("docker mode needs --linux-pail, a linux pail binary to mount into the container")
 		}
-		opts := []string{"-v " + o.LinuxPail + ":/usr/local/bin/pail:ro"}
-		if u, err := url.Parse(o.Store); err == nil && u.Scheme == "file" {
-			opts = append(opts, "-v "+u.Path+":"+u.Path+":ro")
-		}
-		cfg.ContainerOptions = strings.Join(opts, " ")
+		cfg.ContainerOptions = DockerOptions(o.Store, o.LinuxPail)
 	}
 
 	// act's JobLoggerFactory is the seam where a runner captures job logs (here: o.Out; in the
