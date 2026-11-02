@@ -1,0 +1,96 @@
+{
+  "workflow": "workflows/environments-approval.yml",
+  "scenarios": [
+    {
+      "name": "push tag",
+      "input": {
+        "event": "push",
+        "ref": "refs/tags/v1.0.0"
+      },
+      "plan": {
+        "workflow": "environments-approval.yml",
+        "name": "environments-approval",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "refs/tags/v1.0.0"
+        },
+        "triggered": true,
+        "reason": "push to tag v1.0.0",
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "outputs": [
+              "artifact"
+            ],
+            "steps": 2
+          },
+          {
+            "id": "deploy-staging",
+            "job_id": "deploy-staging",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "environment": "staging",
+            "steps": 1
+          },
+          {
+            "id": "deploy-production",
+            "job_id": "deploy-production",
+            "needs": [
+              "deploy-staging"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "environment": "production",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "deploy-staging"
+          ],
+          [
+            "deploy-production"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    },
+    {
+      "name": "push branch",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "environments-approval.yml",
+        "name": "environments-approval",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": false,
+        "reason": "only tags are filtered: a branch push does not trigger"
+      }
+    }
+  ]
+}

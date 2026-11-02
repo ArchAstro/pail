@@ -1,0 +1,342 @@
+{
+  "workflow": "workflows/oss-triage-bot.yml",
+  "scenarios": [
+    {
+      "name": "issue opened",
+      "input": {
+        "event": "issues",
+        "type": "opened"
+      },
+      "plan": {
+        "workflow": "oss-triage-bot.yml",
+        "name": "oss-triage-bot",
+        "triggers": [
+          "issue_comment",
+          "issues",
+          "pull_request_target",
+          "schedule"
+        ],
+        "input": {
+          "event": "issues",
+          "type": "opened"
+        },
+        "triggered": true,
+        "reason": "issues is in on:",
+        "jobs": [
+          {
+            "id": "label",
+            "job_id": "label",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request_target'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "slash-commands",
+            "job_id": "slash-commands",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/rebase')",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "stale",
+            "job_id": "stale",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'schedule'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "welcome",
+            "job_id": "welcome",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issues' && github.event.action == 'opened'",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "label",
+            "slash-commands",
+            "stale",
+            "welcome"
+          ]
+        ],
+        "actions": [
+          "actions/github-script@v7",
+          "actions/labeler@v5",
+          "actions/stale@v9"
+        ]
+      }
+    },
+    {
+      "name": "issue closed is not listed",
+      "input": {
+        "event": "issues",
+        "type": "closed"
+      },
+      "plan": {
+        "workflow": "oss-triage-bot.yml",
+        "name": "oss-triage-bot",
+        "triggers": [
+          "issue_comment",
+          "issues",
+          "pull_request_target",
+          "schedule"
+        ],
+        "input": {
+          "event": "issues",
+          "type": "closed"
+        },
+        "triggered": false,
+        "reason": "type closed is not in types [opened labeled]"
+      }
+    },
+    {
+      "name": "issue_comment created",
+      "input": {
+        "event": "issue_comment",
+        "type": "created"
+      },
+      "plan": {
+        "workflow": "oss-triage-bot.yml",
+        "name": "oss-triage-bot",
+        "triggers": [
+          "issue_comment",
+          "issues",
+          "pull_request_target",
+          "schedule"
+        ],
+        "input": {
+          "event": "issue_comment",
+          "type": "created"
+        },
+        "triggered": true,
+        "reason": "issue_comment is in on:",
+        "jobs": [
+          {
+            "id": "label",
+            "job_id": "label",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request_target'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "slash-commands",
+            "job_id": "slash-commands",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/rebase')",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "stale",
+            "job_id": "stale",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'schedule'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "welcome",
+            "job_id": "welcome",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issues' && github.event.action == 'opened'",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "label",
+            "slash-commands",
+            "stale",
+            "welcome"
+          ]
+        ],
+        "actions": [
+          "actions/github-script@v7",
+          "actions/labeler@v5",
+          "actions/stale@v9"
+        ]
+      }
+    },
+    {
+      "name": "pull_request_target opened",
+      "input": {
+        "event": "pull_request_target",
+        "ref": "main",
+        "type": "opened"
+      },
+      "plan": {
+        "workflow": "oss-triage-bot.yml",
+        "name": "oss-triage-bot",
+        "triggers": [
+          "issue_comment",
+          "issues",
+          "pull_request_target",
+          "schedule"
+        ],
+        "input": {
+          "event": "pull_request_target",
+          "ref": "main",
+          "type": "opened"
+        },
+        "triggered": true,
+        "reason": "pull_request_target matches",
+        "jobs": [
+          {
+            "id": "label",
+            "job_id": "label",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request_target'",
+            "if_static": "true",
+            "steps": 1
+          },
+          {
+            "id": "slash-commands",
+            "job_id": "slash-commands",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/rebase')",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "stale",
+            "job_id": "stale",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'schedule'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "welcome",
+            "job_id": "welcome",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issues' && github.event.action == 'opened'",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "label",
+            "slash-commands",
+            "stale",
+            "welcome"
+          ]
+        ],
+        "actions": [
+          "actions/github-script@v7",
+          "actions/labeler@v5",
+          "actions/stale@v9"
+        ]
+      }
+    },
+    {
+      "name": "schedule",
+      "input": {
+        "event": "schedule",
+        "cron": "30 1 * * *"
+      },
+      "plan": {
+        "workflow": "oss-triage-bot.yml",
+        "name": "oss-triage-bot",
+        "triggers": [
+          "issue_comment",
+          "issues",
+          "pull_request_target",
+          "schedule"
+        ],
+        "input": {
+          "event": "schedule",
+          "cron": "30 1 * * *"
+        },
+        "triggered": true,
+        "reason": "cron 30 1 * * *",
+        "jobs": [
+          {
+            "id": "label",
+            "job_id": "label",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request_target'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "slash-commands",
+            "job_id": "slash-commands",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/rebase')",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "stale",
+            "job_id": "stale",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'schedule'",
+            "if_static": "true",
+            "steps": 1
+          },
+          {
+            "id": "welcome",
+            "job_id": "welcome",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'issues' && github.event.action == 'opened'",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "label",
+            "slash-commands",
+            "stale",
+            "welcome"
+          ]
+        ],
+        "actions": [
+          "actions/github-script@v7",
+          "actions/labeler@v5",
+          "actions/stale@v9"
+        ]
+      }
+    }
+  ]
+}

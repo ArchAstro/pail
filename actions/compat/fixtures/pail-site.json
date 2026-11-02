@@ -1,0 +1,127 @@
+{
+  "workflow": "pail/site.yml",
+  "scenarios": [
+    {
+      "name": "push main, site changed",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "site/index.html"
+        ]
+      },
+      "plan": {
+        "workflow": "site.yml",
+        "name": "site",
+        "triggers": [
+          "push",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "site/index.html"
+          ]
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "concurrency": {
+          "group": "site"
+        },
+        "jobs": [
+          {
+            "id": "deploy",
+            "job_id": "deploy",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "deploy"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "cloudflare/wrangler-action@v3"
+        ]
+      }
+    },
+    {
+      "name": "push main, src only",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "src/main.rs"
+        ]
+      },
+      "plan": {
+        "workflow": "site.yml",
+        "name": "site",
+        "triggers": [
+          "push",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "src/main.rs"
+          ]
+        },
+        "triggered": false,
+        "reason": "no changed file passes the paths filter",
+        "concurrency": {
+          "group": "site"
+        }
+      }
+    },
+    {
+      "name": "workflow_dispatch",
+      "input": {
+        "event": "workflow_dispatch",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "site.yml",
+        "name": "site",
+        "triggers": [
+          "push",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "workflow_dispatch",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "workflow_dispatch is in on:",
+        "concurrency": {
+          "group": "site"
+        },
+        "jobs": [
+          {
+            "id": "deploy",
+            "job_id": "deploy",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "deploy"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "cloudflare/wrangler-action@v3"
+        ]
+      }
+    }
+  ]
+}

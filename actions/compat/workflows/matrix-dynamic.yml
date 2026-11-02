@@ -1,0 +1,22 @@
+name: matrix-dynamic
+# The matrix is a job output: it can only be expanded after `discover` ran.
+on: [pull_request]
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.find.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: echo "packages=$(ls packages | jq -R -s -c 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+  test:
+    needs: discover
+    if: needs.discover.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: ${{ fromJSON(needs.discover.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test --workspace packages/${{ matrix.package }}

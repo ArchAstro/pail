@@ -1,0 +1,43 @@
+name: contexts-env
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+env:
+  CI: "true"
+  BUILD_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+jobs:
+  show:
+    runs-on: ubuntu-latest
+    env:
+      REF_INFO: ${{ github.ref_name }} (${{ github.ref_type }})
+    steps:
+      - name: GITHUB_* variables
+        run: |
+          echo "repo=$GITHUB_REPOSITORY sha=$GITHUB_SHA ref=$GITHUB_REF"
+          echo "event=$GITHUB_EVENT_NAME actor=$GITHUB_ACTOR workspace=$GITHUB_WORKSPACE"
+          echo "run=$GITHUB_RUN_ID/$GITHUB_RUN_NUMBER/$GITHUB_RUN_ATTEMPT server=$GITHUB_SERVER_URL"
+      - name: Contexts
+        run: echo '${{ toJSON(github.event) }}' | head -c 200
+      - name: Runner and job
+        run: echo "${{ runner.os }} ${{ runner.arch }} ${{ job.status }}"
+      - name: File commands
+        run: |
+          echo "FOO=bar" >> "$GITHUB_ENV"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "### Summary" >> "$GITHUB_STEP_SUMMARY"
+  only-main:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - run: echo main push
+  only-tags:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - run: echo tag
+  only-prs:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - run: echo "pr ${{ github.event.number }}"

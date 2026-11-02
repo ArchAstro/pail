@@ -1,0 +1,72 @@
+{
+  "workflow": "workflows/cache-artifacts.yml",
+  "scenarios": [
+    {
+      "name": "push",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "cache-artifacts.yml",
+        "name": "cache-artifacts",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "build",
+            "job_id": "build",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 4
+          },
+          {
+            "id": "smoke",
+            "job_id": "smoke",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 2
+          },
+          {
+            "id": "test-reports",
+            "job_id": "test-reports",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "build"
+          ],
+          [
+            "smoke",
+            "test-reports"
+          ]
+        ],
+        "actions": [
+          "actions/cache@v4",
+          "actions/checkout@v4",
+          "actions/download-artifact@v4",
+          "actions/upload-artifact@v4"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+name: triggers-push-pr
+# Branch, tag and path filters on push and pull_request.
+on:
+  push:
+    branches: [main, "release/**", "!release/old-*"]
+    tags: ["v*.*.*"]
+    paths:
+      - "src/**"
+      - "Cargo.*"
+      - "!src/**/*.md"
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test

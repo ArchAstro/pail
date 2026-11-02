@@ -1,0 +1,274 @@
+{
+  "workflow": "workflows/oss-node-monorepo.yml",
+  "scenarios": [
+    {
+      "name": "push main, package changed",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "packages/a/index.ts"
+        ]
+      },
+      "plan": {
+        "workflow": "oss-node-monorepo.yml",
+        "name": "oss-node-monorepo",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "packages/a/index.ts"
+          ]
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "concurrency": {
+          "group": "node-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        },
+        "jobs": [
+          {
+            "id": "install",
+            "job_id": "install",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 5
+          },
+          {
+            "id": "test (1)",
+            "job_id": "test",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 1
+            },
+            "fail_fast": true,
+            "timeout_minutes": "20",
+            "steps": 4
+          },
+          {
+            "id": "test (2)",
+            "job_id": "test",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 2
+            },
+            "fail_fast": true,
+            "timeout_minutes": "20",
+            "steps": 4
+          },
+          {
+            "id": "test (3)",
+            "job_id": "test",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 3
+            },
+            "fail_fast": true,
+            "timeout_minutes": "20",
+            "steps": 4
+          },
+          {
+            "id": "typecheck",
+            "job_id": "typecheck",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "install"
+          ],
+          [
+            "test (1)",
+            "test (2)",
+            "test (3)",
+            "typecheck"
+          ]
+        ],
+        "actions": [
+          "actions/cache/restore@v4",
+          "actions/cache/save@v4",
+          "actions/checkout@v4",
+          "actions/setup-node@v4",
+          "actions/upload-artifact@v4",
+          "pnpm/action-setup@v4"
+        ]
+      }
+    },
+    {
+      "name": "push main, only docs",
+      "input": {
+        "event": "push",
+        "ref": "main",
+        "paths": [
+          "docs/x.md"
+        ]
+      },
+      "plan": {
+        "workflow": "oss-node-monorepo.yml",
+        "name": "oss-node-monorepo",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main",
+          "paths": [
+            "docs/x.md"
+          ]
+        },
+        "triggered": false,
+        "reason": "no changed file passes the paths filter",
+        "concurrency": {
+          "group": "node-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        }
+      }
+    },
+    {
+      "name": "pull_request, lockfile changed",
+      "input": {
+        "event": "pull_request",
+        "ref": "main",
+        "paths": [
+          "pnpm-lock.yaml"
+        ]
+      },
+      "plan": {
+        "workflow": "oss-node-monorepo.yml",
+        "name": "oss-node-monorepo",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main",
+          "paths": [
+            "pnpm-lock.yaml"
+          ]
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "concurrency": {
+          "group": "node-${{ github.ref }}",
+          "cancel_in_progress": "true"
+        },
+        "jobs": [
+          {
+            "id": "install",
+            "job_id": "install",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 5
+          },
+          {
+            "id": "test (1)",
+            "job_id": "test",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 1
+            },
+            "fail_fast": true,
+            "timeout_minutes": "20",
+            "steps": 4
+          },
+          {
+            "id": "test (2)",
+            "job_id": "test",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 2
+            },
+            "fail_fast": true,
+            "timeout_minutes": "20",
+            "steps": 4
+          },
+          {
+            "id": "test (3)",
+            "job_id": "test",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 3
+            },
+            "fail_fast": true,
+            "timeout_minutes": "20",
+            "steps": 4
+          },
+          {
+            "id": "typecheck",
+            "job_id": "typecheck",
+            "needs": [
+              "install"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "install"
+          ],
+          [
+            "test (1)",
+            "test (2)",
+            "test (3)",
+            "typecheck"
+          ]
+        ],
+        "actions": [
+          "actions/cache/restore@v4",
+          "actions/cache/save@v4",
+          "actions/checkout@v4",
+          "actions/setup-node@v4",
+          "actions/upload-artifact@v4",
+          "pnpm/action-setup@v4"
+        ]
+      }
+    }
+  ]
+}

@@ -78,3 +78,19 @@ jobs:
         env:
           PAIL_TEST_STORES: gs://pail/ci
           PAIL_GCS_BASE_URL: http://127.0.0.1:19002
+  actions:
+    # pail-actions (actions/): plans every workflow of the compatibility corpus against its
+    # fixture. Tests that need docker or a pail binary skip themselves here.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: actions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: actions/go.mod
+          cache-dependency-path: actions/go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...

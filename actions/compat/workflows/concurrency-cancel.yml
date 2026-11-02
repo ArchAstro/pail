@@ -1,0 +1,22 @@
+name: concurrency-cancel
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+  deploy-preview:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-main
+      cancel-in-progress: false
+    steps:
+      - run: ./deploy.sh preview

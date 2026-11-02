@@ -1,0 +1,491 @@
+{
+  "workflow": "workflows/oss-python-lib.yml",
+  "scenarios": [
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "oss-python-lib.yml",
+        "name": "oss-python-lib",
+        "triggers": [
+          "pull_request",
+          "push",
+          "release"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "test (macos-latest, 3.10)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.10"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.11)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.11"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.12)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.12"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.13)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.13"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.9)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.9"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.10)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.10"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.11)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.11"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.12)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.12"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.13)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.13"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.14-dev)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.14-dev"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.9)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.9"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "build",
+            "job_id": "build",
+            "needs": [
+              "test"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "publish",
+            "job_id": "publish",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'release'",
+            "if_static": "false",
+            "environment": "pypi",
+            "permissions": "id-token:write",
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "test (macos-latest, 3.10)",
+            "test (macos-latest, 3.11)",
+            "test (macos-latest, 3.12)",
+            "test (macos-latest, 3.13)",
+            "test (macos-latest, 3.9)",
+            "test (ubuntu-latest, 3.10)",
+            "test (ubuntu-latest, 3.11)",
+            "test (ubuntu-latest, 3.12)",
+            "test (ubuntu-latest, 3.13)",
+            "test (ubuntu-latest, 3.14-dev)",
+            "test (ubuntu-latest, 3.9)"
+          ],
+          [
+            "build"
+          ],
+          [
+            "publish"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "actions/download-artifact@v4",
+          "actions/setup-python@v5",
+          "actions/upload-artifact@v4",
+          "pypa/gh-action-pypi-publish@release/v1"
+        ]
+      }
+    },
+    {
+      "name": "release published",
+      "input": {
+        "event": "release",
+        "type": "published"
+      },
+      "plan": {
+        "workflow": "oss-python-lib.yml",
+        "name": "oss-python-lib",
+        "triggers": [
+          "pull_request",
+          "push",
+          "release"
+        ],
+        "input": {
+          "event": "release",
+          "type": "published"
+        },
+        "triggered": true,
+        "reason": "release is in on:",
+        "jobs": [
+          {
+            "id": "test (macos-latest, 3.10)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.10"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.11)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.11"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.12)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.12"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.13)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.13"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, 3.9)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "python": "3.9"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.10)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.10"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.11)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.11"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.12)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.12"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.13)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.13"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.14-dev)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.14-dev"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, 3.9)",
+            "job_id": "test",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "python": "3.9"
+            },
+            "fail_fast": false,
+            "continue_on_error": "${{ matrix.python == '3.14-dev' }}",
+            "steps": 4
+          },
+          {
+            "id": "build",
+            "job_id": "build",
+            "needs": [
+              "test"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "publish",
+            "job_id": "publish",
+            "needs": [
+              "build"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'release'",
+            "if_static": "true",
+            "environment": "pypi",
+            "permissions": "id-token:write",
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "test (macos-latest, 3.10)",
+            "test (macos-latest, 3.11)",
+            "test (macos-latest, 3.12)",
+            "test (macos-latest, 3.13)",
+            "test (macos-latest, 3.9)",
+            "test (ubuntu-latest, 3.10)",
+            "test (ubuntu-latest, 3.11)",
+            "test (ubuntu-latest, 3.12)",
+            "test (ubuntu-latest, 3.13)",
+            "test (ubuntu-latest, 3.14-dev)",
+            "test (ubuntu-latest, 3.9)"
+          ],
+          [
+            "build"
+          ],
+          [
+            "publish"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "actions/download-artifact@v4",
+          "actions/setup-python@v5",
+          "actions/upload-artifact@v4",
+          "pypa/gh-action-pypi-publish@release/v1"
+        ]
+      }
+    },
+    {
+      "name": "release created is not listed",
+      "input": {
+        "event": "release",
+        "type": "created"
+      },
+      "plan": {
+        "workflow": "oss-python-lib.yml",
+        "name": "oss-python-lib",
+        "triggers": [
+          "pull_request",
+          "push",
+          "release"
+        ],
+        "input": {
+          "event": "release",
+          "type": "created"
+        },
+        "triggered": false,
+        "reason": "type created is not in types [published]"
+      }
+    }
+  ]
+}

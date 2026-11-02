@@ -1,0 +1,31 @@
+name: reusable-callee
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: Cargo target triple
+        type: string
+        required: true
+      release:
+        type: boolean
+        default: false
+    secrets:
+      signing-key:
+        required: false
+    outputs:
+      artifact:
+        description: Name of the uploaded artifact
+        value: ${{ jobs.build.outputs.artifact }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.up.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build ${{ inputs.release && '--release' || '' }} --target ${{ inputs.target }}
+      - id: up
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ inputs.target }}
+          path: target/${{ inputs.target }}

@@ -1,0 +1,420 @@
+{
+  "workflow": "workflows/oss-rust-ci.yml",
+  "scenarios": [
+    {
+      "name": "push master",
+      "input": {
+        "event": "push",
+        "ref": "master"
+      },
+      "plan": {
+        "workflow": "oss-rust-ci.yml",
+        "name": "oss-rust-ci",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "master"
+        },
+        "triggered": true,
+        "reason": "push to branch master",
+        "jobs": [
+          {
+            "id": "clippy",
+            "job_id": "clippy",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "docs",
+            "job_id": "docs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "fmt",
+            "job_id": "fmt",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "msrv",
+            "job_id": "msrv",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "test (macos-latest, beta)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "rust": "beta"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, stable)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "rust": "stable"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, beta)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "rust": "beta"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, nightly)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "rust": "nightly"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, stable)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "rust": "stable"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (windows-latest, beta)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "windows-latest",
+              "rust": "beta"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (windows-latest, stable)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "windows-latest",
+              "rust": "stable"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "ci-success",
+            "job_id": "ci-success",
+            "name": "CI success",
+            "needs": [
+              "fmt",
+              "clippy",
+              "test",
+              "msrv",
+              "docs"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "always()",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "clippy",
+            "docs",
+            "fmt",
+            "msrv",
+            "test (macos-latest, beta)",
+            "test (macos-latest, stable)",
+            "test (ubuntu-latest, beta)",
+            "test (ubuntu-latest, nightly)",
+            "test (ubuntu-latest, stable)",
+            "test (windows-latest, beta)",
+            "test (windows-latest, stable)"
+          ],
+          [
+            "ci-success"
+          ]
+        ],
+        "actions": [
+          "Swatinem/rust-cache@v2",
+          "actions/checkout@v4",
+          "dtolnay/rust-toolchain@1.70",
+          "dtolnay/rust-toolchain@master",
+          "dtolnay/rust-toolchain@nightly",
+          "dtolnay/rust-toolchain@stable"
+        ]
+      }
+    },
+    {
+      "name": "pull_request to master",
+      "input": {
+        "event": "pull_request",
+        "ref": "master"
+      },
+      "plan": {
+        "workflow": "oss-rust-ci.yml",
+        "name": "oss-rust-ci",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "master"
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "jobs": [
+          {
+            "id": "clippy",
+            "job_id": "clippy",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "docs",
+            "job_id": "docs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "fmt",
+            "job_id": "fmt",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "msrv",
+            "job_id": "msrv",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 3
+          },
+          {
+            "id": "test (macos-latest, beta)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "rust": "beta"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (macos-latest, stable)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "macos-latest",
+              "rust": "stable"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, beta)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "rust": "beta"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, nightly)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "rust": "nightly"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (ubuntu-latest, stable)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "ubuntu-latest",
+              "rust": "stable"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (windows-latest, beta)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "windows-latest",
+              "rust": "beta"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "test (windows-latest, stable)",
+            "job_id": "test",
+            "name": "test ${{ matrix.rust }} ${{ matrix.os }}",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "os": "windows-latest",
+              "rust": "stable"
+            },
+            "fail_fast": false,
+            "steps": 4
+          },
+          {
+            "id": "ci-success",
+            "job_id": "ci-success",
+            "name": "CI success",
+            "needs": [
+              "fmt",
+              "clippy",
+              "test",
+              "msrv",
+              "docs"
+            ],
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "always()",
+            "if_static": "deferred",
+            "steps": 1
+          }
+        ],
+        "stages": [
+          [
+            "clippy",
+            "docs",
+            "fmt",
+            "msrv",
+            "test (macos-latest, beta)",
+            "test (macos-latest, stable)",
+            "test (ubuntu-latest, beta)",
+            "test (ubuntu-latest, nightly)",
+            "test (ubuntu-latest, stable)",
+            "test (windows-latest, beta)",
+            "test (windows-latest, stable)"
+          ],
+          [
+            "ci-success"
+          ]
+        ],
+        "actions": [
+          "Swatinem/rust-cache@v2",
+          "actions/checkout@v4",
+          "dtolnay/rust-toolchain@1.70",
+          "dtolnay/rust-toolchain@master",
+          "dtolnay/rust-toolchain@nightly",
+          "dtolnay/rust-toolchain@stable"
+        ]
+      }
+    },
+    {
+      "name": "push main is not master",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "oss-rust-ci.yml",
+        "name": "oss-rust-ci",
+        "triggers": [
+          "pull_request",
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": false,
+        "reason": "branch main does not match the branches filter"
+      }
+    }
+  ]
+}

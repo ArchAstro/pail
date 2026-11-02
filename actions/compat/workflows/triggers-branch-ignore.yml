@@ -1,0 +1,13 @@
+name: triggers-branch-ignore
+on:
+  push:
+    branches-ignore: ["dependabot/**", "wip/*"]
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request_target:
+    types: [labeled]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make lint

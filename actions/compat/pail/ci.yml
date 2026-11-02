@@ -1,0 +1,96 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo test --release
+  model:
+    # Fast model checks only: artifacts in sync with the models, and the scenarios.
+    # Simulation, witnesses and mutation runs are manual: see model.yml.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: verify/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+  s3:
+    # The store contract and CAS tests against an S3 API (moto), as PAIL_TEST_STORES runs them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install 'moto[server]==5.2.4'
+      - name: Start moto
+        run: |
+          moto_server -p 19001 > moto.log 2>&1 &
+          for i in $(seq 1 30); do curl -s -o /dev/null localhost:19001 && break; sleep 1; done
+          curl -sf -X PUT localhost:19001/pail
+      - run: cargo test --release --test backends --test store_refinement
+        env:
+          PAIL_TEST_STORES: s3://pail/ci
+          AWS_ENDPOINT: http://localhost:19001
+          AWS_ALLOW_HTTP: "true"
+          AWS_ACCESS_KEY_ID: x
+          AWS_SECRET_ACCESS_KEY: x
+          AWS_REGION: us-east-1
+  gcs:
+    # The same tests against our GCS emulator run as a process (cargo test also runs it in-process).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin pail-gcs-emulator
+      - name: Start emulator
+        run: |
+          target/release/pail-gcs-emulator 127.0.0.1:19002 > emulator.log 2>&1 &
+          sleep 1
+      - run: cargo test --release --test backends --test store_refinement --test gcs_emulator
+        env:
+          PAIL_TEST_STORES: gs://pail/ci
+          PAIL_GCS_BASE_URL: http://127.0.0.1:19002
+  actions:
+    # pail-actions (actions/): plans every workflow of the compatibility corpus against its
+    # fixture. Tests that need docker or a pail binary skip themselves here.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: actions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: actions/go.mod
+          cache-dependency-path: actions/go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...

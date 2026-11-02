@@ -1,0 +1,285 @@
+{
+  "workflow": "workflows/contexts-env.yml",
+  "scenarios": [
+    {
+      "name": "push main",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "contexts-env.yml",
+        "name": "contexts-env",
+        "triggers": [
+          "pull_request",
+          "push",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "only-main",
+            "job_id": "only-main",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.ref == 'refs/heads/main' && github.event_name == 'push'",
+            "if_static": "true",
+            "steps": 1
+          },
+          {
+            "id": "only-prs",
+            "job_id": "only-prs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "only-tags",
+            "job_id": "only-tags",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "startsWith(github.ref, 'refs/tags/')",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "show",
+            "job_id": "show",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 4
+          }
+        ],
+        "stages": [
+          [
+            "only-main",
+            "only-prs",
+            "only-tags",
+            "show"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "push tag",
+      "input": {
+        "event": "push",
+        "ref": "refs/tags/v1"
+      },
+      "plan": {
+        "workflow": "contexts-env.yml",
+        "name": "contexts-env",
+        "triggers": [
+          "pull_request",
+          "push",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "refs/tags/v1"
+        },
+        "triggered": true,
+        "reason": "push to tag v1",
+        "jobs": [
+          {
+            "id": "only-main",
+            "job_id": "only-main",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.ref == 'refs/heads/main' && github.event_name == 'push'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "only-prs",
+            "job_id": "only-prs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "only-tags",
+            "job_id": "only-tags",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "startsWith(github.ref, 'refs/tags/')",
+            "if_static": "true",
+            "steps": 1
+          },
+          {
+            "id": "show",
+            "job_id": "show",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 4
+          }
+        ],
+        "stages": [
+          [
+            "only-main",
+            "only-prs",
+            "only-tags",
+            "show"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "pull_request",
+      "input": {
+        "event": "pull_request",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "contexts-env.yml",
+        "name": "contexts-env",
+        "triggers": [
+          "pull_request",
+          "push",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "jobs": [
+          {
+            "id": "only-main",
+            "job_id": "only-main",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.ref == 'refs/heads/main' && github.event_name == 'push'",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "only-prs",
+            "job_id": "only-prs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request'",
+            "if_static": "true",
+            "steps": 1
+          },
+          {
+            "id": "only-tags",
+            "job_id": "only-tags",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "startsWith(github.ref, 'refs/tags/')",
+            "if_static": "deferred",
+            "steps": 1
+          },
+          {
+            "id": "show",
+            "job_id": "show",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 4
+          }
+        ],
+        "stages": [
+          [
+            "only-main",
+            "only-prs",
+            "only-tags",
+            "show"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "workflow_dispatch",
+      "input": {
+        "event": "workflow_dispatch",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "contexts-env.yml",
+        "name": "contexts-env",
+        "triggers": [
+          "pull_request",
+          "push",
+          "workflow_dispatch"
+        ],
+        "input": {
+          "event": "workflow_dispatch",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "workflow_dispatch is in on:",
+        "jobs": [
+          {
+            "id": "only-main",
+            "job_id": "only-main",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.ref == 'refs/heads/main' && github.event_name == 'push'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "only-prs",
+            "job_id": "only-prs",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "github.event_name == 'pull_request'",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "only-tags",
+            "job_id": "only-tags",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "if": "startsWith(github.ref, 'refs/tags/')",
+            "if_static": "false",
+            "steps": 1
+          },
+          {
+            "id": "show",
+            "job_id": "show",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "steps": 4
+          }
+        ],
+        "stages": [
+          [
+            "only-main",
+            "only-prs",
+            "only-tags",
+            "show"
+          ]
+        ]
+      }
+    }
+  ]
+}

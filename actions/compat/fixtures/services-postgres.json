@@ -1,0 +1,48 @@
+{
+  "workflow": "workflows/services-postgres.yml",
+  "scenarios": [
+    {
+      "name": "pull_request",
+      "input": {
+        "event": "pull_request",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "services-postgres.yml",
+        "name": "services-postgres",
+        "triggers": [
+          "pull_request"
+        ],
+        "input": {
+          "event": "pull_request",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "pull_request matches",
+        "jobs": [
+          {
+            "id": "integration",
+            "job_id": "integration",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "services": [
+              "postgres",
+              "redis"
+            ],
+            "container": "rust:1.80-bookworm",
+            "steps": 2
+          }
+        ],
+        "stages": [
+          [
+            "integration"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4"
+        ]
+      }
+    }
+  ]
+}

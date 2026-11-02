@@ -1,0 +1,191 @@
+{
+  "workflow": "workflows/matrix-basic.yml",
+  "scenarios": [
+    {
+      "name": "push",
+      "input": {
+        "event": "push",
+        "ref": "main"
+      },
+      "plan": {
+        "workflow": "matrix-basic.yml",
+        "name": "matrix-basic",
+        "triggers": [
+          "push"
+        ],
+        "input": {
+          "event": "push",
+          "ref": "main"
+        },
+        "triggered": true,
+        "reason": "push to branch main",
+        "jobs": [
+          {
+            "id": "default-fail-fast (1)",
+            "job_id": "default-fail-fast",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 1
+            },
+            "fail_fast": true,
+            "steps": 1
+          },
+          {
+            "id": "default-fail-fast (2)",
+            "job_id": "default-fail-fast",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 2
+            },
+            "fail_fast": true,
+            "steps": 1
+          },
+          {
+            "id": "default-fail-fast (3)",
+            "job_id": "default-fail-fast",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 3
+            },
+            "fail_fast": true,
+            "steps": 1
+          },
+          {
+            "id": "default-fail-fast (4)",
+            "job_id": "default-fail-fast",
+            "runs_on": [
+              "ubuntu-latest"
+            ],
+            "matrix": {
+              "shard": 4
+            },
+            "fail_fast": true,
+            "steps": 1
+          },
+          {
+            "id": "test (macos-latest, 18)",
+            "job_id": "test",
+            "name": "test (${{ matrix.os }}, node ${{ matrix.node }})",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "node": 18,
+              "os": "macos-latest"
+            },
+            "fail_fast": false,
+            "max_parallel": 3,
+            "continue_on_error": "${{ matrix.experimental == true }}",
+            "steps": 3
+          },
+          {
+            "id": "test (macos-latest, 20)",
+            "job_id": "test",
+            "name": "test (${{ matrix.os }}, node ${{ matrix.node }})",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "node": 20,
+              "os": "macos-latest"
+            },
+            "fail_fast": false,
+            "max_parallel": 3,
+            "continue_on_error": "${{ matrix.experimental == true }}",
+            "steps": 3
+          },
+          {
+            "id": "test (ubuntu-latest, 18)",
+            "job_id": "test",
+            "name": "test (${{ matrix.os }}, node ${{ matrix.node }})",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "node": 18,
+              "os": "ubuntu-latest"
+            },
+            "fail_fast": false,
+            "max_parallel": 3,
+            "continue_on_error": "${{ matrix.experimental == true }}",
+            "steps": 3
+          },
+          {
+            "id": "test (ubuntu-latest, 20, true)",
+            "job_id": "test",
+            "name": "test (${{ matrix.os }}, node ${{ matrix.node }})",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "coverage": true,
+              "node": 20,
+              "os": "ubuntu-latest"
+            },
+            "fail_fast": false,
+            "max_parallel": 3,
+            "continue_on_error": "${{ matrix.experimental == true }}",
+            "steps": 3
+          },
+          {
+            "id": "test (ubuntu-latest, 22, true)",
+            "job_id": "test",
+            "name": "test (${{ matrix.os }}, node ${{ matrix.node }})",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "experimental": true,
+              "node": 22,
+              "os": "ubuntu-latest"
+            },
+            "fail_fast": false,
+            "max_parallel": 3,
+            "continue_on_error": "${{ matrix.experimental == true }}",
+            "steps": 3
+          },
+          {
+            "id": "test (windows-latest, 20)",
+            "job_id": "test",
+            "name": "test (${{ matrix.os }}, node ${{ matrix.node }})",
+            "runs_on": [
+              "${{ matrix.os }}"
+            ],
+            "matrix": {
+              "node": 20,
+              "os": "windows-latest"
+            },
+            "fail_fast": false,
+            "max_parallel": 3,
+            "continue_on_error": "${{ matrix.experimental == true }}",
+            "steps": 3
+          }
+        ],
+        "stages": [
+          [
+            "default-fail-fast (1)",
+            "default-fail-fast (2)",
+            "default-fail-fast (3)",
+            "default-fail-fast (4)",
+            "test (macos-latest, 18)",
+            "test (macos-latest, 20)",
+            "test (ubuntu-latest, 18)",
+            "test (ubuntu-latest, 20, true)",
+            "test (ubuntu-latest, 22, true)",
+            "test (windows-latest, 20)"
+          ]
+        ],
+        "actions": [
+          "actions/checkout@v4",
+          "actions/setup-node@v4"
+        ]
+      }
+    }
+  ]
+}
