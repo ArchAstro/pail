@@ -416,7 +416,8 @@ sibling-prefix object) changes from the bucket's own notifications (GCS Pub/Sub)
 polling, resumes from a `--cursor`, and treats every notification as a hint (a lost one
 only delays an event; modelled in `verify/events/`), and `pail clone --at`
 checks out the exact commit an event names. `extensions/pail-pr` and `extensions/pail-ci`
-are working prototypes; see [docs/extending.md](docs/extending.md).
+are working prototypes; see [docs/extending.md](docs/extending.md). The storage contract
+for the planned workflow system (pail Actions) is [docs/actions.md](docs/actions.md).
 
 ## Auth: credential providers are extensions
 
