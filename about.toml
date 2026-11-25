@@ -1,0 +1,19 @@
+# cargo-about config for THIRD_PARTY_NOTICES.md: the crates linked into the released `pail`
+# binary on its release targets. Regenerate with scripts/third-party-notices.sh.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+]
+# The release targets in .github/workflows/release.yml.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+ignore-dev-dependencies = true
+# The workspace's own crate (publish = false) is covered by LICENSE.
+private = { ignore = true }
