@@ -21,6 +21,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo test --release
+  notices:
+    # THIRD_PARTY_NOTICES.md (shipped in every release archive) matches Cargo.lock.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: scripts/third-party-notices.sh --check
   model:
     # Fast model checks only: artifacts in sync with the models, and the scenarios.
     # Simulation, witnesses and mutation runs are manual: see model.yml.

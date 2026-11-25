@@ -6,6 +6,8 @@ repository = "https://github.com/ArchAstro/pail"
 homepage = "https://pail.build"
 edition = "2024"
 description = "A simple, serverless version control system stored in S3/GCS"
+# Released as binaries (see .github/workflows/release.yml), not to crates.io.
+publish = false
 
 [dependencies]
 anyhow = "1"
